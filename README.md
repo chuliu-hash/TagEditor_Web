@@ -22,7 +22,7 @@ pip install -r requirements.txt
 
 ### 配置
 
-在 .env 文件中填写翻译及打标配置：
+在 .env 文件中填写翻译及打标配置。
 
 ### 启动
 
