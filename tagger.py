@@ -55,7 +55,8 @@ def wd14_load_model(model_path):
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"标签文件不存在: {csv_path}")
 
-    session = onnxruntime.InferenceSession(onnx_path, providers=['CPUExecutionProvider'])
+    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+    session = onnxruntime.InferenceSession(onnx_path, providers=providers)
     label_df = pd.read_csv(csv_path)
 
     _wd14_model_cache = {'session': session, 'label_df': label_df, 'model_name': model_path}
