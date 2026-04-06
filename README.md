@@ -35,7 +35,7 @@ python app.py
 ## 数据存储
 
 - `uploads/` — 图片及对应 txt 标签文件（如 `photo.png`-`photo.txt`）
-- `translation_cache.json` — 标签翻译缓存（英文 key → 中文 value，支持反向查找）
+- `translation_cache.json` — 标签翻译缓存（英文 key → 中文 value）
 
 ## 环境要求
 
