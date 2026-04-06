@@ -1,6 +1,6 @@
-flask
-requests
-numpy
-onnxruntime
-opencv-python
-pandas
+flask==3.1.3
+requests==2.33.1
+numpy==1.26.4
+onnxruntime-gpu==1.18.0  # cuda 12.x, cudnn 8.x: pip install onnxruntime-gpu==1.18.0 --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
+opencv-python==4.13.0.92
+pandas==3.0.2
