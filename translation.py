@@ -3,9 +3,10 @@ import os
 import re
 import json
 import requests
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify, current_app, Response
 from pathlib import Path
 from config import load_env, get_llm_config
+from sse_utils import sse_event
 
 translation_bp = Blueprint('translation', __name__)
 
@@ -165,7 +166,7 @@ def translate_tags():
 
 @translation_bp.route('/batch_translate', methods=['POST'])
 def batch_translate():
-    """扫描所有标签文件，将未翻译的标签批量翻译并写回"""
+    """扫描所有标签文件，将未翻译的标签批量翻译并写回（SSE 流式）"""
     data = request.get_json()
     src = data.get('src', 'en')
     dst = data.get('dst', 'zh')
@@ -206,41 +207,54 @@ def batch_translate():
         'Authorization': f'Bearer {cfg["api_key"]}',
     }
 
-    translated_map = {}
     batch_size = 50
-    errors = []
-    for i in range(0, len(tag_list), batch_size):
-        batch = tag_list[i:i+batch_size]
-        payload = {
-            'model': cfg['model'],
-            'messages': [
-                {'role': 'system', 'content': cfg['prompt'].format(src_name=src_name, dst_name=dst_name)},
-                {'role': 'user', 'content': json.dumps(batch, ensure_ascii=False)}
-            ],
-            'temperature': 0.3,
-        }
-        try:
-            response = requests.post(cfg['api_url'], headers=headers, json=payload, timeout=120)
-            result = response.json()
-            if 'error' in result:
-                errors.append(result['error'].get('message', '未知错误'))
-                continue
-            content = result['choices'][0]['message']['content'].strip()
-            match = re.search(r'\[.*?\]', content, re.DOTALL)
-            if match:
-                translations = json.loads(match.group())
-            else:
-                translations = [content] * len(batch)
-            while len(translations) < len(batch):
-                translations.append('')
-            translations = translations[:len(batch)]
-            for j, tag in enumerate(batch):
-                translated_map[tag] = translations[j]
-                tag_lower = tag.lower().strip()
-                if tag_lower and translations[j].strip():
-                    cache[tag_lower] = translations[j]
-        except Exception as e:
-            errors.append(str(e))
+    total_batches = (len(tag_list) + batch_size - 1) // batch_size
 
-    save_cache(cache)
-    return jsonify({'translated': len(translated_map), 'files': len(file_tags), 'errors': errors})
+    def generate():
+        translated_map = {}
+        error_count = 0
+
+        for batch_idx, i in enumerate(range(0, len(tag_list), batch_size), start=1):
+            batch = tag_list[i:i+batch_size]
+            batch_desc = f"标签 {i+1}-{min(i+batch_size, len(tag_list))}"
+
+            yield sse_event('progress', {'current': batch_idx, 'total': total_batches, 'item': batch_desc})
+
+            payload = {
+                'model': cfg['model'],
+                'messages': [
+                    {'role': 'system', 'content': cfg['prompt'].format(src_name=src_name, dst_name=dst_name)},
+                    {'role': 'user', 'content': json.dumps(batch, ensure_ascii=False)}
+                ],
+                'temperature': 0.3,
+            }
+            try:
+                response = requests.post(cfg['api_url'], headers=headers, json=payload, timeout=120)
+                result = response.json()
+                if 'error' in result:
+                    error_count += 1
+                    yield sse_event('error', {'item': batch_desc, 'error': result['error'].get('message', '未知错误')})
+                    continue
+                content = result['choices'][0]['message']['content'].strip()
+                match = re.search(r'\[.*?\]', content, re.DOTALL)
+                if match:
+                    translations = json.loads(match.group())
+                else:
+                    translations = [content] * len(batch)
+                while len(translations) < len(batch):
+                    translations.append('')
+                translations = translations[:len(batch)]
+                for j, tag in enumerate(batch):
+                    translated_map[tag] = translations[j]
+                    tag_lower = tag.lower().strip()
+                    if tag_lower and translations[j].strip():
+                        cache[tag_lower] = translations[j]
+            except Exception as e:
+                error_count += 1
+                yield sse_event('error', {'item': batch_desc, 'error': str(e)})
+
+        save_cache(cache)
+        yield sse_event('complete', {'translated': len(translated_map), 'files': len(file_tags), 'errors': error_count})
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})

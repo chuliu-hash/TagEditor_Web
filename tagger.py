@@ -4,8 +4,9 @@ import json
 import base64
 import numpy as np
 import requests
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify, current_app, Response
 from config import get_vision_config, get_wd14_config, get_image_files
+from sse_utils import sse_event
 
 tagger_bp = Blueprint('tagger', __name__)
 
@@ -94,7 +95,7 @@ def _collect_untagged(upload_dir):
 
 @tagger_bp.route('/auto_tag', methods=['POST'])
 def auto_tag():
-    """批量自动打标：对无标签的图片调用视觉模型生成标签"""
+    """批量自动打标（SSE 流式）：对无标签的图片调用视觉模型生成标签"""
     vcfg = get_vision_config()
     if not vcfg['api_url'] or not vcfg['model']:
         return jsonify({'error': '未配置视觉模型（VISION_API_URL / VISION_MODEL）'}), 400
@@ -108,57 +109,67 @@ def auto_tag():
     if not to_tag:
         return jsonify({'tagged': 0, 'skipped': skipped, 'errors': [], 'message': '所有图片已有标签'})
 
-    tagged = 0
-    errors = []
+    total = len(to_tag)
     headers = {
         'Content-Type': 'application/json',
         'Authorization': f'Bearer {vcfg["api_key"]}',
     }
 
-    for filename in to_tag:
-        file_path = os.path.join(upload_dir, filename)
-        ext = os.path.splitext(filename)[1].lstrip('.')
-        mime_map = {'jpg': 'jpeg', 'jpeg': 'jpeg', 'png': 'png', 'gif': 'gif'}
-        mime = f"image/{mime_map.get(ext, 'jpeg')}"
+    def generate():
+        tagged = 0
+        error_count = 0
 
-        try:
-            with open(file_path, 'rb') as f:
-                img_b64 = base64.b64encode(f.read()).decode('utf-8')
+        for idx, filename in enumerate(to_tag, start=1):
+            yield sse_event('progress', {'current': idx, 'total': total, 'item': filename})
 
-            payload = {
-                'model': vcfg['model'],
-                'messages': [
-                    {'role': 'system', 'content': vcfg['prompt']},
-                    {'role': 'user', 'content': [
-                        {'type': 'image_url', 'image_url': {'url': f'data:{mime};base64,{img_b64}'}},
-                        {'type': 'text', 'text': '开始分析并输出标签：'}
-                    ]}
-                ],
-                'temperature': 0.3,
-            }
+            file_path = os.path.join(upload_dir, filename)
+            ext = os.path.splitext(filename)[1].lstrip('.')
+            mime_map = {'jpg': 'jpeg', 'jpeg': 'jpeg', 'png': 'png', 'gif': 'gif'}
+            mime = f"image/{mime_map.get(ext, 'jpeg')}"
 
-            response = requests.post(vcfg['api_url'], headers=headers, json=payload, timeout=120)
-            result = response.json()
+            try:
+                with open(file_path, 'rb') as f:
+                    img_b64 = base64.b64encode(f.read()).decode('utf-8')
 
-            if 'error' in result:
-                errors.append({'file': filename, 'error': result['error'].get('message', '未知错误')})
-                continue
+                payload = {
+                    'model': vcfg['model'],
+                    'messages': [
+                        {'role': 'system', 'content': vcfg['prompt']},
+                        {'role': 'user', 'content': [
+                            {'type': 'image_url', 'image_url': {'url': f'data:{mime};base64,{img_b64}'}},
+                            {'type': 'text', 'text': '开始分析并输出标签：'}
+                        ]}
+                    ],
+                    'temperature': 0.3,
+                }
 
-            tags = result['choices'][0]['message']['content'].strip()
-            txt_path = os.path.join(upload_dir, f"{os.path.splitext(filename)[0]}.txt")
-            with open(txt_path, 'w', encoding='utf-8') as f:
-                f.write(tags)
-            tagged += 1
+                response = requests.post(vcfg['api_url'], headers=headers, json=payload, timeout=120)
+                result = response.json()
 
-        except Exception as e:
-            errors.append({'file': filename, 'error': str(e)})
+                if 'error' in result:
+                    error_count += 1
+                    yield sse_event('error', {'item': filename, 'error': result['error'].get('message', '未知错误')})
+                    continue
 
-    return jsonify({'tagged': tagged, 'skipped': skipped, 'errors': errors})
+                tags = result['choices'][0]['message']['content'].strip()
+                txt_path = os.path.join(upload_dir, f"{os.path.splitext(filename)[0]}.txt")
+                with open(txt_path, 'w', encoding='utf-8') as f:
+                    f.write(tags)
+                tagged += 1
+
+            except Exception as e:
+                error_count += 1
+                yield sse_event('error', {'item': filename, 'error': str(e)})
+
+        yield sse_event('complete', {'tagged': tagged, 'skipped': skipped, 'errors': error_count})
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
 @tagger_bp.route('/auto_tag_wd14', methods=['POST'])
 def auto_tag_wd14():
-    """批量自动打标（WD14 本地模型）：对无标签的图片使用 WD14 tagger 生成标签"""
+    """批量自动打标（WD14 本地模型，SSE 流式）：对无标签的图片使用 WD14 tagger 生成标签"""
     cfg = get_wd14_config()
     upload_dir = current_app.config['UPLOAD_FOLDER']
 
@@ -168,36 +179,49 @@ def auto_tag_wd14():
     if not to_tag:
         return jsonify({'tagged': 0, 'skipped': skipped, 'errors': [], 'message': '所有图片已有标签'})
 
-    try:
-        model_cache = wd14_load_model(cfg['model_path'])
-    except Exception as e:
-        return jsonify({'error': f'WD14 模型加载失败: {str(e)}'}), 500
+    total = len(to_tag)
 
-    session = model_cache['session']
-    label_df = model_cache['label_df']
-    input_name = session.get_inputs()[0].name
+    def generate():
+        tagged = 0
+        error_count = 0
 
-    tagged = 0
-    errors = []
+        yield sse_event('progress', {'current': 0, 'total': total, 'item': '正在加载 WD14 模型...'})
 
-    for filename in to_tag:
-        file_path = os.path.join(upload_dir, filename)
         try:
-            img = wd14_preprocess_image(file_path)
-            probs = session.run(None, {input_name: img})[0][0]
-            tags = wd14_filter_tags(
-                label_df, probs,
-                cfg['general_threshold'], cfg['character_threshold'],
-                cfg['excluded_tags']
-            )
-            if tags:
-                txt_path = os.path.join(upload_dir, f"{os.path.splitext(filename)[0]}.txt")
-                with open(txt_path, 'w', encoding='utf-8') as f:
-                    f.write(tags)
-                tagged += 1
-            else:
-                errors.append({'file': filename, 'error': '未产生有效标签'})
+            model_cache = wd14_load_model(cfg['model_path'])
         except Exception as e:
-            errors.append({'file': filename, 'error': str(e)})
+            yield sse_event('fatal', {'error': f'WD14 模型加载失败: {str(e)}'})
+            return
 
-    return jsonify({'tagged': tagged, 'skipped': skipped, 'errors': errors})
+        session = model_cache['session']
+        label_df = model_cache['label_df']
+        input_name = session.get_inputs()[0].name
+
+        for idx, filename in enumerate(to_tag, start=1):
+            yield sse_event('progress', {'current': idx, 'total': total, 'item': filename})
+
+            file_path = os.path.join(upload_dir, filename)
+            try:
+                img = wd14_preprocess_image(file_path)
+                probs = session.run(None, {input_name: img})[0][0]
+                tags = wd14_filter_tags(
+                    label_df, probs,
+                    cfg['general_threshold'], cfg['character_threshold'],
+                    cfg['excluded_tags']
+                )
+                if tags:
+                    txt_path = os.path.join(upload_dir, f"{os.path.splitext(filename)[0]}.txt")
+                    with open(txt_path, 'w', encoding='utf-8') as f:
+                        f.write(tags)
+                    tagged += 1
+                else:
+                    error_count += 1
+                    yield sse_event('error', {'item': filename, 'error': '未产生有效标签'})
+            except Exception as e:
+                error_count += 1
+                yield sse_event('error', {'item': filename, 'error': str(e)})
+
+        yield sse_event('complete', {'tagged': tagged, 'skipped': skipped, 'errors': error_count})
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
