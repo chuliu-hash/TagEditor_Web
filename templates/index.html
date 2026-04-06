@@ -236,6 +236,26 @@
         </div>
     </div>
 
+    <!-- 进度弹窗 -->
+    <div id="progress-modal" class="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center hidden">
+        <div class="bg-white rounded-xl shadow-2xl w-[480px] p-6">
+            <h3 id="progress-title" class="text-lg font-semibold text-gray-800 mb-1">处理中</h3>
+            <p id="progress-subtitle" class="text-sm text-gray-400 mb-4"></p>
+            <div class="w-full bg-gray-200 rounded-full h-3 mb-3 overflow-hidden">
+                <div id="progress-bar" class="bg-primary h-3 rounded-full transition-all duration-300 ease-out" style="width: 0%"></div>
+            </div>
+            <div class="flex justify-between text-sm text-gray-500 mb-3">
+                <span id="progress-count">0 / 0</span>
+                <span id="progress-percent">0%</span>
+            </div>
+            <div class="text-sm text-gray-600 mb-2 truncate" id="progress-item"></div>
+            <div id="progress-errors" class="hidden max-h-32 overflow-y-auto text-sm text-red-600 bg-red-50 rounded-lg p-3 mb-4 space-y-1"></div>
+            <div class="flex justify-end">
+                <button id="progress-close-btn" class="hidden px-4 py-2 text-sm bg-primary hover:bg-primary/90 text-white rounded-lg transition-colors" onclick="closeProgressModal()">关闭</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 通知提示框 -->
     <div id="notification" class="fixed bottom-5 right-5 px-5 py-3 rounded-lg shadow-lg transform translate-y-20 opacity-0 transition-all duration-300 flex items-center z-50 text-sm"></div>
 
@@ -550,17 +570,15 @@
             const btn = document.getElementById('btn-auto-tag');
             btn.disabled = true; btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-2"></i> <span>打标中...</span>';
             const url = (method === 'wd14') ? '/auto_tag_wd14' : '/auto_tag';
-            fetch(url, {method: 'POST'})
-                .then(r => r.json())
-                .then(data => {
-                    if (data.error) { showNotification(data.error, 'error'); return; }
+            const label = (method === 'wd14') ? 'WD14 本地打标' : 'API 视觉模型打标';
+            executeWithProgress(url, {}, label, '正在为无标签图片自动生成标签...', function(data) {
+                btn.disabled = false; btn.innerHTML = '<i class="fa fa-magic mr-2"></i> <span>自动打标</span>';
+                if (data.tagged !== undefined && !data._error) {
                     const msg = '打标完成：新增 ' + data.tagged + ' 张，跳过 ' + data.skipped + ' 张'
-                        + (data.errors.length ? '，失败 ' + data.errors.length + ' 张' : '');
-                    showNotification(msg, data.errors.length ? 'warning' : 'success');
-                    setTimeout(() => location.reload(), 1500);
-                })
-                .catch(() => showNotification('打标请求失败', 'error'))
-                .finally(() => { btn.disabled = false; btn.innerHTML = '<i class="fa fa-magic mr-2"></i> <span>自动打标</span>'; });
+                        + (data.errors ? '，失败 ' + data.errors + ' 张' : '');
+                    showNotification(msg, data.errors ? 'warning' : 'success');
+                }
+            });
         }
 
         // === 添加触发词 ===
@@ -600,26 +618,18 @@
         function batchTranslate() {
             const btn = document.getElementById('btn-batch-translate');
             btn.disabled = true; btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-2"></i> <span>翻译中...</span>';
-            fetch('/batch_translate', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({src: 'en', dst: 'zh'})
-            })
-            .then(r => r.json())
-            .then(data => {
-                if (data.error) { showNotification(data.error, 'error'); return; }
-                if (data.translated === 0) {
-                    showNotification('没有需要翻译的标签，所有标签已有翻译缓存', 'info');
-                    return;
+            executeWithProgress('/batch_translate', {src: 'en', dst: 'zh'}, '批量翻译标签', '正在翻译所有未缓存的标签...', function(data) {
+                btn.disabled = false; btn.innerHTML = '<i class="fa fa-language mr-2"></i> <span>批量翻译</span>';
+                if (data.translated !== undefined && !data._error) {
+                    if (data.translated === 0) {
+                        showNotification('没有需要翻译的标签，所有标签已有翻译缓存', 'info');
+                    } else {
+                        const msg = '翻译完成：' + data.translated + ' 个标签，涉及 ' + data.files + ' 个文件'
+                            + (data.errors ? '，失败 ' + data.errors + ' 批' : '');
+                        showNotification(msg, data.errors ? 'warning' : 'success');
+                    }
                 }
-                const errors = data.errors || [];
-                const msg = '翻译完成：' + data.translated + ' 个标签，涉及 ' + data.files + ' 个文件'
-                    + (errors.length ? '，失败 ' + errors.length + ' 批' : '');
-                showNotification(msg, errors.length ? 'warning' : 'success');
-                setTimeout(() => location.reload(), 1500);
-            })
-            .catch(() => showNotification('批量翻译失败', 'error'))
-            .finally(() => { btn.disabled = false; btn.innerHTML = '<i class="fa fa-language mr-2"></i> <span>批量翻译</span>'; });
+            });
         }
 
         // === 防止刷新/关闭丢失未保存标签 ===
@@ -629,6 +639,139 @@
                 e.returnValue = '';
             }
         });
+
+        // === SSE 进度流式消费 ===
+        function executeWithProgress(url, body, title, subtitle, onComplete) {
+            const modal = document.getElementById('progress-modal');
+            const bar = document.getElementById('progress-bar');
+            const count = document.getElementById('progress-count');
+            const pct = document.getElementById('progress-percent');
+            const itemEl = document.getElementById('progress-item');
+            const errBox = document.getElementById('progress-errors');
+            const closeBtn = document.getElementById('progress-close-btn');
+
+            // 重置（不立即显示，等确认是 SSE 流后才打开）
+            function openModal() {
+                document.getElementById('progress-title').textContent = title;
+                document.getElementById('progress-subtitle').textContent = subtitle;
+                bar.style.width = '0%';
+                bar.classList.remove('bg-red-500'); bar.classList.add('bg-primary');
+                count.textContent = '0 / 0';
+                pct.textContent = '0%';
+                itemEl.textContent = '';
+                errBox.innerHTML = ''; errBox.classList.add('hidden');
+                closeBtn.classList.add('hidden');
+                modal.classList.remove('hidden');
+            }
+
+            fetch(url, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            }).then(function(response) {
+                var contentType = response.headers.get('Content-Type') || '';
+                // 非 SSE 响应（前置校验返回的 JSON）— 不弹窗，直接通知
+                if (contentType.includes('application/json')) {
+                    return response.json().then(function(data) {
+                        if (data.error) {
+                            showNotification(data.error, 'error');
+                        } else if (data.message) {
+                            showNotification(data.message, 'info');
+                        }
+                        if (onComplete) onComplete({tagged: 0, skipped: 0, errors: 0, translated: 0, files: 0, _noReload: true});
+                        return null;
+                    });
+                }
+                if (!response.ok) {
+                    return response.text().then(function(text) {
+                        var msg = '请求失败';
+                        try { msg = JSON.parse(text).error || msg; } catch(e) {}
+                        throw new Error(msg);
+                    });
+                }
+
+                // SSE 流式消费 — 确认是流式响应，打开弹窗
+                openModal();
+                var reader = response.body.getReader();
+                var decoder = new TextDecoder();
+                var buffer = '';
+                var currentEventType = '';
+
+                function processLines() {
+                    var lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+                    for (var i = 0; i < lines.length; i++) {
+                        var line = lines[i];
+                        if (line.startsWith('event: ')) {
+                            currentEventType = line.slice(7).trim();
+                        } else if (line.startsWith('data: ')) {
+                            try {
+                                var data = JSON.parse(line.slice(6));
+                            } catch(e) { currentEventType = ''; continue; }
+                            if (currentEventType === 'progress') {
+                                var percent = Math.round((data.current / data.total) * 100);
+                                bar.style.width = percent + '%';
+                                count.textContent = data.current + ' / ' + data.total;
+                                pct.textContent = percent + '%';
+                                itemEl.textContent = data.item || '';
+                            } else if (currentEventType === 'error') {
+                                errBox.classList.remove('hidden');
+                                var div = document.createElement('div');
+                                div.textContent = (data.item ? data.item + ': ' : '') + data.error;
+                                errBox.appendChild(div);
+                                errBox.scrollTop = errBox.scrollHeight;
+                                // 出错即中断，显示关闭按钮
+                                reader.cancel();
+                                bar.classList.remove('bg-primary'); bar.classList.add('bg-red-500');
+                                closeBtn.classList.remove('hidden');
+                                if (onComplete) onComplete({tagged: 0, skipped: 0, errors: 1, translated: 0, files: 0, _error: true});
+                                return;
+                            } else if (currentEventType === 'complete') {
+                                bar.style.width = '100%';
+                                pct.textContent = '100%';
+                                itemEl.textContent = '';
+                                closeBtn.classList.remove('hidden');
+                                if (onComplete) onComplete(data);
+                            } else if (currentEventType === 'fatal') {
+                                bar.style.width = '100%';
+                                bar.classList.remove('bg-primary'); bar.classList.add('bg-red-500');
+                                itemEl.textContent = data.error;
+                                closeBtn.classList.remove('hidden');
+                                if (onComplete) onComplete({tagged: 0, skipped: 0, errors: 1, translated: 0, files: 0, _error: true});
+                            }
+                            currentEventType = '';
+                        }
+                    }
+                }
+
+                function read() {
+                    reader.read().then(function(result) {
+                        if (result.done) {
+                            // 流结束，flush 残留数据
+                            if (buffer.trim()) {
+                                buffer += '\n';
+                                processLines();
+                            }
+                            return;
+                        }
+                        buffer += decoder.decode(result.value, {stream: true});
+                        processLines();
+                        read();
+                    });
+                }
+                read();
+                return null;
+            }).catch(function(err) {
+                showNotification(err.message || '请求失败', 'error');
+                if (onComplete) onComplete({tagged: 0, skipped: 0, errors: 0, translated: 0, files: 0, _error: true});
+            });
+        }
+
+        function closeProgressModal() {
+            document.getElementById('progress-modal').classList.add('hidden');
+            // 进度弹窗关闭时刷新页面以加载最新数据
+            location.reload();
+        }
 
         // === 通知 ===
         let _notifyTimer = null;
