@@ -1,0 +1,110 @@
+# -*- coding: utf-8 -*-
+import os
+from flask import Blueprint, request, redirect, url_for, jsonify, send_from_directory, current_app
+from config import allowed_file, safe_filename
+
+file_ops_bp = Blueprint('file_ops', __name__)
+
+
+@file_ops_bp.route('/upload', methods=['POST'])
+def upload_files():
+    """上传文件"""
+    if 'files' not in request.files:
+        return redirect(request.url)
+
+    files = request.files.getlist('files')
+    upload_dir = current_app.config['UPLOAD_FOLDER']
+
+    for file in files:
+        if file.filename == '':
+            continue
+        if file and (allowed_file(file.filename, 'image') or allowed_file(file.filename, 'text')):
+            filename = safe_filename(file.filename)
+            save_path = os.path.join(upload_dir, filename)
+            print(f"[上传] {filename} -> {save_path}")
+            file.save(save_path)
+
+    return redirect(url_for('index'))
+
+
+@file_ops_bp.route('/get_caption/<image_name>')
+def get_caption(image_name):
+    """获取图片对应的标签，同时返回翻译缓存"""
+    from translation import load_cache, lookup_tag
+    base_name = os.path.splitext(image_name)[0]
+    caption_file = f"{base_name}.txt"
+    caption_path = os.path.join(current_app.config['UPLOAD_FOLDER'], caption_file)
+
+    caption = ""
+    if os.path.exists(caption_path):
+        try:
+            with open(caption_path, 'r', encoding='utf-8') as f:
+                caption = f.read()
+        except Exception as e:
+            print(f"读取标签文件失败: {str(e)}")
+
+    # 一次性返回标签 + 翻译
+    tags = [t.strip() for t in caption.split(',') if t.strip()] if caption else []
+    cache = load_cache()
+    translations = []
+    for tag in tags:
+        translations.append(lookup_tag(tag.lower(), cache))
+
+    return jsonify({'caption': caption, 'translations': translations})
+
+
+@file_ops_bp.route('/save_caption/<image_name>', methods=['POST'])
+def save_caption(image_name):
+    """保存标签到文件"""
+    data = request.get_json()
+    content = data.get('content', '')
+
+    base_name = os.path.splitext(image_name)[0]
+    caption_file = f"{base_name}.txt"
+    caption_path = os.path.join(current_app.config['UPLOAD_FOLDER'], caption_file)
+
+    try:
+        with open(caption_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        return jsonify({'success': True})
+    except Exception as e:
+        print(f"保存标签文件失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@file_ops_bp.route('/clear_all', methods=['POST'])
+def clear_all():
+    """清空所有上传的文件"""
+    upload_dir = current_app.config['UPLOAD_FOLDER']
+    for filename in os.listdir(upload_dir):
+        file_path = os.path.join(upload_dir, filename)
+        try:
+            if os.path.isfile(file_path):
+                os.unlink(file_path)
+        except Exception as e:
+            print(f"删除文件失败: {str(e)}")
+
+    return redirect(url_for('index'))
+
+
+@file_ops_bp.route('/delete/<image_name>', methods=['POST'])
+def delete_image(image_name):
+    """删除图片及对应的txt文件"""
+    filename = safe_filename(image_name)
+    upload_dir = os.path.abspath(current_app.config['UPLOAD_FOLDER'])
+    file_path = os.path.abspath(os.path.join(upload_dir, filename))
+    if not file_path.startswith(upload_dir):
+        return jsonify({'success': False, 'error': '非法路径'}), 400
+    if os.path.exists(file_path):
+        os.unlink(file_path)
+    base_name = os.path.splitext(filename)[0]
+    txt_path = os.path.join(upload_dir, f"{base_name}.txt")
+    if os.path.exists(txt_path):
+        os.unlink(txt_path)
+    return jsonify({'success': True})
+
+
+@file_ops_bp.route('/uploads/<filename>')
+def uploaded_file(filename):
+    """提供上传文件的访问"""
+    return send_from_directory(current_app.config['UPLOAD_FOLDER'], filename)
