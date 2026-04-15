@@ -6,6 +6,7 @@ from translation import translation_bp
 from tagger import tagger_bp
 from file_ops import file_ops_bp
 from tag_operations import tag_ops_bp
+from image_editor import image_editor_bp
 
 app = Flask(__name__)
 
@@ -22,6 +23,7 @@ app.register_blueprint(translation_bp)
 app.register_blueprint(tagger_bp)
 app.register_blueprint(file_ops_bp)
 app.register_blueprint(tag_ops_bp)
+app.register_blueprint(image_editor_bp)
 
 
 @app.route('/')
@@ -29,6 +31,13 @@ def index():
     """主页"""
     images = get_image_files(app.config['UPLOAD_FOLDER'])
     return render_template('index.html', images=images, image_count=len(images))
+
+
+@app.route('/editor')
+def editor():
+    """图片编辑器页面"""
+    images = get_image_files(app.config['UPLOAD_FOLDER'])
+    return render_template('editor.html', images=images, image_count=len(images))
 
 
 if __name__ == '__main__':

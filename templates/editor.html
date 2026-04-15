@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>图片编辑器</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#3B82F6',
+                        secondary: '#10B981',
+                        accent: '#F59E0B',
+                        danger: '#EF4444',
+                        dark: '#1E293B',
+                        light: '#F8FAFC'
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        #file-list::-webkit-scrollbar { width: 4px; }
+        #file-list::-webkit-scrollbar-track { background: transparent; }
+        #file-list::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 2px; }
+        #file-list::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        .canvas-container { position: relative; display: flex; align-items: flex-start; justify-content: flex-start; }
+        .canvas-container canvas {
+            position: absolute; top: 0; left: 0; cursor: crosshair;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 font-sans text-gray-800 min-h-screen flex flex-col">
+    <!-- 顶部导航 -->
+    <header class="bg-white shadow-sm sticky top-0 z-50 border-b border-gray-200">
+        <div class="container mx-auto px-4 py-3 flex justify-between items-center">
+            <div class="flex items-center gap-3">
+                <i class="fa fa-crop text-primary text-2xl"></i>
+                <h1 class="text-xl font-bold text-dark">图片编辑器</h1>
+            </div>
+            <div class="flex items-center gap-2">
+                <span id="img-info" class="text-sm text-gray-400 mr-3"></span>
+                <button id="btn-crop" class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed" onclick="executeCrop()" disabled>
+                    <i class="fa fa-crop mr-2"></i> 裁剪
+                </button>
+                <button class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm" onclick="rotateImage(90)" title="顺时针旋转90°">
+                    <i class="fa fa-repeat mr-2"></i> 旋转
+                </button>
+                <button id="btn-alpha" class="flex items-center justify-center bg-accent hover:bg-accent/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm" onclick="executeAlphaToWhite()">
+                    <i class="fa fa-adjust mr-2"></i> 透明转白底
+                </button>
+                <button id="btn-reset" class="flex items-center justify-center bg-gray-500 hover:bg-gray-600 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed" onclick="resetEditor()" disabled>
+                    <i class="fa fa-undo mr-2"></i> 重置
+                </button>
+                <button id="btn-save" class="flex items-center justify-center bg-secondary hover:bg-secondary/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed" onclick="saveImage()" disabled>
+                    <i class="fa fa-save mr-2"></i> 保存
+                </button>
+                <a id="link-to-tags" href="/" class="flex items-center justify-center bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium py-2 px-4 rounded-lg transition-all text-sm" onclick="return navigateToTags()">
+                    <i class="fa fa-tags mr-2"></i> 标签编辑
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <!-- 主内容 -->
+    <main class="flex-grow container mx-auto px-4 py-4">
+        {% if images %}
+        <div class="flex gap-3 h-[calc(100vh-80px)]">
+            <!-- 左侧：文件列表 -->
+            <div class="w-48 flex-shrink-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+                <div class="px-3 py-2 bg-gray-50 border-b border-gray-200 font-semibold text-xs text-gray-500 uppercase tracking-wide flex items-center justify-between">
+                    <span>图片列表</span>
+                    <span class="text-xs text-gray-400 font-normal" id="image-counter">{{ image_count }} 张</span>
+                </div>
+                <div id="file-list" class="flex-grow overflow-y-auto"></div>
+            </div>
+
+            <!-- 右侧：编辑区 -->
+            <div class="flex-grow bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col min-w-0 overflow-hidden">
+                <div id="editor-area" class="flex-1 min-h-0 flex items-center justify-center bg-gray-100 p-4 overflow-hidden">
+                    <div id="canvas-wrapper" class="canvas-container" style="max-width:calc(100% - 32px);max-height:calc(100% - 32px);">
+                        <img id="editor-img" src="" alt="" class="block select-none" style="display:none;max-width:100%;max-height:100%;object-fit:contain" onload="onImgDisplayReady()">
+                        <canvas id="editor-canvas"></canvas>
+                    </div>
+                </div>
+                <div class="flex border-t border-gray-200">
+                    <button id="btn-prev" class="flex-1 py-2 text-center hover:bg-primary/5 transition-colors text-gray-500 hover:text-primary" onclick="navigatePrev()">
+                        <i class="fa fa-chevron-left"></i>
+                    </button>
+                    <div class="w-px bg-gray-200 self-stretch"></div>
+                    <button id="btn-next" class="flex-1 py-2 text-center hover:bg-primary/5 transition-colors text-gray-500 hover:text-primary" onclick="navigateNext()">
+                        <i class="fa fa-chevron-right"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+        {% else %}
+        <div class="flex flex-col items-center justify-center bg-white rounded-xl border border-dashed border-gray-300 p-16 text-center mt-16">
+            <i class="fa fa-picture-o text-gray-200 text-7xl mb-6"></i>
+            <h3 class="text-lg font-medium text-gray-400 mb-2">暂无图片</h3>
+            <p class="text-gray-300 mb-4 text-sm">请先在标签编辑页面上传图片</p>
+            <a href="/" class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-2.5 px-6 rounded-lg transition-all text-sm">
+                <i class="fa fa-tags mr-2"></i> 前往标签编辑
+            </a>
+        </div>
+        {% endif %}
+    </main>
+
+    <!-- 通知 -->
+    <div id="notification" class="fixed bottom-5 right-5 px-5 py-3 rounded-lg shadow-lg transform translate-y-20 opacity-0 transition-all duration-300 flex items-center z-50 text-sm"></div>
+
+    <!-- 进度弹窗 -->
+    <div id="progress-modal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 hidden">
+        <div class="bg-white rounded-xl shadow-2xl w-[420px] p-6">
+            <h3 id="progress-title" class="text-lg font-semibold text-gray-800 mb-1"></h3>
+            <p id="progress-subtitle" class="text-sm text-gray-400 mb-4"></p>
+            <div class="w-full bg-gray-200 rounded-full h-3 mb-2 overflow-hidden">
+                <div id="progress-bar" class="h-full bg-primary rounded-full transition-all duration-200" style="width:0%"></div>
+            </div>
+            <div class="flex justify-between text-sm text-gray-500 mb-1">
+                <span id="progress-count">0 / 0</span>
+                <span id="progress-percent">0%</span>
+            </div>
+            <p id="progress-item" class="text-xs text-gray-400 truncate mb-2"></p>
+            <div id="progress-errors" class="hidden max-h-24 overflow-y-auto text-xs text-red-500 bg-red-50 rounded p-2 mb-3"></div>
+            <div class="flex justify-end">
+                <button id="progress-close" class="hidden px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg text-sm font-medium transition-colors" onclick="closeProgressModal()">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const allImages = {{ images | tojson }};
+        let currentIndex = -1;
+        let editorDirty = false; // 是否有未保存的编辑
+
+        // Canvas 相关
+        let cropRect = null;  // {x, y, w, h} 显示坐标
+        let isDrawing = false;
+        let drawStartX = 0, drawStartY = 0;
+        let originalImage = null;  // 原始 Image 对象
+        let currentImageData = null; // 当前编辑状态的 ImageData（可能已裁剪/处理）
+
+        // === 文件列表 ===
+        function rebuildFileList() {
+            const list = document.getElementById('file-list');
+            list.innerHTML = allImages.map((img, i) =>
+                '<div class="file-item flex items-center px-2 py-1.5 text-sm cursor-pointer border-l-2 border-transparent hover:bg-primary/5 transition-colors group"'
+                + ' data-image="' + escapeHtml(img) + '" data-index="' + i + '">'
+                + '<span class="flex-1 min-w-0 truncate ml-1 text-gray-600 group-hover:text-gray-800" title="' + escapeHtml(img) + '">' + escapeHtml(img) + '</span></div>'
+            ).join('');
+        }
+
+        document.getElementById('file-list')?.addEventListener('click', function(e) {
+            const item = e.target.closest('.file-item');
+            if (item) navigateTo(parseInt(item.dataset.index));
+        });
+
+        // === 导航 ===
+        function navigateTo(index) {
+            if (index < 0 || index >= allImages.length) return;
+            if (editorDirty && currentIndex !== -1) {
+                if (!confirm('当前图片未保存，是否放弃修改？')) return;
+            }
+            currentIndex = index;
+            editorDirty = false;
+            cropRect = null;
+            updateNavUI();
+            loadImageIntoEditor(allImages[index]);
+        }
+
+        function updateNavUI() {
+            document.querySelectorAll('.file-item').forEach((el, i) => {
+                const active = (i === currentIndex);
+                el.classList.toggle('bg-primary/5', active);
+                el.classList.toggle('border-l-primary', active);
+                el.querySelector('span').classList.toggle('text-primary', active);
+                el.querySelector('span').classList.toggle('font-medium', active);
+                el.querySelector('span').classList.toggle('text-gray-600', !active);
+            });
+            const activeItem = document.querySelector('.file-item[data-index="' + currentIndex + '"]');
+            if (activeItem) activeItem.scrollIntoView({ block: 'nearest' });
+            document.getElementById('btn-prev').disabled = (currentIndex <= 0);
+            document.getElementById('btn-next').disabled = (currentIndex >= allImages.length - 1);
+            updateButtonStates();
+        }
+
+        function navigatePrev() { navigateTo(currentIndex - 1); }
+        function navigateNext() { navigateTo(currentIndex + 1); }
+
+        document.addEventListener('keydown', function(e) {
+            if (e.target.tagName === 'INPUT') return;
+            if (e.key === 'ArrowLeft') navigatePrev();
+            if (e.key === 'ArrowRight') navigateNext();
+        });
+
+        // === 图片加载 ===
+        function loadImageIntoEditor(filename) {
+            const img = document.getElementById('editor-img');
+            img.src = '/uploads/' + encodeURIComponent(filename) + '?t=' + Date.now();
+            img.onload = function() {
+                originalImage = new Image();
+                originalImage.src = img.src;
+                originalImage.onload = function() {
+                    fitImageToEditor();
+                    updateImageInfo();
+                };
+            };
+            img.style.display = '';
+        }
+
+        // 根据 editor-area 容器尺寸，用 CSS 缩放 img，同步 canvas 覆盖层尺寸
+        function fitImageToEditor() {
+            if (!originalImage) return;
+            const area = document.getElementById('editor-area');
+            const img = document.getElementById('editor-img');
+            const canvas = document.getElementById('editor-canvas');
+
+            // 容器可用空间（减去 padding）
+            const maxW = area.clientWidth - 32;
+            const maxH = area.clientHeight - 32;
+
+            // 计算缩放后尺寸
+            const natW = originalImage.naturalWidth;
+            const natH = originalImage.naturalHeight;
+            const scale = Math.min(maxW / natW, maxH / natH, 1);
+            const dispW = Math.round(natW * scale);
+            const dispH = Math.round(natH * scale);
+
+            // img 用 CSS 缩放（浏览器原生渲染，清晰）
+            img.style.width = dispW + 'px';
+            img.style.height = dispH + 'px';
+
+            // canvas 仅作覆盖层，匹配显示尺寸
+            canvas.width = dispW;
+            canvas.height = dispH;
+            canvas.style.width = dispW + 'px';
+            canvas.style.height = dispH + 'px';
+
+            // 重绘选区覆盖层
+            drawCropOverlay();
+        }
+
+        function onImgDisplayReady() {
+            // img CSS 布局完成后同步覆盖层
+            if (originalImage) fitImageToEditor();
+        }
+
+        function updateImageInfo() {
+            if (!originalImage) return;
+            document.getElementById('img-info').textContent =
+                originalImage.naturalWidth + ' x ' + originalImage.naturalHeight + ' px';
+        }
+
+        // 窗口大小变化时重新同步 canvas
+        const resizeObserver = new ResizeObserver(function() {
+            if (currentIndex >= 0 && originalImage) {
+                fitImageToEditor();
+                cropRect = null;
+                updateButtonStates();
+            }
+        });
+
+        // === 拉框裁剪 ===
+        const editorCanvas = document.getElementById('editor-canvas');
+
+        function getCanvasCoords(e) {
+            const rect = editorCanvas.getBoundingClientRect();
+            // clamp 到 canvas 范围内
+            return {
+                x: Math.max(0, Math.min(e.clientX - rect.left, rect.width)),
+                y: Math.max(0, Math.min(e.clientY - rect.top, rect.height))
+            };
+        }
+
+        const editorArea = document.getElementById('editor-area');
+
+        editorArea?.addEventListener('mousedown', function(e) {
+            if (e.button !== 0) return;
+            if (!originalImage || editorCanvas.width === 0) return;
+            const p = getCanvasCoords(e);
+            drawStartX = p.x;
+            drawStartY = p.y;
+            isDrawing = true;
+            cropRect = null;
+            e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', function(e) {
+            if (!isDrawing) return;
+            const p = getCanvasCoords(e);
+            cropRect = {
+                x: Math.min(drawStartX, p.x),
+                y: Math.min(drawStartY, p.y),
+                w: Math.abs(p.x - drawStartX),
+                h: Math.abs(p.y - drawStartY)
+            };
+            drawCropOverlay();
+        });
+
+        document.addEventListener('mouseup', function() {
+            if (!isDrawing) return;
+            isDrawing = false;
+            if (cropRect && (cropRect.w < 5 || cropRect.h < 5)) {
+                cropRect = null;
+            }
+            updateButtonStates();
+        });
+
+        function drawCropOverlay() {
+            const canvas = document.getElementById('editor-canvas');
+            const ctx = canvas.getContext('2d');
+            // 清除覆盖层（不画图片，图片由 img 元素原生渲染）
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (!cropRect) return;
+
+            // 暗化选区外区域
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            // 上
+            ctx.fillRect(0, 0, canvas.width, cropRect.y);
+            // 下
+            ctx.fillRect(0, cropRect.y + cropRect.h, canvas.width, canvas.height - cropRect.y - cropRect.h);
+            // 左
+            ctx.fillRect(0, cropRect.y, cropRect.x, cropRect.h);
+            // 右
+            ctx.fillRect(cropRect.x + cropRect.w, cropRect.y, canvas.width - cropRect.x - cropRect.w, cropRect.h);
+
+            // 选区边框
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([6, 4]);
+            ctx.strokeRect(cropRect.x, cropRect.y, cropRect.w, cropRect.h);
+            ctx.setLineDash([]);
+
+            // 尺寸标注
+            const img = document.getElementById('editor-img');
+            const scaleX = originalImage.naturalWidth / img.clientWidth;
+            const scaleY = originalImage.naturalHeight / img.clientHeight;
+            const realW = Math.round(cropRect.w * scaleX);
+            const realH = Math.round(cropRect.h * scaleY);
+            if (realW > 30 && realH > 30) {
+                const text = realW + ' x ' + realH;
+                ctx.font = '12px sans-serif';
+                ctx.fillStyle = 'rgba(0,0,0,0.6)';
+                const tw = ctx.measureText(text).width;
+                ctx.fillRect(cropRect.x + cropRect.w / 2 - tw / 2 - 4, cropRect.y + cropRect.h / 2 - 9, tw + 8, 18);
+                ctx.fillStyle = '#fff';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(text, cropRect.x + cropRect.w / 2, cropRect.y + cropRect.h / 2);
+            }
+        }
+
+        // === 旋转操作（前端 Canvas） ===
+        function rotateImage(degrees) {
+            if (!originalImage) return;
+            const rad = degrees * Math.PI / 180;
+            const srcW = originalImage.naturalWidth;
+            const srcH = originalImage.naturalHeight;
+
+            const tempCanvas = document.createElement('canvas');
+            const tempCtx = tempCanvas.getContext('2d');
+
+            // 90度倍数：宽高互换
+            const steps = ((degrees / 90) % 4 + 4) % 4;
+            if (steps % 2 === 1) {
+                tempCanvas.width = srcH;
+                tempCanvas.height = srcW;
+            } else {
+                tempCanvas.width = srcW;
+                tempCanvas.height = srcH;
+            }
+
+            tempCtx.translate(tempCanvas.width / 2, tempCanvas.height / 2);
+            tempCtx.rotate(rad);
+            tempCtx.drawImage(originalImage, -srcW / 2, -srcH / 2);
+
+            const rotatedImg = new Image();
+            rotatedImg.onload = function() {
+                originalImage = rotatedImg;
+                cropRect = null;
+                editorDirty = true;
+                const displayImg = document.getElementById('editor-img');
+                displayImg.onload = function() {
+                    fitImageToEditor();
+                    updateImageInfo();
+                    updateButtonStates();
+                    showNotification('已旋转 ' + degrees + '°，点击保存以覆盖原图', 'info');
+                };
+                displayImg.src = rotatedImg.src;
+            };
+            rotatedImg.src = tempCanvas.toDataURL('image/png');
+        }
+
+        // === 裁剪操作（前端 Canvas） ===
+        function executeCrop() {
+            if (!cropRect || !originalImage) return;
+
+            const img = document.getElementById('editor-img');
+            const scaleX = originalImage.naturalWidth / img.clientWidth;
+            const scaleY = originalImage.naturalHeight / img.clientHeight;
+
+            // 原图坐标
+            const sx = Math.round(cropRect.x * scaleX);
+            const sy = Math.round(cropRect.y * scaleY);
+            const sw = Math.round(cropRect.w * scaleX);
+            const sh = Math.round(cropRect.h * scaleY);
+
+            // 用临时 canvas 从原图裁剪
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = sw;
+            tempCanvas.height = sh;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.drawImage(originalImage, sx, sy, sw, sh, 0, 0, sw, sh);
+
+            // 更新 originalImage 和显示图片为裁剪后的结果
+            const croppedImg = new Image();
+            croppedImg.onload = function() {
+                originalImage = croppedImg;
+                cropRect = null;
+                editorDirty = true;
+                // 同步 img src 后等它渲染完再同步 canvas
+                const displayImg = document.getElementById('editor-img');
+                displayImg.onload = function() {
+                    fitImageToEditor();
+                    updateImageInfo();
+                    updateButtonStates();
+                    showNotification('已裁剪，点击保存以覆盖原图', 'info');
+                };
+                displayImg.src = croppedImg.src;
+            };
+            croppedImg.src = tempCanvas.toDataURL('image/png');
+        }
+
+        // === 批量透明转白底（后端 SSE） ===
+        function executeAlphaToWhite() {
+            const btn = document.getElementById('btn-alpha');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-2"></i> 处理中...';
+
+            fetch('/batch_alpha_to_white', {method: 'POST'})
+            .then(r => {
+                const ct = r.headers.get('Content-Type') || '';
+                if (ct.includes('application/json')) {
+                    return r.json().then(data => {
+                        btn.disabled = false;
+                        btn.innerHTML = '<i class="fa fa-adjust mr-2"></i> 透明转白底';
+                        if (data.message === 'no_alpha') {
+                            showNotification('没有需要转换的透明图片', 'info');
+                        } else {
+                            showNotification('处理完成', 'success');
+                        }
+                        return null;
+                    });
+                }
+                return r.body;
+            })
+            .then(body => {
+                if (!body) return;
+                openProgressModal('批量透明转白底', '正在扫描图片...');
+                const reader = body.getReader();
+                const decoder = new TextDecoder();
+                let buf = '';
+                function read() {
+                    reader.read().then(({done, value}) => {
+                        if (done) return;
+                        buf += decoder.decode(value, {stream: true});
+                        const lines = buf.split('\n');
+                        buf = lines.pop();
+                        let etype = '', edata = '';
+                        for (const line of lines) {
+                            if (line.startsWith('event: ')) etype = line.slice(7).trim();
+                            else if (line.startsWith('data: ')) edata = line.slice(6).trim();
+                            else if (line === '' && etype && edata) {
+                                handleProgressEvent(etype, edata);
+                                etype = ''; edata = '';
+                            }
+                        }
+                        read();
+                    });
+                }
+                read();
+            })
+            .catch(() => {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fa fa-adjust mr-2"></i> 透明转白底';
+                showNotification('请求失败', 'error');
+            });
+
+            function handleProgressEvent(type, raw) {
+                let data;
+                try { data = JSON.parse(raw); } catch { return; }
+                if (type === 'progress') {
+                    const pct = Math.round(data.current / data.total * 100);
+                    document.getElementById('progress-bar').style.width = pct + '%';
+                    document.getElementById('progress-count').textContent = data.current + ' / ' + data.total;
+                    document.getElementById('progress-percent').textContent = pct + '%';
+                    document.getElementById('progress-item').textContent = data.item;
+                } else if (type === 'error') {
+                    const el = document.getElementById('progress-errors');
+                    el.classList.remove('hidden');
+                    el.innerHTML += '<div>' + escapeHtml(data.item) + ': ' + escapeHtml(data.error) + '</div>';
+                } else if (type === 'complete') {
+                    document.getElementById('progress-bar').style.width = '100%';
+                    document.getElementById('progress-count').textContent = data.converted + ' / ' + data.converted;
+                    document.getElementById('progress-percent').textContent = '100%';
+                    document.getElementById('progress-subtitle').textContent =
+                        '完成：转换 ' + data.converted + ' 张' + (data.errors > 0 ? '，失败 ' + data.errors + ' 张' : '');
+                    document.getElementById('progress-item').textContent = '';
+                    document.getElementById('progress-close').classList.remove('hidden');
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fa fa-adjust mr-2"></i> 透明转白底';
+                    // 刷新当前预览
+                    if (currentIndex >= 0) loadImageIntoEditor(allImages[currentIndex]);
+                }
+            }
+        }
+
+        function openProgressModal(title, subtitle) {
+            document.getElementById('progress-title').textContent = title;
+            document.getElementById('progress-subtitle').textContent = subtitle;
+            document.getElementById('progress-bar').style.width = '0%';
+            document.getElementById('progress-count').textContent = '0 / 0';
+            document.getElementById('progress-percent').textContent = '0%';
+            document.getElementById('progress-item').textContent = '';
+            document.getElementById('progress-errors').classList.add('hidden');
+            document.getElementById('progress-errors').innerHTML = '';
+            document.getElementById('progress-close').classList.add('hidden');
+            document.getElementById('progress-modal').classList.remove('hidden');
+        }
+
+        function closeProgressModal() {
+            document.getElementById('progress-modal').classList.add('hidden');
+            location.reload();
+        }
+
+        // === 保存 ===
+        function saveImage() {
+            if (!originalImage || !editorDirty) return;
+
+            const btn = document.getElementById('btn-save');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-2"></i> 保存中...';
+
+            // 导出为 PNG base64
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = originalImage.naturalWidth;
+            tempCanvas.height = originalImage.naturalHeight;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.drawImage(originalImage, 0, 0);
+            const dataUrl = tempCanvas.toDataURL('image/png');
+
+            fetch('/process_image', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    filename: allImages[currentIndex],
+                    image_data: dataUrl
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    editorDirty = false;
+                    showNotification('保存成功 (' + data.width + 'x' + data.height + ')', 'success');
+                    // 如果文件名变了（如 jpg→png），更新列表
+                    if (data.filename !== allImages[currentIndex]) {
+                        allImages[currentIndex] = data.filename;
+                        rebuildFileList();
+                        updateNavUI();
+                    }
+                    // 刷新预览
+                    loadImageIntoEditor(allImages[currentIndex]);
+                } else {
+                    showNotification(data.error || '保存失败', 'error');
+                }
+            })
+            .catch(() => showNotification('保存失败', 'error'))
+            .finally(() => {
+                btn.disabled = !editorDirty;
+                btn.innerHTML = '<i class="fa fa-save mr-2"></i> 保存';
+            });
+        }
+
+        // === 重置 ===
+        function resetEditor() {
+            if (currentIndex < 0) return;
+            editorDirty = false;
+            cropRect = null;
+            loadImageIntoEditor(allImages[currentIndex]);
+        }
+
+        // === 按钮状态 ===
+        function updateButtonStates() {
+            document.getElementById('btn-crop').disabled = !cropRect || cropRect.w < 5 || cropRect.h < 5;
+            document.getElementById('btn-alpha').disabled = currentIndex < 0;
+            document.getElementById('btn-reset').disabled = currentIndex < 0;
+            document.getElementById('btn-save').disabled = !editorDirty;
+        }
+
+        // === 通知 ===
+        let _notifyTimer = null;
+        function showNotification(message, type) {
+            const n = document.getElementById('notification');
+            const colors = {success:'bg-green-500 text-white',error:'bg-red-500 text-white',warning:'bg-amber-500 text-white',info:'bg-blue-500 text-white'};
+            n.className = 'fixed bottom-5 right-5 px-5 py-3 rounded-lg shadow-lg flex items-center z-50 transition-all duration-300 text-sm ' + (colors[type]||colors.info);
+            n.textContent = message;
+            n.style.transform = 'translateY(0)'; n.style.opacity = '1';
+            if (_notifyTimer) clearTimeout(_notifyTimer);
+            _notifyTimer = setTimeout(() => { n.style.transform = 'translateY(20px)'; n.style.opacity = '0'; _notifyTimer = null; }, 3000);
+        }
+
+        // === 工具 ===
+        function navigateToTags() {
+            if (currentIndex >= 0 && allImages[currentIndex]) {
+                window.location.href = '/#' + encodeURIComponent(allImages[currentIndex]);
+                return false;
+            }
+            return true;
+        }
+
+        function escapeHtml(str) {
+            return str.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+
+        // 防止刷新丢失
+        window.addEventListener('beforeunload', function(e) {
+            if (editorDirty) { e.preventDefault(); e.returnValue = ''; }
+        });
+
+        // 初始化
+        if (allImages.length > 0) {
+            rebuildFileList();
+            const hashName = decodeURIComponent(window.location.hash.slice(1));
+            const hashIndex = hashName ? allImages.indexOf(hashName) : -1;
+            navigateTo(hashIndex >= 0 ? hashIndex : 0);
+            // 延迟启动 ResizeObserver，确保 DOM 稳定
+            setTimeout(() => {
+                const editorArea = document.getElementById('editor-area');
+                if (editorArea) resizeObserver.observe(editorArea);
+            }, 100);
+        }
+    </script>
+</body>
+</html>

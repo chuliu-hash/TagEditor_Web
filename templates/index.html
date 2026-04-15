@@ -41,39 +41,53 @@
 <body class="bg-gray-50 font-sans text-gray-800 min-h-screen flex flex-col">
     <!-- 顶部导航栏 -->
     <header class="bg-white shadow-sm sticky top-0 z-50 border-b border-gray-200">
-        <div class="container mx-auto px-4 py-3 flex flex-col md:flex-row justify-between items-center">
-            <div class="flex items-center mb-3 md:mb-0">
-                <i class="fa fa-wrench text-primary text-2xl mr-2"></i>
-                <h1 class="text-xl font-bold text-dark">标签批量编辑工具</h1>
+        <div class="container mx-auto px-4 py-2">
+            <div class="flex justify-between items-center">
+                <div class="flex items-center">
+                    <i class="fa fa-wrench text-primary text-2xl mr-2"></i>
+                    <h1 class="text-xl font-bold text-dark">标签批量编辑工具</h1>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button id="btn-toggle-preview" class="flex items-center justify-center bg-gray-500 hover:bg-gray-600 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs" onclick="togglePreview()">
+                        <i class="fa fa-eye mr-1"></i> 预览
+                    </button>
+                    <button id="btn-toggle-editor" class="flex items-center justify-center bg-gray-500 hover:bg-gray-600 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs" onclick="toggleEditor()">
+                        <i class="fa fa-columns mr-1"></i> 编辑
+                    </button>
+                    <a id="link-to-editor" href="/editor" class="flex items-center justify-center bg-gray-800 hover:bg-gray-900 text-white font-medium py-1.5 px-3 rounded-lg transition-all text-xs" onclick="return navigateToEditor()">
+                        <i class="fa fa-crop mr-1"></i> 图片编辑
+                    </a>
+                </div>
             </div>
-            <div class="flex flex-wrap gap-2 w-full md:w-auto">
-                <label for="file-upload" class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm">
-                    <i class="fa fa-upload mr-2"></i> 上传文件夹
+            <div class="flex flex-wrap gap-1.5 mt-2">
+                <label for="file-upload" class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs">
+                    <i class="fa fa-upload mr-1"></i> 上传文件夹
+                </label>
+                <label for="image-upload" class="flex items-center justify-center bg-secondary hover:bg-secondary/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs">
+                    <i class="fa fa-image mr-1"></i> 上传图片
                 </label>
                 <form id="upload-form" action="/upload" method="post" class="hidden" enctype="multipart/form-data">
                     <input id="file-upload" type="file" name="files" multiple webkitdirectory
                            class="hidden" onchange="handleFolderSelect(this)">
                 </form>
-                <button id="btn-auto-tag" class="flex items-center justify-center bg-accent hover:bg-accent/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm" onclick="openAutoTagModal()">
-                    <i class="fa fa-magic mr-2"></i> <span>自动打标</span>
+                <form id="image-upload-form" action="/upload" method="post" class="hidden" enctype="multipart/form-data">
+                    <input id="image-upload" type="file" name="files" multiple accept="image/png,image/jpeg,image/gif"
+                           class="hidden" onchange="this.form.submit()">
+                </form>
+                <button id="btn-auto-tag" class="flex items-center justify-center bg-accent hover:bg-accent/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs" onclick="openAutoTagModal()">
+                    <i class="fa fa-magic mr-1"></i> 自动打标
                 </button>
-                <button class="flex items-center justify-center bg-secondary hover:bg-secondary/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm" onclick="prependTags()">
-                    <i class="fa fa-tag mr-2"></i> <span>添加触发词</span>
+                <button class="flex items-center justify-center bg-secondary hover:bg-secondary/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs" onclick="prependTags()">
+                    <i class="fa fa-tag mr-1"></i> 添加触发词
                 </button>
-                <button id="btn-batch-translate" class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm" onclick="batchTranslate()">
-                    <i class="fa fa-language mr-2"></i> <span>批量翻译</span>
+                <button id="btn-batch-translate" class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs" onclick="batchTranslate()">
+                    <i class="fa fa-language mr-1"></i> 批量翻译
                 </button>
-                <button id="btn-toggle-preview" class="flex items-center justify-center bg-gray-500 hover:bg-gray-600 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm" onclick="togglePreview()">
-                    <i class="fa fa-eye mr-2"></i> <span>隐藏预览</span>
+                <button class="flex items-center justify-center bg-gray-600 hover:bg-gray-700 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs" onclick="openTagStats()">
+                    <i class="fa fa-bar-chart mr-1"></i> 标签统计
                 </button>
-                <button id="btn-toggle-editor" class="flex items-center justify-center bg-gray-500 hover:bg-gray-600 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm" onclick="toggleEditor()">
-                    <i class="fa fa-columns mr-2"></i> <span>隐藏编辑</span>
-                </button>
-                <button id="clear-all" class="flex items-center justify-center bg-danger hover:bg-danger/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm">
-                    <i class="fa fa-trash mr-2"></i> 清空所有
-                </button>
-                <button class="flex items-center justify-center bg-gray-600 hover:bg-gray-700 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm" onclick="openFindReplace()">
-                    <i class="fa fa-exchange mr-2"></i> <span>查找替换</span>
+                <button id="clear-all" class="flex items-center justify-center bg-danger hover:bg-danger/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs">
+                    <i class="fa fa-trash mr-1"></i> 清空所有
                 </button>
             </div>
         </div>
@@ -96,8 +110,8 @@
 
             <!-- 中间：图片预览 -->
             <div id="preview-panel" class="w-64 flex-shrink-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
-                <div class="relative flex-1 min-h-0 flex justify-center items-center bg-gray-100 p-2 overflow-hidden">
-                    <img id="preview-img" src="" alt="" class="max-w-full max-h-full object-contain rounded select-none">
+                <div id="preview-area" class="relative flex-1 min-h-0 flex justify-center items-center bg-gray-100 p-2 overflow-hidden">
+                    <img id="preview-img" src="" alt="" class="rounded select-none">
                 </div>
                 <div class="flex border-t border-gray-200">
                     <button id="btn-prev" class="flex-1 py-2 text-center hover:bg-primary/5 transition-colors text-gray-500 hover:text-primary" onclick="navigatePrev()" title="上一张 (←)">
@@ -204,6 +218,47 @@
                 <button class="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" onclick="closeFindReplace()">取消</button>
                 <button id="fr-preview-btn" class="px-4 py-2 text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg transition-colors" onclick="previewFindReplace()">预览</button>
                 <button id="fr-execute-btn" class="px-4 py-2 text-sm bg-primary hover:bg-primary/90 text-white rounded-lg transition-colors" onclick="executeFindReplace()">全部替换</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 标签统计弹窗（含查找替换） -->
+    <div id="tag-stats-modal" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center hidden" onclick="if(event.target===this)closeTagStats()">
+        <div class="bg-white rounded-xl shadow-xl w-[600px] max-h-[85vh] flex flex-col">
+            <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+                <h3 class="text-lg font-semibold text-gray-800">标签统计</h3>
+                <button class="text-gray-400 hover:text-gray-600 transition-colors" onclick="closeTagStats()"><i class="fa fa-times"></i></button>
+            </div>
+            <!-- 查找替换区 -->
+            <div class="px-6 py-3 border-b border-gray-100 space-y-2">
+                <div class="flex items-center gap-2">
+                    <label class="text-xs text-gray-500 w-8 flex-shrink-0">查找</label>
+                    <input id="ts-filter" type="text" class="flex-1 border border-blue-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-primary transition-colors" placeholder="输入字符筛选标签" oninput="filterTagStats()">
+                </div>
+                <div class="flex items-center gap-2">
+                    <label class="text-xs text-gray-500 w-8 flex-shrink-0">替换</label>
+                    <input id="ts-replace-find" type="text" class="flex-1 border border-amber-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-amber-400 transition-colors" placeholder="匹配标签中的字符串" oninput="updateReplaceBtnState()">
+                    <i class="fa fa-arrow-right text-gray-300"></i>
+                    <input id="ts-replace-to" type="text" class="flex-1 border border-amber-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-amber-400 transition-colors" placeholder="替换为">
+                </div>
+                <div class="flex items-center justify-between">
+                    <span id="tag-stats-info" class="text-sm text-gray-400"></span>
+                    <button id="ts-replace-btn" class="px-3 py-1 text-sm bg-primary hover:bg-primary/90 text-white rounded-lg transition-colors disabled:opacity-40" onclick="executeTagStatsReplace()" disabled>替换匹配项</button>
+                </div>
+            </div>
+            <!-- 表格 -->
+            <div class="flex-grow overflow-y-auto min-h-0" id="tag-stats-body">
+                <table class="w-full text-sm">
+                    <thead class="bg-gray-50 sticky top-0">
+                        <tr>
+                            <th class="text-left px-6 py-2 font-medium text-gray-500 w-8">#</th>
+                            <th class="text-left px-4 py-2 font-medium text-gray-500">标签</th>
+                            <th class="text-right px-4 py-2 font-medium text-gray-500 w-12 cursor-pointer select-none hover:text-primary" onclick="toggleTagStatsSort()">数量 <i id="ts-sort-icon" class="fa fa-sort-desc text-xs"></i></th>
+                            <th class="text-left px-4 py-2 font-medium text-gray-500">翻译</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tag-stats-tbody"></tbody>
+                </table>
             </div>
         </div>
     </div>
@@ -347,16 +402,23 @@
                     saveCaption().then(() => doNavigate(index));
                     return;
                 }
+                // 用户选择不保存，立即重置脏状态
                 savedTags = currentTags.map(t => t.tag).filter(t => t.trim()).join(', ');
+                currentTags = currentTags.map(t => ({tag: t.tag, translation: t.translation}));
             }
             doNavigate(index);
         }
 
         function doNavigate(index) {
             currentIndex = index;
+            // 立即重置脏状态，防止快速切换时误判
+            currentTags = [];
+            savedTags = '';
+            focusedRowIndex = -1;
             const name = allImages[index];
 
             document.getElementById('preview-img').src = '/uploads/' + encodeURIComponent(name);
+            fitPreviewImage();
 
             document.querySelectorAll('.file-item').forEach((el, i) => {
                 const active = (i === index);
@@ -386,6 +448,21 @@
             loadCaption(name);
         }
         function navigatePrev() { navigateTo(currentIndex - 1); }
+
+        // 预览图自适应缩放：小图放大填充预览区
+        function fitPreviewImage() {
+            const img = document.getElementById('preview-img');
+            const area = document.getElementById('preview-area');
+            if (!img || !area || !img.naturalWidth) return;
+            const maxW = area.clientWidth - 16; // p-2 = 8px * 2
+            const maxH = area.clientHeight - 16;
+            if (maxW <= 0 || maxH <= 0) return;
+            const scale = Math.min(maxW / img.naturalWidth, maxH / img.naturalHeight);
+            img.style.width = Math.round(img.naturalWidth * scale) + 'px';
+            img.style.height = Math.round(img.naturalHeight * scale) + 'px';
+        }
+
+        document.getElementById('preview-img').addEventListener('load', fitPreviewImage);
         function navigateNext() { navigateTo(currentIndex + 1); }
         document.addEventListener('keydown', function(e) {
             if (e.target.tagName === 'INPUT') return;
@@ -395,6 +472,7 @@
 
         // === 标签列表渲染 ===
         let dragSrcIndex = null;
+        let focusedRowIndex = -1; // 当前聚焦的标签行
 
         function renderTags() {
             const container = document.getElementById('tags-container');
@@ -407,10 +485,10 @@
                 html += '<div class="flex items-center border-b border-gray-100 hover:bg-gray-50/80 transition-colors group cursor-grab active:cursor-grabbing" draggable="true" data-row="' + i + '">'
                     + '<button class="w-7 flex-shrink-0 text-gray-300 hover:text-red-500 transition-colors text-center opacity-0 group-hover:opacity-100" onclick="removeTag(' + i + ')" title="删除"><i class="fa fa-times text-xs"></i></button>'
                     + '<input class="flex-1 min-w-0 px-2 py-1.5 text-sm border-0 bg-transparent focus:outline-none focus:bg-blue-50/80 rounded-sm transition-colors" '
-                    + 'value="' + escapeHtml(item.tag) + '" oninput="currentTags[' + i + '].tag=this.value" onclick="this.setSelectionRange(this.value.length,this.value.length)">'
+                    + 'value="' + escapeHtml(item.tag) + '" oninput="currentTags[' + i + '].tag=this.value" onchange="onTagChanged(' + i + ')" onfocus="focusedRowIndex=' + i + '">'
                     + '<div class="w-px self-stretch bg-gray-200"></div>'
                     + '<input class="flex-1 min-w-0 px-2 py-1.5 text-sm border-0 bg-transparent focus:outline-none focus:bg-green-50/80 rounded-sm transition-colors text-gray-500" '
-                    + 'value="' + escapeHtml(item.translation) + '" oninput="currentTags[' + i + '].translation=this.value" onclick="this.setSelectionRange(this.value.length,this.value.length)" placeholder="...">'
+                    + 'value="' + escapeHtml(item.translation) + '" oninput="currentTags[' + i + '].translation=this.value" placeholder="..." onfocus="focusedRowIndex=' + i + '">'
                     + '<button class="w-7 flex-shrink-0 text-gray-300 hover:text-red-500 transition-colors text-center opacity-0 group-hover:opacity-100" onclick="removeTag(' + i + ')" title="删除"><i class="fa fa-times text-xs"></i></button>'
                     + '</div>';
             });
@@ -445,10 +523,13 @@
         }
 
         function addTag() {
-            currentTags.push({tag: '', translation: ''});
+            const insertAt = (focusedRowIndex >= 0 && focusedRowIndex < currentTags.length)
+                ? focusedRowIndex + 1 : currentTags.length;
+            currentTags.splice(insertAt, 0, {tag: '', translation: ''});
             renderTags();
-            const inputs = document.querySelectorAll('#tags-container input');
-            if (inputs.length >= 2) inputs[inputs.length - 2].focus();
+            // 聚焦新插入行的标签输入框
+            const newRow = document.querySelector('[data-row="' + insertAt + '"]');
+            if (newRow) newRow.querySelectorAll('input')[0].focus();
         }
 
         function removeTag(index) {
@@ -456,17 +537,39 @@
             renderTags();
         }
 
+        // 标签被修改后，自动从缓存查找新标签的翻译
+        function onTagChanged(index) {
+            const tag = currentTags[index].tag.trim().toLowerCase();
+            if (!tag) { currentTags[index].translation = ''; return; }
+            fetch('/lookup_cache', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({tags: [tag]})
+            })
+            .then(r => r.json())
+            .then(data => {
+                const tr = (data.translations && data.translations[0]) || '';
+                currentTags[index].translation = tr;
+                // 更新对应的翻译输入框
+                const row = document.querySelectorAll('[data-row="' + index + '"]')[0];
+                if (row) row.querySelectorAll('input')[1].value = tr;
+            });
+        }
+
         function escapeHtml(str) {
             return str.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         }
 
         // === 加载标签（一次请求获取标签+翻译） ===
+        let loadSeq = 0;
         function loadCaption(imageName) {
+            const seq = ++loadSeq;
             currentTags = [];
             renderTags();
             fetch('/get_caption/' + encodeURIComponent(imageName))
                 .then(r => r.json())
                 .then(data => {
+                    if (seq !== loadSeq) return; // 过期响应，丢弃
                     const text = (data.caption || '').trim();
                     if (text) {
                         currentTags = text.split(',').map(t => ({tag: t.trim(), translation: ''}));
@@ -485,7 +588,7 @@
                         renderTags();
                     }
                 })
-                .catch(() => showNotification('加载标签文件失败', 'error'));
+                .catch(() => { if (seq === loadSeq) showNotification('加载标签文件失败', 'error'); });
         }
 
         // === 批量翻译标签 ===
@@ -526,7 +629,7 @@
                 if (data.error) { showNotification('翻译失败: ' + data.error, 'error'); return; }
                 const translations = data.translations || [];
                 translations.forEach((tr, ti) => {
-                    if (ti < indices.length) currentTags[indices[ti]][dstField] = tr;
+                    if (ti < indices.length) currentTags[indices[ti]][dstField] = isEn2Zh ? tr : tr.toLowerCase();
                 });
                 renderTags();
                 showNotification('翻译完成', 'success');
@@ -539,11 +642,43 @@
         function saveCaption() {
             const btn = document.getElementById('btn-save');
             btn.disabled = true; btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-1"></i> 保存中...';
-            const content = currentTags.map(t => t.tag).filter(t => t.trim()).join(', ');
-            return fetch('/save_caption/' + encodeURIComponent(allImages[currentIndex]), {
+            const tags = currentTags.map(t => t.tag.trim()).filter(t => t);
+            const seen = new Set();
+            const content = tags.filter(t => { const k = t.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; }).join(', ');
+
+            // 先查找缓存，将用户手动编辑的翻译与缓存合并后更新缓存
+            const tagKeys = currentTags.map(t => t.tag.trim().toLowerCase()).filter(t => t);
+            const userTranslations = {};
+            currentTags.forEach(t => {
+                const tag = t.tag.trim().toLowerCase();
+                const tr = t.translation.trim();
+                if (tag && tr) userTranslations[tag] = tr;
+            });
+
+            return fetch('/lookup_cache', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({content: content})
+                body: JSON.stringify({tags: tagKeys})
+            })
+            .then(r => r.json())
+            .then(cacheData => {
+                // 构建 translations：用户翻译优先，无用户翻译则用缓存
+                const translations = {};
+                const cached = cacheData.translations || [];
+                currentTags.forEach((t, i) => {
+                    const tag = t.tag.trim().toLowerCase();
+                    const tr = t.translation.trim();
+                    if (tag && tr) {
+                        translations[tag] = tr;
+                    } else if (tag && i < cached.length && cached[i]) {
+                        translations[tag] = cached[i];
+                    }
+                });
+                return fetch('/save_caption/' + encodeURIComponent(allImages[currentIndex]), {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({content: content, translations: translations})
+                });
             })
             .then(r => r.json())
             .then(data => {
@@ -571,14 +706,15 @@
             btn.disabled = true; btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-2"></i> <span>打标中...</span>';
             const url = (method === 'wd14') ? '/auto_tag_wd14' : '/auto_tag';
             const label = (method === 'wd14') ? 'WD14 本地打标' : 'API 视觉模型打标';
-            executeWithProgress(url, {}, label, '正在为无标签图片自动生成标签...', function(data) {
-                btn.disabled = false; btn.innerHTML = '<i class="fa fa-magic mr-2"></i> <span>自动打标</span>';
-                if (data.tagged !== undefined && !data._error) {
-                    const msg = '打标完成：新增 ' + data.tagged + ' 张，跳过 ' + data.skipped + ' 张'
+            executeWithProgress(url, {}, label, '正在为无标签图片自动生成标签...',
+                function(data) {
+                    btn.disabled = false; btn.innerHTML = '<i class="fa fa-magic mr-2"></i> <span>自动打标</span>';
+                },
+                function(data) {
+                    return '打标完成：新增 ' + data.tagged + ' 张，跳过 ' + data.skipped + ' 张'
                         + (data.errors ? '，失败 ' + data.errors + ' 张' : '');
-                    showNotification(msg, data.errors ? 'warning' : 'success');
                 }
-            });
+            );
         }
 
         // === 添加触发词 ===
@@ -618,18 +754,15 @@
         function batchTranslate() {
             const btn = document.getElementById('btn-batch-translate');
             btn.disabled = true; btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-2"></i> <span>翻译中...</span>';
-            executeWithProgress('/batch_translate', {src: 'en', dst: 'zh'}, '批量翻译标签', '正在翻译所有未缓存的标签...', function(data) {
-                btn.disabled = false; btn.innerHTML = '<i class="fa fa-language mr-2"></i> <span>批量翻译</span>';
-                if (data.translated !== undefined && !data._error) {
-                    if (data.translated === 0) {
-                        showNotification('没有需要翻译的标签，所有标签已有翻译缓存', 'info');
-                    } else {
-                        const msg = '翻译完成：' + data.translated + ' 个标签，涉及 ' + data.files + ' 个文件'
-                            + (data.errors ? '，失败 ' + data.errors + ' 批' : '');
-                        showNotification(msg, data.errors ? 'warning' : 'success');
-                    }
+            executeWithProgress('/batch_translate', {src: 'en', dst: 'zh'}, '批量翻译标签', '正在翻译所有未缓存的标签...',
+                function(data) {
+                    btn.disabled = false; btn.innerHTML = '<i class="fa fa-language mr-2"></i> <span>批量翻译</span>';
+                },
+                function(data) {
+                    return '翻译完成：' + data.translated + ' 个标签，涉及 ' + data.files + ' 个文件'
+                        + (data.errors ? '，失败 ' + data.errors + ' 批' : '');
                 }
-            });
+            );
         }
 
         // === 防止刷新/关闭丢失未保存标签 ===
@@ -641,7 +774,7 @@
         });
 
         // === SSE 进度流式消费 ===
-        function executeWithProgress(url, body, title, subtitle, onComplete) {
+        function executeWithProgress(url, body, title, subtitle, onComplete, summaryFn) {
             const modal = document.getElementById('progress-modal');
             const bar = document.getElementById('progress-bar');
             const count = document.getElementById('progress-count');
@@ -730,6 +863,9 @@
                                 bar.style.width = '100%';
                                 pct.textContent = '100%';
                                 itemEl.textContent = '';
+                                if (summaryFn) {
+                                    document.getElementById('progress-subtitle').textContent = summaryFn(data);
+                                }
                                 closeBtn.classList.remove('hidden');
                                 if (onComplete) onComplete(data);
                             } else if (currentEventType === 'fatal') {
@@ -818,64 +954,136 @@
                 : '<i class="fa fa-columns mr-2"></i> <span>显示编辑</span>';
         }
 
-        // === 查找替换 ===
-        function openFindReplace() {
-            document.getElementById('find-replace-modal').classList.remove('hidden');
-            document.getElementById('fr-find').focus();
-            document.getElementById('fr-result').classList.add('hidden');
+        // === 标签统计 + 查找替换 ===
+        let allTagStats = [];
+        let tagStatsSortDesc = true; // 默认降序
+
+        function toggleTagStatsSort() {
+            tagStatsSortDesc = !tagStatsSortDesc;
+            document.getElementById('ts-sort-icon').className =
+                tagStatsSortDesc ? 'fa fa-sort-desc text-xs' : 'fa fa-sort-asc text-xs';
+            filterTagStats();
         }
-        function closeFindReplace() {
-            document.getElementById('find-replace-modal').classList.add('hidden');
+
+        function sortTagStats(stats) {
+            return stats.slice().sort((a, b) => tagStatsSortDesc ? b.count - a.count : a.count - b.count);
         }
-        function previewFindReplace() {
-            const find = document.getElementById('fr-find').value.trim();
-            if (!find) { showNotification('请输入查找内容', 'warning'); return; }
-            const saveP = isDirty() ? saveCaption() : Promise.resolve();
-            saveP.then(() => {
-                fetch('/find_replace', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({find: find, replace: '', preview: true})
-                })
-                .then(r => r.json())
-                .then(data => {
-                    const el = document.getElementById('fr-result');
-                    el.classList.remove('hidden');
-                    el.textContent = '找到 ' + data.replaced + ' 个匹配，涉及 ' + data.updated_files + ' 个文件';
-                })
-                .catch(() => showNotification('预览失败', 'error'));
+
+        function navigateToEditor() {
+            if (currentIndex >= 0 && allImages[currentIndex]) {
+                window.location.href = '/editor#' + encodeURIComponent(allImages[currentIndex]);
+                return false;
+            }
+            return true;
+        }
+
+        function openTagStats() {
+            document.getElementById('tag-stats-modal').classList.remove('hidden');
+            document.getElementById('ts-filter').value = '';
+            document.getElementById('ts-replace-find').value = '';
+            document.getElementById('ts-replace-to').value = '';
+            document.getElementById('ts-replace-btn').disabled = true;  // 替换框初始为空
+            document.getElementById('ts-sort-icon').className = 'fa fa-sort-desc text-xs';
+            tagStatsSortDesc = true;
+            document.getElementById('tag-stats-info').textContent = '加载中...';
+            document.getElementById('tag-stats-tbody').innerHTML = '';
+            fetch('/tag_stats')
+            .then(r => r.json())
+            .then(data => {
+                allTagStats = data.stats || [];
+                document.getElementById('tag-stats-info').textContent =
+                    '共 ' + data.total_files + ' 个文件，' + allTagStats.length + ' 种标签';
+                renderTagStatsTable(sortTagStats(allTagStats));
+            })
+            .catch(() => {
+                document.getElementById('tag-stats-info').textContent = '加载失败';
             });
         }
-        function executeFindReplace() {
-            const find = document.getElementById('fr-find').value.trim();
-            const replace = document.getElementById('fr-replace').value.trim();
-            if (!find) { showNotification('请输入查找内容', 'warning'); return; }
-            const btn = document.getElementById('fr-execute-btn');
+
+        function closeTagStats() {
+            document.getElementById('tag-stats-modal').classList.add('hidden');
+        }
+
+        function renderTagStatsTable(stats) {
+            if (!stats.length) {
+                document.getElementById('tag-stats-tbody').innerHTML =
+                    '<tr><td colspan="4" class="text-center text-gray-300 py-8">暂无匹配标签</td></tr>';
+                return;
+            }
+            document.getElementById('tag-stats-tbody').innerHTML = stats.map((s, i) =>
+                '<tr class="border-b border-gray-50 hover:bg-gray-50/80">'
+                + '<td class="px-6 py-1.5 text-gray-300">' + (i + 1) + '</td>'
+                + '<td class="px-4 py-1.5 font-mono">' + escapeHtml(s.tag) + '</td>'
+                + '<td class="px-4 py-1.5 text-right font-medium text-primary">' + s.count + '</td>'
+                + '<td class="px-4 py-1.5 text-gray-400">' + escapeHtml(s.translation || '') + '</td>'
+                + '</tr>'
+            ).join('');
+        }
+
+        function filterTagStats() {
+            const keyword = document.getElementById('ts-filter').value.trim().toLowerCase();
+            const base = '共 ' + (allTagStats.length || 0) + ' 种标签';
+            if (!keyword) {
+                renderTagStatsTable(sortTagStats(allTagStats));
+                document.getElementById('tag-stats-info').textContent = base;
+                return;
+            }
+            const filtered = sortTagStats(allTagStats.filter(s => s.tag.includes(keyword)));
+            document.getElementById('tag-stats-info').textContent =
+                base + '，匹配 ' + filtered.length + ' 种（共 ' + filtered.reduce((a, s) => a + s.count, 0) + ' 处）';
+            renderTagStatsTable(filtered);
+        }
+
+        function updateReplaceBtnState() {
+            document.getElementById('ts-replace-btn').disabled =
+                !document.getElementById('ts-replace-find').value.trim();
+        }
+
+        function executeTagStatsReplace() {
+            const replaceFind = document.getElementById('ts-replace-find').value.trim();
+            const replaceTo = document.getElementById('ts-replace-to').value.trim();
+            if (!replaceFind) { showNotification('请输入替换查找内容', 'warning'); return; }
+
+            const findLower = replaceFind.toLowerCase();
+            const matchedTags = allTagStats.filter(s => s.tag === findLower).map(s => s.tag);
+            if (!matchedTags.length) { showNotification('没有匹配的标签', 'info'); return; }
+
+            const btn = document.getElementById('ts-replace-btn');
             btn.disabled = true; btn.textContent = '替换中...';
-            // 先保存当前文件
+
             const saveP = isDirty() ? saveCaption() : Promise.resolve();
             saveP.then(() => {
-                fetch('/find_replace', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({find: find, replace: replace})
-                })
-                .then(r => r.json())
-                .then(data => {
-                    if (data.error) { showNotification(data.error, 'error'); return; }
-                    showNotification('替换完成：' + data.replaced + ' 处，涉及 ' + data.updated_files + ' 个文件', 'success');
-                    closeFindReplace();
-                    savedTags = currentTags.map(t => t.tag).filter(t => t.trim()).join(', ');
-                    setTimeout(() => location.reload(), 1000);
-                })
-                .catch(() => showNotification('替换失败', 'error'))
-                .finally(() => { btn.disabled = false; btn.textContent = '全部替换'; });
-            });
+                let chain = Promise.resolve({replaced: 0, updated_files: 0});
+                for (const tag of matchedTags) {
+                    chain = chain.then(acc => {
+                        return fetch('/find_replace', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({find: tag, replace: replaceTo})
+                        })
+                        .then(r => r.json())
+                        .then(data => ({
+                            replaced: acc.replaced + (data.replaced || 0),
+                            updated_files: acc.updated_files + (data.updated_files || 0)
+                        }));
+                    });
+                }
+                return chain;
+            })
+            .then(acc => {
+                showNotification('替换完成：' + acc.replaced + ' 处，涉及 ' + acc.updated_files + ' 个文件', 'success');
+                savedTags = currentTags.map(t => t.tag).filter(t => t.trim()).join(', ');
+                setTimeout(() => {
+                    window.location.hash = encodeURIComponent(allImages[currentIndex]);
+                    location.reload();
+                }, 1000);
+            })
+            .catch(() => showNotification('替换失败', 'error'))
+            .finally(() => { btn.disabled = false; btn.textContent = '替换匹配项'; });
         }
-        // ESC 关闭弹窗
-        document.getElementById('find-replace-modal').addEventListener('click', function(e) {
-            if (e.target === this) closeFindReplace();
-        });
+
+        // 旧函数兼容
+        function openFindReplace() { openTagStats(); }
 
         document.getElementById('clear-all').addEventListener('click', function() {
             if (confirm('确定要清空所有图片和标签文件吗？此操作不可恢复。')) {
@@ -887,7 +1095,10 @@
         // 初始化
         if (allImages.length > 0) {
             rebuildFileList();
-            navigateTo(0);
+            // 读取 hash 恢复之前查看的图片
+            const hashName = decodeURIComponent(window.location.hash.slice(1));
+            const hashIndex = hashName ? allImages.indexOf(hashName) : -1;
+            navigateTo(hashIndex >= 0 ? hashIndex : 0);
         }
     </script>
 </body>
