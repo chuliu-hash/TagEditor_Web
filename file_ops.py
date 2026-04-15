@@ -2,6 +2,7 @@
 import os
 from flask import Blueprint, request, redirect, url_for, jsonify, send_from_directory, current_app
 from config import allowed_file, safe_filename
+from translation import load_cache, save_cache
 
 file_ops_bp = Blueprint('file_ops', __name__)
 
@@ -55,9 +56,10 @@ def get_caption(image_name):
 
 @file_ops_bp.route('/save_caption/<image_name>', methods=['POST'])
 def save_caption(image_name):
-    """保存标签到文件"""
+    """保存标签到文件，同时将翻译列的变动更新到翻译缓存"""
     data = request.get_json()
     content = data.get('content', '')
+    translations = data.get('translations', {})
 
     base_name = os.path.splitext(image_name)[0]
     caption_file = f"{base_name}.txt"
@@ -66,10 +68,54 @@ def save_caption(image_name):
     try:
         with open(caption_path, 'w', encoding='utf-8') as f:
             f.write(content)
-        return jsonify({'success': True})
     except Exception as e:
         print(f"保存标签文件失败: {str(e)}")
         return jsonify({'success': False, 'error': str(e)})
+
+    # 更新翻译缓存：对比前端传来的翻译与缓存，有变化则更新
+    if translations:
+        cache = load_cache()
+        changed = False
+        for tag, tr in translations.items():
+            tag = tag.lower().strip()
+            tr = tr.strip()
+            if tag and tr and cache.get(tag) != tr:
+                cache[tag] = tr
+                changed = True
+        if changed:
+            save_cache(cache)
+
+    return jsonify({'success': True})
+
+
+@file_ops_bp.route('/tag_stats')
+def tag_stats():
+    """统计所有标签出现次数，附翻译缓存"""
+    from collections import Counter
+    upload_dir = current_app.config['UPLOAD_FOLDER']
+    counter = Counter()
+    for filename in os.listdir(upload_dir):
+        if not filename.endswith('.txt'):
+            continue
+        with open(os.path.join(upload_dir, filename), 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+        if not content:
+            continue
+        for tag in content.split(','):
+            tag = tag.strip()
+            if tag:
+                counter[tag.lower()] += 1
+
+    cache = load_cache()
+    stats = []
+    for tag, count in counter.most_common():
+        entry = {'tag': tag, 'count': count}
+        tr = cache.get(tag) or ''
+        if tr:
+            entry['translation'] = tr
+        stats.append(entry)
+
+    return jsonify({'stats': stats, 'total_files': len([f for f in os.listdir(upload_dir) if f.endswith('.txt')])})
 
 
 @file_ops_bp.route('/clear_all', methods=['POST'])
