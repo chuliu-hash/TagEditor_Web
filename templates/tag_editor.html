@@ -42,52 +42,62 @@
     <!-- 顶部导航栏 -->
     <header class="bg-white shadow-sm sticky top-0 z-50 border-b border-gray-200">
         <div class="container mx-auto px-4 py-2">
+            <!-- 第一行：标题 + 视图/导航 -->
             <div class="flex justify-between items-center">
-                <div class="flex items-center">
-                    <i class="fa fa-wrench text-primary text-2xl mr-2"></i>
+                <div class="flex items-center gap-2.5">
+                    <div class="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
+                        <i class="fa fa-wrench text-primary"></i>
+                    </div>
                     <h1 class="text-xl font-bold text-dark">标签批量编辑工具</h1>
                 </div>
-                <div class="flex items-center gap-2">
-                    <button id="btn-toggle-preview" class="flex items-center justify-center bg-gray-500 hover:bg-gray-600 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs" onclick="togglePreview()">
-                        <i class="fa fa-eye mr-1"></i> 预览
+                <div class="flex items-center gap-1.5">
+                    <button id="btn-toggle-preview" class="flex items-center justify-center bg-white hover:bg-gray-50 text-gray-600 font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs border border-gray-300" onclick="togglePreview()">
+                        <i class="fa fa-eye mr-1.5"></i> <span>隐藏预览</span>
                     </button>
-                    <button id="btn-toggle-editor" class="flex items-center justify-center bg-gray-500 hover:bg-gray-600 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs" onclick="toggleEditor()">
-                        <i class="fa fa-columns mr-1"></i> 编辑
+                    <button id="btn-toggle-editor" class="flex items-center justify-center bg-white hover:bg-gray-50 text-gray-600 font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs border border-gray-300" onclick="toggleEditor()">
+                        <i class="fa fa-columns mr-1.5"></i> <span>隐藏编辑</span>
                     </button>
+                    <div class="w-px h-5 bg-gray-200 mx-0.5"></div>
                     <a id="link-to-editor" href="/editor" class="flex items-center justify-center bg-gray-800 hover:bg-gray-900 text-white font-medium py-1.5 px-3 rounded-lg transition-all text-xs" onclick="return navigateToEditor()">
-                        <i class="fa fa-crop mr-1"></i> 图片编辑
+                        <i class="fa fa-crop mr-1.5"></i> 图片编辑
                     </a>
                 </div>
             </div>
-            <div class="flex flex-wrap gap-1.5 mt-2">
+            <!-- 第二行：功能按钮分组（上传 | 处理 | 清理） -->
+            <div class="flex flex-wrap items-center gap-1.5 mt-2">
+                <!-- 上传组 -->
                 <label for="file-upload" class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs">
-                    <i class="fa fa-upload mr-1"></i> 上传文件夹
+                    <i class="fa fa-upload mr-1.5"></i> 上传文件夹
                 </label>
                 <label for="image-upload" class="flex items-center justify-center bg-secondary hover:bg-secondary/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs">
-                    <i class="fa fa-image mr-1"></i> 上传图片
+                    <i class="fa fa-image mr-1.5"></i> 上传图片
                 </label>
                 <form id="upload-form" action="/upload" method="post" class="hidden" enctype="multipart/form-data">
                     <input id="file-upload" type="file" name="files" multiple webkitdirectory
                            class="hidden" onchange="handleFolderSelect(this)">
                 </form>
                 <form id="image-upload-form" action="/upload" method="post" class="hidden" enctype="multipart/form-data">
-                    <input id="image-upload" type="file" name="files" multiple accept="image/png,image/jpeg,image/gif"
+                    <input id="image-upload" type="file" name="files" multiple accept="image/png,image/jpeg,image/gif,image/webp"
                            class="hidden" onchange="this.form.submit()">
                 </form>
+                <div class="w-px h-5 bg-gray-200 mx-1"></div>
+                <!-- 处理组 -->
                 <button id="btn-auto-tag" class="flex items-center justify-center bg-accent hover:bg-accent/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs" onclick="openAutoTagModal()">
-                    <i class="fa fa-magic mr-1"></i> 自动打标
+                    <i class="fa fa-magic mr-1.5"></i> 自动打标
                 </button>
                 <button class="flex items-center justify-center bg-secondary hover:bg-secondary/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs" onclick="prependTags()">
-                    <i class="fa fa-tag mr-1"></i> 添加触发词
+                    <i class="fa fa-tag mr-1.5"></i> 添加触发词
                 </button>
                 <button id="btn-batch-translate" class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs" onclick="batchTranslate()">
-                    <i class="fa fa-language mr-1"></i> 批量翻译
+                    <i class="fa fa-language mr-1.5"></i> 批量翻译
                 </button>
                 <button class="flex items-center justify-center bg-gray-600 hover:bg-gray-700 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs" onclick="openTagStats()">
-                    <i class="fa fa-bar-chart mr-1"></i> 标签统计
+                    <i class="fa fa-bar-chart mr-1.5"></i> 标签统计
                 </button>
+                <div class="w-px h-5 bg-gray-200 mx-1"></div>
+                <!-- 清理组 -->
                 <button id="clear-all" class="flex items-center justify-center bg-danger hover:bg-danger/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs">
-                    <i class="fa fa-trash mr-1"></i> 清空所有
+                    <i class="fa fa-trash mr-1.5"></i> 清空所有
                 </button>
             </div>
         </div>
@@ -110,8 +120,10 @@
 
             <!-- 中间：图片预览 -->
             <div id="preview-panel" class="w-64 flex-shrink-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
-                <div id="preview-area" class="relative flex-1 min-h-0 flex justify-center items-center bg-gray-100 p-2 overflow-hidden">
-                    <img id="preview-img" src="" alt="" class="rounded select-none">
+                <div id="preview-area" class="relative flex-1 min-h-0 flex justify-center items-center bg-gray-100 overflow-hidden" style="cursor:default">
+                    <div id="preview-zoom-wrap">
+                        <img id="preview-img" src="" alt="" class="rounded select-none">
+                    </div>
                 </div>
                 <div class="flex border-t border-gray-200">
                     <button id="btn-prev" class="flex-1 py-2 text-center hover:bg-primary/5 transition-colors text-gray-500 hover:text-primary" onclick="navigatePrev()" title="上一张 (←)">
@@ -199,28 +211,6 @@
         </div>
     </div>
 
-    <!-- 查找替换弹窗 -->
-    <div id="find-replace-modal" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center hidden">
-        <div class="bg-white rounded-xl shadow-xl w-96 p-6">
-            <h3 class="text-lg font-semibold text-gray-800 mb-4">查找替换标签</h3>
-            <div class="space-y-3">
-                <div>
-                    <label class="block text-sm text-gray-600 mb-1">查找</label>
-                    <input id="fr-find" type="text" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary transition-colors" placeholder="输入要查找的标签">
-                </div>
-                <div>
-                    <label class="block text-sm text-gray-600 mb-1">替换为</label>
-                    <input id="fr-replace" type="text" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary transition-colors" placeholder="输入替换后的标签（留空则删除）">
-                </div>
-            </div>
-            <div id="fr-result" class="mt-3 text-sm text-gray-500 hidden"></div>
-            <div class="flex justify-end gap-2 mt-5">
-                <button class="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" onclick="closeFindReplace()">取消</button>
-                <button id="fr-preview-btn" class="px-4 py-2 text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg transition-colors" onclick="previewFindReplace()">预览</button>
-                <button id="fr-execute-btn" class="px-4 py-2 text-sm bg-primary hover:bg-primary/90 text-white rounded-lg transition-colors" onclick="executeFindReplace()">全部替换</button>
-            </div>
-        </div>
-    </div>
 
     <!-- 标签统计弹窗（含查找替换） -->
     <div id="tag-stats-modal" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center hidden" onclick="if(event.target===this)closeTagStats()">
@@ -324,7 +314,7 @@
         function handleFolderSelect(input) {
             const allFiles = Array.from(input.files);
             if (allFiles.length === 0) return;
-            const imageExts = ['png', 'jpg', 'jpeg', 'gif'];
+            const imageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp'];
             const imageBases = new Set();
             allFiles.forEach(f => {
                 const ext = f.name.split('.').pop().toLowerCase();
@@ -450,19 +440,80 @@
         function navigatePrev() { navigateTo(currentIndex - 1); }
 
         // 预览图自适应缩放：小图放大填充预览区
+        let previewScale = 1, previewPanX = 0, previewPanY = 0;
+        let previewDragStartX = 0, previewDragStartY = 0, previewDragging = false;
+
         function fitPreviewImage() {
             const img = document.getElementById('preview-img');
             const area = document.getElementById('preview-area');
             if (!img || !area || !img.naturalWidth) return;
-            const maxW = area.clientWidth - 16; // p-2 = 8px * 2
-            const maxH = area.clientHeight - 16;
+            const maxW = area.clientWidth;
+            const maxH = area.clientHeight;
             if (maxW <= 0 || maxH <= 0) return;
             const scale = Math.min(maxW / img.naturalWidth, maxH / img.naturalHeight);
             img.style.width = Math.round(img.naturalWidth * scale) + 'px';
             img.style.height = Math.round(img.naturalHeight * scale) + 'px';
+            previewScale = 1; previewPanX = 0; previewPanY = 0;
+            applyPreviewTransform();
+        }
+
+        function applyPreviewTransform() {
+            const wrap = document.getElementById('preview-zoom-wrap');
+            if (!wrap) return;
+            wrap.style.transform = 'translate(' + previewPanX + 'px,' + previewPanY + 'px) scale(' + previewScale + ')';
+            wrap.style.transformOrigin = '0 0';
+            const area = document.getElementById('preview-area');
+            if (area) area.style.cursor = previewScale > 1 ? 'grab' : 'default';
         }
 
         document.getElementById('preview-img').addEventListener('load', fitPreviewImage);
+
+        // 预览区滚轮缩放
+        document.getElementById('preview-area')?.addEventListener('wheel', function(e) {
+            e.preventDefault();
+            const oldScale = previewScale;
+            const delta = e.deltaY < 0 ? 0.3 : -0.3;
+            previewScale = Math.max(1, Math.min(8, previewScale + delta));
+            if (previewScale === oldScale) return;
+
+            // 以鼠标为锚缩放：坐标基于 wrap 原始（未变换）左上角，而非容器
+            // （wrap 在容器内居中，用容器坐标会引入居中偏移导致缩放焦点偏移）
+            const wrap = document.getElementById('preview-zoom-wrap');
+            const wr = wrap.getBoundingClientRect();
+            const mx = e.clientX - wr.left + previewPanX;
+            const my = e.clientY - wr.top + previewPanY;
+            const ratio = previewScale / oldScale;
+            previewPanX = mx - ratio * (mx - previewPanX);
+            previewPanY = my - ratio * (my - previewPanY);
+            applyPreviewTransform();
+        });
+
+        // 预览区拖拽平移
+        document.getElementById('preview-area')?.addEventListener('mousedown', function(e) {
+            if (previewScale <= 1 || e.button !== 0) return;
+            previewDragging = true;
+            previewDragStartX = e.clientX - previewPanX;
+            previewDragStartY = e.clientY - previewPanY;
+            this.style.cursor = 'grabbing';
+            e.preventDefault();
+        });
+        document.addEventListener('mousemove', function(e) {
+            if (!previewDragging) return;
+            previewPanX = e.clientX - previewDragStartX;
+            previewPanY = e.clientY - previewDragStartY;
+            applyPreviewTransform();
+        });
+        document.addEventListener('mouseup', function() {
+            if (!previewDragging) return;
+            previewDragging = false;
+            const area = document.getElementById('preview-area');
+            if (area) area.style.cursor = previewScale > 1 ? 'grab' : 'default';
+        });
+
+        // 双击重置
+        document.getElementById('preview-area')?.addEventListener('dblclick', function() {
+            fitPreviewImage();
+        });
         function navigateNext() { navigateTo(currentIndex + 1); }
         document.addEventListener('keydown', function(e) {
             if (e.target.tagName === 'INPUT') return;
@@ -741,7 +792,7 @@
                 if (data.error) { showNotification(data.error, 'error'); return; }
                 showNotification('已为 ' + data.updated + ' 个文件添加触发词', 'success');
                 closePrepend();
-                setTimeout(() => location.reload(), 1000);
+                setTimeout(refreshCurrentImage, 1000);
             })
             .catch(() => showNotification('添加触发词失败', 'error'))
             .finally(() => { btn.disabled = false; btn.textContent = '确定'; });
@@ -853,12 +904,8 @@
                                 div.textContent = (data.item ? data.item + ': ' : '') + data.error;
                                 errBox.appendChild(div);
                                 errBox.scrollTop = errBox.scrollHeight;
-                                // 出错即中断，显示关闭按钮
-                                reader.cancel();
-                                bar.classList.remove('bg-primary'); bar.classList.add('bg-red-500');
-                                closeBtn.classList.remove('hidden');
-                                if (onComplete) onComplete({tagged: 0, skipped: 0, errors: 1, translated: 0, files: 0, _error: true});
-                                return;
+                                // 单项错误：仅累积显示，不中断流（后端会继续处理后续项），
+                                // 进度条保持前进，直到 complete/fatal 才收尾
                             } else if (currentEventType === 'complete') {
                                 bar.style.width = '100%';
                                 pct.textContent = '100%';
@@ -903,10 +950,19 @@
             });
         }
 
+        function refreshCurrentImage() {
+            // 局部刷新当前图（标签 + 预览），替代整页 reload，保留滚动位置与编辑焦点
+            if (currentIndex >= 0 && allImages[currentIndex]) {
+                var name = allImages[currentIndex];
+                currentTags = []; savedTags = '';  // 同步清空，避免 loadCaption 异步返回前 isDirty 误报
+                document.getElementById('preview-img').src = '/uploads/' + encodeURIComponent(name) + '?t=' + Date.now();
+                loadCaption(name);
+            }
+        }
+
         function closeProgressModal() {
             document.getElementById('progress-modal').classList.add('hidden');
-            // 进度弹窗关闭时刷新页面以加载最新数据
-            location.reload();
+            refreshCurrentImage();
         }
 
         // === 通知 ===
@@ -931,6 +987,7 @@
             btn.innerHTML = previewVisible
                 ? '<i class="fa fa-eye mr-2"></i> <span>隐藏预览</span>'
                 : '<i class="fa fa-eye-slash mr-2"></i> <span>显示预览</span>';
+            if (previewVisible) requestAnimationFrame(fitPreviewImage);
         }
 
         // === 切换编辑区 ===
@@ -952,6 +1009,8 @@
             btn.innerHTML = editorVisible
                 ? '<i class="fa fa-columns mr-2"></i> <span>隐藏编辑</span>'
                 : '<i class="fa fa-columns mr-2"></i> <span>显示编辑</span>';
+            // 面板尺寸变化后重新缩放图片
+            requestAnimationFrame(fitPreviewImage);
         }
 
         // === 标签统计 + 查找替换 ===
@@ -1021,7 +1080,7 @@
         }
 
         function filterTagStats() {
-            const keyword = document.getElementById('ts-filter').value.trim().toLowerCase();
+            const keyword = document.getElementById('ts-filter').value.trim();  // 区分大小写
             const base = '共 ' + (allTagStats.length || 0) + ' 种标签';
             if (!keyword) {
                 renderTagStatsTable(sortTagStats(allTagStats));
@@ -1044,8 +1103,7 @@
             const replaceTo = document.getElementById('ts-replace-to').value.trim();
             if (!replaceFind) { showNotification('请输入替换查找内容', 'warning'); return; }
 
-            const findLower = replaceFind.toLowerCase();
-            const matchedTags = allTagStats.filter(s => s.tag === findLower).map(s => s.tag);
+            const matchedTags = allTagStats.filter(s => s.tag === replaceFind).map(s => s.tag);
             if (!matchedTags.length) { showNotification('没有匹配的标签', 'info'); return; }
 
             const btn = document.getElementById('ts-replace-btn');
@@ -1072,18 +1130,11 @@
             })
             .then(acc => {
                 showNotification('替换完成：' + acc.replaced + ' 处，涉及 ' + acc.updated_files + ' 个文件', 'success');
-                savedTags = currentTags.map(t => t.tag).filter(t => t.trim()).join(', ');
-                setTimeout(() => {
-                    window.location.hash = encodeURIComponent(allImages[currentIndex]);
-                    location.reload();
-                }, 1000);
+                setTimeout(refreshCurrentImage, 1000);
             })
             .catch(() => showNotification('替换失败', 'error'))
             .finally(() => { btn.disabled = false; btn.textContent = '替换匹配项'; });
         }
-
-        // 旧函数兼容
-        function openFindReplace() { openTagStats(); }
 
         document.getElementById('clear-all').addEventListener('click', function() {
             if (confirm('确定要清空所有图片和标签文件吗？此操作不可恢复。')) {

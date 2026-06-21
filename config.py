@@ -4,8 +4,20 @@ import re
 from pathlib import Path
 
 
+_env_mtime = None
+
+
 def load_env(env_path='.env'):
+    """读取 .env 到 os.environ。通过 mtime 检测避免每次调用都读磁盘（API 热更新仍生效）。"""
+    global _env_mtime
     env_file = Path(__file__).parent / env_path
+    try:
+        mtime = env_file.stat().st_mtime
+    except OSError:
+        mtime = None
+    # .env 未变化则跳过磁盘读取
+    if _env_mtime is not None and _env_mtime == mtime:
+        return
     if env_file.exists():
         with open(env_file, 'r', encoding='utf-8') as f:
             for line in f:
@@ -15,6 +27,7 @@ def load_env(env_path='.env'):
                     key = key.strip()
                     value = value.strip().strip('"').strip("'")
                     os.environ[key] = value
+    _env_mtime = mtime
 
 
 def get_llm_config():
@@ -53,7 +66,22 @@ def get_wd14_config():
     }
 
 
-ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
+def get_realesrgan_config():
+    """每次调用时重新读取 Real-ESRGAN 配置。
+    使用 anime_6B 动漫模型（4x 放大），权重路径由 .env 的 REALESRGAN_MODEL_PATH 配置。
+    tile=0 表示不切瓦片（整图推理），显存不足时设为 400/512 等分块。"""
+    load_env()
+    model_path = os.environ.get('REALESRGAN_MODEL_PATH', 'models/RealESRGAN_x4plus_anime_6B.pth')
+    if not os.path.isabs(model_path):
+        model_path = str(Path(__file__).parent / model_path)
+    return {
+        'model_path': model_path,
+        'tile': int(os.environ.get('REALESRGAN_TILE', '0')),
+        'tile_pad': int(os.environ.get('REALESRGAN_TILE_PAD', '10')),
+    }
+
+
+ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 ALLOWED_TEXT_EXTENSIONS = {'txt'}
 
 
@@ -82,3 +110,14 @@ def safe_filename(filename):
     filename = os.path.basename(filename)
     filename = filename.strip(' .')
     return filename if filename else 'unnamed'
+
+
+def is_within_directory(path, base_dir):
+    """校验 path 是否词法上位于 base_dir 之内（防止路径遍历）。
+
+    用 os.path.commonpath 逐段比较，避免 startswith 把 'uploads_evil'
+    这类同前缀目录误判为合法。path/base_dir 都会被规范化为绝对路径。
+    """
+    abs_path = os.path.abspath(path)
+    abs_base = os.path.abspath(base_dir)
+    return os.path.commonpath([abs_path, abs_base]) == abs_base

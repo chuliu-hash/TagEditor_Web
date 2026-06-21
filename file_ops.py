@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 from flask import Blueprint, request, redirect, url_for, jsonify, send_from_directory, current_app
-from config import allowed_file, safe_filename
+from config import allowed_file, safe_filename, is_within_directory
 from translation import load_cache, save_cache
 
 file_ops_bp = Blueprint('file_ops', __name__)
@@ -61,6 +61,18 @@ def save_caption(image_name):
     content = data.get('content', '')
     translations = data.get('translations', {})
 
+    # 大小写不敏感去重（与前端逻辑一致），防止非浏览器客户端写入重复标签
+    seen = set()
+    deduped = []
+    for t in content.split(','):
+        t = t.strip()
+        if t:
+            key = t.lower()
+            if key not in seen:
+                seen.add(key)
+                deduped.append(t)
+    content = ', '.join(deduped)
+
     base_name = os.path.splitext(image_name)[0]
     caption_file = f"{base_name}.txt"
     caption_path = os.path.join(current_app.config['UPLOAD_FOLDER'], caption_file)
@@ -104,13 +116,13 @@ def tag_stats():
         for tag in content.split(','):
             tag = tag.strip()
             if tag:
-                counter[tag.lower()] += 1
+                counter[tag] += 1  # 保留原始大小写，使查找/替换可区分大小写
 
     cache = load_cache()
     stats = []
     for tag, count in counter.most_common():
         entry = {'tag': tag, 'count': count}
-        tr = cache.get(tag) or ''
+        tr = cache.get(tag.lower()) or ''  # 翻译缓存 key 全小写，用原 tag 的小写形式查
         if tr:
             entry['translation'] = tr
         stats.append(entry)
@@ -139,7 +151,7 @@ def delete_image(image_name):
     filename = safe_filename(image_name)
     upload_dir = os.path.abspath(current_app.config['UPLOAD_FOLDER'])
     file_path = os.path.abspath(os.path.join(upload_dir, filename))
-    if not file_path.startswith(upload_dir):
+    if not is_within_directory(file_path, upload_dir):
         return jsonify({'success': False, 'error': '非法路径'}), 400
     if os.path.exists(file_path):
         os.unlink(file_path)
@@ -152,5 +164,8 @@ def delete_image(image_name):
 
 @file_ops_bp.route('/uploads/<filename>')
 def uploaded_file(filename):
-    """提供上传文件的访问"""
-    return send_from_directory(current_app.config['UPLOAD_FOLDER'], filename)
+    """提供上传文件的访问（带浏览器缓存，减少切换图片时的重复请求）"""
+    resp = send_from_directory(current_app.config['UPLOAD_FOLDER'], filename)
+    # ETag/Last-Modified 默认存在，文件变更时浏览器会重新拉取；max-age 省去 304 往返
+    resp.headers['Cache-Control'] = 'public, max-age=3600'
+    return resp

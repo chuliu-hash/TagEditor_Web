@@ -12,14 +12,28 @@ translation_bp = Blueprint('translation', __name__)
 
 CACHE_FILE = Path(__file__).parent / 'translation_cache.json'
 
-# 内存缓存 + 反向索引，避免每次请求读磁盘和线性扫描
+# 内存缓存 + 反向索引，避免每次请求读磁盘和线性扫描。
+# 多进程部署（如 gunicorn 多 worker）下每个进程各持一份内存缓存，
+# 通过 _cache_file_mtime 检测磁盘文件被其他进程更新来失效内存缓存；
+# save_cache 采用临时文件 + os.replace 原子写入，避免并发写损坏 JSON。
 _cache_memory = None
 _reverse_index = None
+_cache_mtime = None
+
+
+def _cache_file_mtime():
+    """读取缓存文件的 mtime；文件不存在或不可访问时返回 None"""
+    try:
+        return CACHE_FILE.stat().st_mtime
+    except OSError:
+        return None
 
 
 def load_cache():
-    global _cache_memory, _reverse_index
-    if _cache_memory is not None:
+    global _cache_memory, _reverse_index, _cache_mtime
+    current_mtime = _cache_file_mtime()
+    # 内存缓存命中且磁盘未被其他进程更新时直接返回
+    if _cache_memory is not None and _cache_mtime == current_mtime:
         return _cache_memory
     if CACHE_FILE.exists():
         try:
@@ -29,6 +43,7 @@ def load_cache():
             _cache_memory = {}
     else:
         _cache_memory = {}
+    _cache_mtime = current_mtime
     # 构建反向索引：value.lower() → key
     _reverse_index = {}
     for k, v in _cache_memory.items():
@@ -37,13 +52,17 @@ def load_cache():
 
 
 def save_cache(cache):
-    global _cache_memory, _reverse_index
+    global _cache_memory, _reverse_index, _cache_mtime
     _cache_memory = cache
     _reverse_index = {}
     for k, v in cache.items():
         _reverse_index[v.lower()] = k
-    with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+    # 原子写入：先写临时文件再替换，防止多进程/并发请求写损坏 JSON
+    tmp_path = str(CACHE_FILE) + '.tmp'
+    with open(tmp_path, 'w', encoding='utf-8') as f:
         json.dump(cache, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, str(CACHE_FILE))
+    _cache_mtime = _cache_file_mtime()
 
 
 def lookup_tag(tag_lower, cache):
@@ -53,6 +72,37 @@ def lookup_tag(tag_lower, cache):
     if _reverse_index is not None and tag_lower in _reverse_index:
         return _reverse_index[tag_lower]
     return ''
+
+
+def _llm_translate_tags(cfg, tags, src_name, dst_name):
+    """调用 LLM 翻译一批标签。返回 (translations, error)。
+
+    成功：translations 为与 tags 等长的列表，error 为 None。
+    失败：translations 为 None，error 为错误消息。
+    网络异常（如 requests.exceptions.Timeout）向上抛出，由调用方处理。
+    """
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {cfg["api_key"]}',
+    }
+    payload = {
+        'model': cfg['model'],
+        'messages': [
+            {'role': 'system', 'content': cfg['prompt'].format(src_name=src_name, dst_name=dst_name)},
+            {'role': 'user', 'content': json.dumps(tags, ensure_ascii=False)},
+        ],
+        'temperature': 0.3,
+    }
+    response = requests.post(cfg['api_url'], headers=headers, json=payload, timeout=120)
+    result = response.json()
+    if 'error' in result:
+        return None, result['error'].get('message', '未知错误')
+    content = result['choices'][0]['message']['content'].strip()
+    match = re.search(r'\[.*?\]', content, re.DOTALL)
+    translations = json.loads(match.group()) if match else [content] * len(tags)
+    while len(translations) < len(tags):
+        translations.append('')
+    return translations[:len(tags)], None
 
 
 @translation_bp.route('/lookup_cache', methods=['POST'])
@@ -100,68 +150,38 @@ def translate_tags():
         return jsonify({'translations': [r or '' for r in results]})
 
     cfg = get_llm_config()
+    if not cfg['prompt']:
+        return jsonify({'error': '未配置翻译系统提示（LLM_TAG_TRANSLATE_PROMPT）'}), 400
     lang_map = {'zh': '中文', 'en': '英文'}
     src_name = lang_map.get(src, src)
     dst_name = lang_map.get(dst, dst)
 
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {cfg["api_key"]}',
-    }
-
-    if not cfg['prompt']:
-        return jsonify({'error': '未配置翻译系统提示（LLM_TAG_TRANSLATE_PROMPT）'}), 400
-    tag_system_content = cfg['prompt'].format(src_name=src_name, dst_name=dst_name)
-
-    payload = {
-        'model': cfg['model'],
-        'messages': [
-            {'role': 'system', 'content': tag_system_content},
-            {'role': 'user', 'content': json.dumps(uncached, ensure_ascii=False)}
-        ],
-        'temperature': 0.3,
-    }
-
     try:
-        response = requests.post(cfg['api_url'], headers=headers, json=payload, timeout=120)
-        result = response.json()
-
-        if 'error' in result:
-            return jsonify({'error': result['error'].get('message', '未知错误')}), 500
-
-        content = result['choices'][0]['message']['content'].strip()
-        match = re.search(r'\[.*?\]', content, re.DOTALL)
-        if match:
-            translations = json.loads(match.group())
-        else:
-            translations = [content] * len(uncached)
-
-        while len(translations) < len(uncached):
-            translations.append('')
-        translations = translations[:len(uncached)]
-
-        changed = False
-        for j, idx in enumerate(uncached_indices):
-            translated = translations[j]
-            results[idx] = translated
-            tag_lower = uncached[j].lower().strip()
-            if tag_lower and translated:
-                translated_lower = translated.lower().strip()
-                if isEn2Zh:
-                    cache[tag_lower] = translated
-                else:
-                    cache[translated_lower] = tag_lower
-                changed = True
-
-        if changed:
-            save_cache(cache)
-
-        return jsonify({'translations': [r or '' for r in results]})
-
+        translations, err = _llm_translate_tags(cfg, uncached, src_name, dst_name)
+        if err:
+            return jsonify({'error': err}), 500
     except requests.exceptions.Timeout:
         return jsonify({'error': '翻译超时'}), 504
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+    changed = False
+    for j, idx in enumerate(uncached_indices):
+        translated = translations[j]
+        results[idx] = translated
+        tag_lower = uncached[j].lower().strip()
+        if tag_lower and translated:
+            translated_lower = translated.lower().strip()
+            if isEn2Zh:
+                cache[tag_lower] = translated
+            else:
+                cache[translated_lower] = tag_lower
+            changed = True
+
+    if changed:
+        save_cache(cache)
+
+    return jsonify({'translations': [r or '' for r in results]})
 
 
 @translation_bp.route('/batch_translate', methods=['POST'])
@@ -202,10 +222,6 @@ def batch_translate():
     lang_map = {'zh': '中文', 'en': '英文'}
     src_name = lang_map.get(src, src)
     dst_name = lang_map.get(dst, dst)
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {cfg["api_key"]}',
-    }
 
     batch_size = 50
     total_batches = (len(tag_list) + batch_size - 1) // batch_size
@@ -220,30 +236,12 @@ def batch_translate():
 
             yield sse_event('progress', {'current': batch_idx, 'total': total_batches, 'item': batch_desc})
 
-            payload = {
-                'model': cfg['model'],
-                'messages': [
-                    {'role': 'system', 'content': cfg['prompt'].format(src_name=src_name, dst_name=dst_name)},
-                    {'role': 'user', 'content': json.dumps(batch, ensure_ascii=False)}
-                ],
-                'temperature': 0.3,
-            }
             try:
-                response = requests.post(cfg['api_url'], headers=headers, json=payload, timeout=120)
-                result = response.json()
-                if 'error' in result:
+                translations, err = _llm_translate_tags(cfg, batch, src_name, dst_name)
+                if err:
                     error_count += 1
-                    yield sse_event('error', {'item': batch_desc, 'error': result['error'].get('message', '未知错误')})
+                    yield sse_event('error', {'item': batch_desc, 'error': err})
                     continue
-                content = result['choices'][0]['message']['content'].strip()
-                match = re.search(r'\[.*?\]', content, re.DOTALL)
-                if match:
-                    translations = json.loads(match.group())
-                else:
-                    translations = [content] * len(batch)
-                while len(translations) < len(batch):
-                    translations.append('')
-                translations = translations[:len(batch)]
                 for j, tag in enumerate(batch):
                     translated_map[tag] = translations[j]
                     tag_lower = tag.lower().strip()

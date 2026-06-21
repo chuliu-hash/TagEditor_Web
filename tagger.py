@@ -10,8 +10,12 @@ from sse_utils import sse_event
 
 tagger_bp = Blueprint('tagger', __name__)
 
-# WD14 模型缓存（首次加载后常驻内存）
+# WD14 模型缓存（首次加载后常驻内存）。只读缓存，无并发一致性问题；
+# 但多进程部署时每个 worker 会各自加载一份模型到显存，建议单 worker 运行。
 _wd14_model_cache = {'session': None, 'label_df': None, 'model_name': None}
+
+# WD14 批量推理的 batch 大小：攒多张一次 session.run，显著减少单张推理的固定开销
+WD14_BATCH_SIZE = 8
 
 
 def wd14_preprocess_image(image_path):
@@ -124,7 +128,7 @@ def auto_tag():
 
             file_path = os.path.join(upload_dir, filename)
             ext = os.path.splitext(filename)[1].lstrip('.')
-            mime_map = {'jpg': 'jpeg', 'jpeg': 'jpeg', 'png': 'png', 'gif': 'gif'}
+            mime_map = {'jpg': 'jpeg', 'jpeg': 'jpeg', 'png': 'png', 'gif': 'gif', 'webp': 'webp'}
             mime = f"image/{mime_map.get(ext, 'jpeg')}"
 
             try:
@@ -184,6 +188,7 @@ def auto_tag_wd14():
     def generate():
         tagged = 0
         error_count = 0
+        done = 0  # 已处理张数（含失败），用于进度推送
 
         yield sse_event('progress', {'current': 0, 'total': total, 'item': '正在加载 WD14 模型...'})
 
@@ -197,29 +202,59 @@ def auto_tag_wd14():
         label_df = model_cache['label_df']
         input_name = session.get_inputs()[0].name
 
-        for idx, filename in enumerate(to_tag, start=1):
-            yield sse_event('progress', {'current': idx, 'total': total, 'item': filename})
+        for batch_start in range(0, total, WD14_BATCH_SIZE):
+            batch_files = to_tag[batch_start:batch_start + WD14_BATCH_SIZE]
 
-            file_path = os.path.join(upload_dir, filename)
-            try:
-                img = wd14_preprocess_image(file_path)
-                probs = session.run(None, {input_name: img})[0][0]
-                tags = wd14_filter_tags(
-                    label_df, probs,
-                    cfg['general_threshold'], cfg['character_threshold'],
-                    cfg['excluded_tags']
-                )
-                if tags:
-                    txt_path = os.path.join(upload_dir, f"{os.path.splitext(filename)[0]}.txt")
-                    with open(txt_path, 'w', encoding='utf-8') as f:
-                        f.write(tags)
-                    tagged += 1
-                else:
+            # 预处理阶段：逐张解码+缩放，失败的单独记错并跳过（不进 batch）
+            imgs = []
+            ok_files = []
+            for filename in batch_files:
+                try:
+                    imgs.append(wd14_preprocess_image(os.path.join(upload_dir, filename)))
+                    ok_files.append(filename)
+                except Exception as e:
+                    done += 1
                     error_count += 1
-                    yield sse_event('error', {'item': filename, 'error': '未产生有效标签'})
+                    yield sse_event('progress', {'current': done, 'total': total, 'item': filename})
+                    yield sse_event('error', {'item': filename, 'error': str(e)})
+
+            if not imgs:
+                continue
+
+            # 批量推理：(N,448,448,3) -> (N, num_tags)
+            try:
+                batch_input = np.concatenate(imgs, axis=0)
+                probs_batch = session.run(None, {input_name: batch_input})[0]
             except Exception as e:
-                error_count += 1
-                yield sse_event('error', {'item': filename, 'error': str(e)})
+                # 整批推理失败，逐张报错
+                for filename in ok_files:
+                    done += 1
+                    error_count += 1
+                    yield sse_event('progress', {'current': done, 'total': total, 'item': filename})
+                    yield sse_event('error', {'item': filename, 'error': str(e)})
+                continue
+
+            # 逐张过滤+写标签（进度仍逐张推送）
+            for k, filename in enumerate(ok_files):
+                done += 1
+                yield sse_event('progress', {'current': done, 'total': total, 'item': filename})
+                try:
+                    tags = wd14_filter_tags(
+                        label_df, probs_batch[k],
+                        cfg['general_threshold'], cfg['character_threshold'],
+                        cfg['excluded_tags']
+                    )
+                    if tags:
+                        txt_path = os.path.join(upload_dir, f"{os.path.splitext(filename)[0]}.txt")
+                        with open(txt_path, 'w', encoding='utf-8') as f:
+                            f.write(tags)
+                        tagged += 1
+                    else:
+                        error_count += 1
+                        yield sse_event('error', {'item': filename, 'error': '未产生有效标签'})
+                except Exception as e:
+                    error_count += 1
+                    yield sse_event('error', {'item': filename, 'error': str(e)})
 
         yield sse_event('complete', {'tagged': tagged, 'skipped': skipped, 'errors': error_count})
 

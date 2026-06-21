@@ -1,0 +1,1366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>图片编辑器</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#3B82F6',
+                        secondary: '#10B981',
+                        accent: '#F59E0B',
+                        danger: '#EF4444',
+                        dark: '#1E293B',
+                        light: '#F8FAFC'
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        #file-list::-webkit-scrollbar { width: 4px; }
+        #file-list::-webkit-scrollbar-track { background: transparent; }
+        #file-list::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 2px; }
+        #file-list::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        .canvas-container { position: relative; display: flex; align-items: flex-start; justify-content: flex-start; }
+        .canvas-container canvas {
+            position: absolute; top: 0; left: 0; /* cursor 由 JS 按 hover 区域动态设置 */
+        }
+    </style>
+</head>
+<body class="bg-gray-50 font-sans text-gray-800 min-h-screen flex flex-col">
+    <!-- 顶部导航 -->
+    <header class="bg-white shadow-sm sticky top-0 z-50 border-b border-gray-200">
+        <div class="container mx-auto px-4 py-3 flex justify-between items-center">
+            <div class="flex items-center gap-3">
+                <i class="fa fa-crop text-primary text-2xl"></i>
+                <h1 class="text-xl font-bold text-dark">图片编辑器</h1>
+            </div>
+            <div class="flex items-center gap-2">
+                <span id="img-info" class="text-sm text-gray-400 mr-3"></span>
+                <button id="btn-crop" class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed" onclick="toggleCropMode()" disabled>
+                    <i class="fa fa-crop mr-2"></i> 裁剪
+                </button>
+                <button id="btn-rotate" class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed" onclick="rotateImage(90)" title="顺时针旋转90°">
+                    <i class="fa fa-repeat mr-2"></i> 旋转
+                </button>
+                <button class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm" onclick="openScaleModal()" title="保持比例缩放整图">
+                    <i class="fa fa-expand mr-2"></i> 缩放
+                </button>
+                <button id="btn-upscale" class="flex items-center justify-center bg-accent hover:bg-accent/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed" onclick="openUpscaleModal()" title="Real-ESRGAN 超清放大">
+                    <i class="fa fa-diamond mr-2"></i> 超清放大
+                </button>
+                <button id="btn-alpha" class="flex items-center justify-center bg-accent hover:bg-accent/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed" onclick="openAlphaModal()" title="透明转色底">
+                    <i class="fa fa-adjust mr-2"></i> 透明转色底
+                </button>
+                <button id="btn-reset" class="flex items-center justify-center bg-gray-500 hover:bg-gray-600 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed" onclick="resetEditor()" disabled>
+                    <i class="fa fa-undo mr-2"></i> 重置
+                </button>
+                <button id="btn-save" class="flex items-center justify-center bg-secondary hover:bg-secondary/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed" onclick="saveImage()" disabled>
+                    <i class="fa fa-save mr-2"></i> 保存
+                </button>
+                <a id="link-to-tags" href="/" class="flex items-center justify-center bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium py-2 px-4 rounded-lg transition-all text-sm" onclick="return navigateToTags()">
+                    <i class="fa fa-tags mr-2"></i> 标签编辑
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <!-- 主内容 -->
+    <main class="flex-grow container mx-auto px-4 py-4">
+        {% if images %}
+        <div class="flex gap-3 h-[calc(100vh-80px)]">
+            <!-- 左侧：文件列表 -->
+            <div class="w-48 flex-shrink-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+                <div class="px-3 py-2 bg-gray-50 border-b border-gray-200 font-semibold text-xs text-gray-500 uppercase tracking-wide flex items-center justify-between">
+                    <span>图片列表</span>
+                    <span class="text-xs text-gray-400 font-normal" id="image-counter">{{ image_count }} 张</span>
+                </div>
+                <div id="file-list" class="flex-grow overflow-y-auto"></div>
+            </div>
+
+            <!-- 右侧：编辑区 -->
+            <div class="flex-grow bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col min-w-0 overflow-hidden">
+                <!-- 裁剪参数条（仅裁剪模式显示） -->
+                <div id="crop-toolbar" class="hidden px-3 py-2 bg-gray-50 border-b border-gray-200 flex items-center gap-2 text-xs flex-wrap">
+                    <span class="text-gray-500 font-medium">裁剪目标</span>
+                    <input id="crop-w" type="number" value="512" min="1" step="1" class="w-16 px-2 py-1 border border-gray-300 rounded text-center focus:outline-none focus:border-primary" onchange="onCropTargetChange()">
+                    <span class="text-gray-400">×</span>
+                    <input id="crop-h" type="number" value="768" min="1" step="1" class="w-16 px-2 py-1 border border-gray-300 rounded text-center focus:outline-none focus:border-primary" onchange="onCropTargetChange()">
+                    <div class="h-4 w-px bg-gray-300 mx-1"></div>
+                    <button class="px-2 py-1 bg-white border border-gray-300 rounded hover:bg-gray-100 transition-colors" onclick="setCropPreset(512,512)">512²</button>
+                    <button class="px-2 py-1 bg-white border border-gray-300 rounded hover:bg-gray-100 transition-colors" onclick="setCropPreset(768,768)">768²</button>
+                    <button class="px-2 py-1 bg-white border border-gray-300 rounded hover:bg-gray-100 transition-colors" onclick="setCropPreset(1024,1024)">1024²</button>
+                    <span class="text-gray-400 hidden sm:inline">拖角缩放 · 拖体移动</span>
+                    <button id="btn-crop-ok" class="ml-auto px-4 py-1.5 bg-primary text-white rounded text-sm font-medium hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed" onclick="executeCrop()" disabled>
+                        <i class="fa fa-check mr-1.5"></i>确定裁剪
+                    </button>
+                </div>
+                <div id="editor-area" class="flex-1 min-h-0 flex items-center justify-center bg-gray-100 overflow-hidden" style="cursor:default">
+                    <div id="editor-zoom-wrap">
+                        <div id="canvas-wrapper" class="canvas-container" style="max-width:calc(100% - 32px);max-height:calc(100% - 32px);">
+                            <img id="editor-img" src="" alt="" class="block select-none" style="display:none;max-width:100%;max-height:100%;object-fit:contain" onload="onImgDisplayReady()">
+                            <canvas id="editor-canvas"></canvas>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex border-t border-gray-200">
+                    <button id="btn-prev" class="flex-1 py-2 text-center hover:bg-primary/5 transition-colors text-gray-500 hover:text-primary" onclick="navigatePrev()">
+                        <i class="fa fa-chevron-left"></i>
+                    </button>
+                    <div class="w-px bg-gray-200 self-stretch"></div>
+                    <button id="btn-next" class="flex-1 py-2 text-center hover:bg-primary/5 transition-colors text-gray-500 hover:text-primary" onclick="navigateNext()">
+                        <i class="fa fa-chevron-right"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+        {% else %}
+        <div class="flex flex-col items-center justify-center bg-white rounded-xl border border-dashed border-gray-300 p-16 text-center mt-16">
+            <i class="fa fa-picture-o text-gray-200 text-7xl mb-6"></i>
+            <h3 class="text-lg font-medium text-gray-400 mb-2">暂无图片</h3>
+            <p class="text-gray-300 mb-4 text-sm">请先在标签编辑页面上传图片</p>
+            <a href="/" class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-2.5 px-6 rounded-lg transition-all text-sm">
+                <i class="fa fa-tags mr-2"></i> 前往标签编辑
+            </a>
+        </div>
+        {% endif %}
+    </main>
+
+    <!-- 通知 -->
+    <div id="notification" class="fixed bottom-5 right-5 px-5 py-3 rounded-lg shadow-lg transform translate-y-20 opacity-0 transition-all duration-300 flex items-center z-50 text-sm"></div>
+
+    <!-- 透明转色底弹窗 -->
+    <div id="alpha-modal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 hidden">
+        <div class="bg-white rounded-xl shadow-xl w-80 p-6">
+            <h3 class="text-lg font-semibold text-gray-800 mb-4">透明转色底</h3>
+            <div class="flex items-center gap-3 mb-4">
+                <span class="text-sm text-gray-600">底色</span>
+                <input type="color" id="alpha-bg-color" value="#ffffff" class="w-10 h-10 rounded border border-gray-300 cursor-pointer p-0 bg-transparent">
+            </div>
+            <div class="mb-5">
+                <p class="text-sm text-gray-600 mb-2">处理范围</p>
+                <label class="flex items-center gap-2 text-sm text-gray-700 mb-1.5 cursor-pointer">
+                    <input type="radio" name="alpha-scope" value="single" checked class="cursor-pointer"> 仅当前图片
+                </label>
+                <label class="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                    <input type="radio" name="alpha-scope" value="all" class="cursor-pointer"> 全部图片
+                </label>
+            </div>
+            <div class="flex justify-end gap-2">
+                <button class="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg text-sm font-medium transition-colors" onclick="closeAlphaModal()">取消</button>
+                <button class="px-4 py-2 bg-accent hover:bg-accent/90 text-white rounded-lg text-sm font-medium transition-colors" onclick="confirmAlphaToWhite()">
+                    <i class="fa fa-check mr-1"></i>开始处理
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 缩放图像弹窗（保持比例） -->
+    <div id="scale-modal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 hidden">
+        <div class="bg-white rounded-xl shadow-xl w-80 p-6">
+            <h3 class="text-lg font-semibold text-gray-800 mb-1">缩放图像</h3>
+            <p class="text-xs text-gray-400 mb-4">保持原宽高比，宽高联动</p>
+            <div class="flex items-center gap-2 mb-4">
+                <input id="scale-w" type="number" min="1" class="w-20 px-2 py-1 border border-gray-300 rounded text-center focus:outline-none focus:border-primary" oninput="onScaleWChange()">
+                <span class="text-gray-400">×</span>
+                <input id="scale-h" type="number" min="1" class="w-20 px-2 py-1 border border-gray-300 rounded text-center focus:outline-none focus:border-primary" oninput="onScaleHChange()">
+                <span class="text-xs text-gray-400">px</span>
+            </div>
+            <div class="mb-5">
+                <p class="text-sm text-gray-600 mb-2">长边预设</p>
+                <div class="flex gap-2">
+                    <button class="px-2 py-1 bg-white border border-gray-300 rounded hover:bg-gray-100 transition-colors text-xs" onclick="setScaleLongSide(768)">768</button>
+                    <button class="px-2 py-1 bg-white border border-gray-300 rounded hover:bg-gray-100 transition-colors text-xs" onclick="setScaleLongSide(1024)">1024</button>
+                    <button class="px-2 py-1 bg-white border border-gray-300 rounded hover:bg-gray-100 transition-colors text-xs" onclick="setScaleLongSide(1536)">1536</button>
+                    <button class="px-2 py-1 bg-white border border-gray-300 rounded hover:bg-gray-100 transition-colors text-xs" onclick="setScaleLongSide(2048)">2048</button>
+                </div>
+            </div>
+            <div class="flex justify-end gap-2">
+                <button class="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg text-sm font-medium transition-colors" onclick="closeScaleModal()">取消</button>
+                <button class="px-4 py-2 bg-primary hover:bg-primary/90 text-white rounded-lg text-sm font-medium transition-colors" onclick="confirmScale()">
+                    <i class="fa fa-check mr-1"></i>确定缩放
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 超清放大弹窗（Real-ESRGAN 4x 超分，再缩放到目标尺寸 1~4 倍） -->
+    <div id="upscale-modal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 hidden">
+        <div class="bg-white rounded-xl shadow-xl w-80 p-6">
+            <h3 class="text-lg font-semibold text-gray-800 mb-1">超清放大</h3>
+            <p class="text-xs text-gray-400 mb-4">Real-ESRGAN 4x 超分，目标尺寸 1~4 倍</p>
+            <div class="flex items-center gap-2 mb-3">
+                <input id="upscale-w" type="number" min="1" class="w-20 px-2 py-1 border border-gray-300 rounded text-center focus:outline-none focus:border-primary" oninput="onUpscaleWChange()">
+                <span class="text-gray-400">×</span>
+                <input id="upscale-h" type="number" min="1" class="w-20 px-2 py-1 border border-gray-300 rounded text-center focus:outline-none focus:border-primary" oninput="onUpscaleHChange()">
+                <span class="text-xs text-gray-400">px</span>
+            </div>
+            <p id="upscale-hint" class="text-xs text-gray-400 mb-2"></p>
+            <p id="upscale-error" class="text-xs text-red-500 mb-3 hidden"></p>
+            <div class="mb-5">
+                <p class="text-sm text-gray-600 mb-2">放大倍数</p>
+                <div class="flex gap-2">
+                    <button class="px-2 py-1 bg-white border border-gray-300 rounded hover:bg-gray-100 transition-colors text-xs" onclick="setUpscaleScale(2)">2x</button>
+                    <button class="px-2 py-1 bg-white border border-gray-300 rounded hover:bg-gray-100 transition-colors text-xs" onclick="setUpscaleScale(3)">3x</button>
+                    <button class="px-2 py-1 bg-white border border-gray-300 rounded hover:bg-gray-100 transition-colors text-xs" onclick="setUpscaleScale(4)">4x</button>
+                </div>
+            </div>
+            <div class="flex justify-end gap-2">
+                <button class="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg text-sm font-medium transition-colors" onclick="closeUpscaleModal()">取消</button>
+                <button id="btn-upscale-ok" class="px-4 py-2 bg-accent hover:bg-accent/90 text-white rounded-lg text-sm font-medium transition-colors" onclick="confirmUpscale()">
+                    <i class="fa fa-check mr-1"></i>开始放大
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 进度弹窗 -->
+    <div id="progress-modal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 hidden">
+        <div class="bg-white rounded-xl shadow-2xl w-[420px] p-6">
+            <h3 id="progress-title" class="text-lg font-semibold text-gray-800 mb-1"></h3>
+            <p id="progress-subtitle" class="text-sm text-gray-400 mb-4"></p>
+            <div class="w-full bg-gray-200 rounded-full h-3 mb-2 overflow-hidden">
+                <div id="progress-bar" class="h-full bg-primary rounded-full transition-all duration-200" style="width:0%"></div>
+            </div>
+            <div class="flex justify-between text-sm text-gray-500 mb-1">
+                <span id="progress-count">0 / 0</span>
+                <span id="progress-percent">0%</span>
+            </div>
+            <p id="progress-item" class="text-xs text-gray-400 truncate mb-2"></p>
+            <div id="progress-errors" class="hidden max-h-24 overflow-y-auto text-xs text-red-500 bg-red-50 rounded p-2 mb-3"></div>
+            <div class="flex justify-end">
+                <button id="progress-close" class="hidden px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg text-sm font-medium transition-colors" onclick="closeProgressModal()">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const allImages = {{ images | tojson }};
+        let currentIndex = -1;
+        let editorDirty = false; // 是否有未保存的编辑
+
+        // Canvas 相关
+        // cropRect: 显示坐标空间的裁剪框 {x, y, w, h}；锁定宽高比，h 始终 = w / ratio
+        let cropRect = null;
+        let cropMode = false;  // 是否处于裁剪模式（裁剪框 + 参数条可见）
+        let originalImage = null;  // 原始 Image 对象
+        let currentImageData = null; // 当前编辑状态的 ImageData（可能已裁剪/处理）
+
+        // 裁剪交互状态
+        let dragMode = null;  // 'move' | 'resize-NW' | 'resize-NE' | 'resize-SW' | 'resize-SE' | null
+        let dragStart = { x: 0, y: 0 };   // 鼠标按下时的显示坐标
+        let dragRect0 = null;             // 拖拽开始时的 cropRect 快照
+        const CORNER_HIT = 14;            // 角手柄命中半径（显示像素）
+        // 命中区域 → 鼠标光标（hover 与拖拽中复用）
+        const CURSOR_MAP = {
+            'move': 'move',
+            'resize-NW': 'nwse-resize', 'resize-SE': 'nwse-resize',
+            'resize-NE': 'nesw-resize', 'resize-SW': 'nesw-resize'
+        };
+
+        // === 文件列表 ===
+        function rebuildFileList() {
+            const list = document.getElementById('file-list');
+            list.innerHTML = allImages.map((img, i) =>
+                '<div class="file-item flex items-center px-2 py-1.5 text-sm cursor-pointer border-l-2 border-transparent hover:bg-primary/5 transition-colors group"'
+                + ' data-image="' + escapeHtml(img) + '" data-index="' + i + '">'
+                + '<button class="del-btn flex-shrink-0 w-5 h-5 flex items-center justify-center text-gray-300 hover:text-red-500 transition-colors rounded opacity-0 group-hover:opacity-100" data-name="' + escapeHtml(img) + '" data-index="' + i + '" title="删除">'
+                + '<i class="fa fa-times text-xs"></i></button>'
+                + '<span class="flex-1 min-w-0 truncate ml-1 text-gray-600 group-hover:text-gray-800" title="' + escapeHtml(img) + '">' + escapeHtml(img) + '</span></div>'
+            ).join('');
+        }
+
+        document.getElementById('file-list')?.addEventListener('click', function(e) {
+            const delBtn = e.target.closest('.del-btn');
+            if (delBtn) {
+                deleteImage(delBtn.dataset.name, parseInt(delBtn.dataset.index));
+                return;
+            }
+            const item = e.target.closest('.file-item');
+            if (item) navigateTo(parseInt(item.dataset.index));
+        });
+
+        // === 删除图片 ===
+        function deleteImage(name, index) {
+            // 删除的是当前正在编辑且有未保存修改的图时，先要求保存/重置
+            if (editorDirty && index === currentIndex) {
+                showNotification('当前图片有未保存的编辑，请先保存或重置', 'warning');
+                return;
+            }
+            if (!confirm('确定要删除 ' + name + ' 吗？')) return;
+            fetch('/delete/' + encodeURIComponent(name), {method: 'POST'})
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.success) { showNotification('删除失败', 'error'); return; }
+                    allImages.splice(index, 1);
+                    rebuildFileList();
+                    document.getElementById('image-counter').textContent = allImages.length + ' 张';
+                    if (allImages.length === 0) {
+                        location.reload();
+                        return;
+                    }
+                    if (index === currentIndex) {
+                        // 删的是当前图：丢弃未保存编辑，跳到同位置（下一张）或末尾
+                        editorDirty = false;
+                        cropRect = null;
+                        currentIndex = Math.min(index, allImages.length - 1);
+                        updateNavUI();
+                        loadImageIntoEditor(allImages[currentIndex]);
+                    } else if (index < currentIndex) {
+                        currentIndex--;
+                        updateNavUI();
+                    }
+                    showNotification('已删除 ' + name, 'success');
+                })
+                .catch(() => showNotification('删除失败', 'error'));
+        }
+
+        // === 导航 ===
+        function navigateTo(index) {
+            if (index < 0 || index >= allImages.length) return;
+            if (editorDirty && currentIndex !== -1) {
+                if (!confirm('当前图片未保存，是否放弃修改？')) return;
+            }
+            currentIndex = index;
+            editorDirty = false;
+            cropRect = null;
+            updateNavUI();
+            loadImageIntoEditor(allImages[index]);
+        }
+
+        function updateNavUI() {
+            document.querySelectorAll('.file-item').forEach((el, i) => {
+                const active = (i === currentIndex);
+                el.classList.toggle('bg-primary/5', active);
+                el.classList.toggle('border-l-primary', active);
+                el.querySelector('span').classList.toggle('text-primary', active);
+                el.querySelector('span').classList.toggle('font-medium', active);
+                el.querySelector('span').classList.toggle('text-gray-600', !active);
+            });
+            const activeItem = document.querySelector('.file-item[data-index="' + currentIndex + '"]');
+            if (activeItem) activeItem.scrollIntoView({ block: 'nearest' });
+            document.getElementById('btn-prev').disabled = (currentIndex <= 0);
+            document.getElementById('btn-next').disabled = (currentIndex >= allImages.length - 1);
+            updateButtonStates();
+        }
+
+        function navigatePrev() { navigateTo(currentIndex - 1); }
+        function navigateNext() { navigateTo(currentIndex + 1); }
+
+        document.addEventListener('keydown', function(e) {
+            if (e.target.tagName === 'INPUT') return;
+            if (e.key === 'ArrowLeft') navigatePrev();
+            if (e.key === 'ArrowRight') navigateNext();
+        });
+
+        // === 图片加载 ===
+        function loadImageIntoEditor(filename) {
+            const img = document.getElementById('editor-img');
+            // 清理上一次放大产生的 objectURL（若 displayImg 当前用的是 blob URL）
+            if (_displayObjectUrl) {
+                URL.revokeObjectURL(_displayObjectUrl);
+                _displayObjectUrl = null;
+            }
+            // 必须先绑定 onload 再设 src：否则缓存命中时图片同步加载完成（complete=true），
+            // 此时 onload 尚未绑定会错过，fitImageToEditor 不执行，canvas 尺寸不同步图片，
+            // 导致裁剪框能延伸到图片外。
+            img.onload = function() {
+                originalImage = new Image();
+                originalImage.onload = function() {
+                    fitImageToEditor();
+                    updateImageInfo();
+                    updateButtonStates();  // 加载完成后同步按钮状态（干净态保存/重置灰，旋转/转色底可用）
+                };
+                originalImage.src = img.src;
+            };
+            img.src = '/uploads/' + encodeURIComponent(filename) + '?t=' + Date.now();
+            img.style.display = '';
+        }
+
+        // 根据 editor-area 容器尺寸，用 CSS 缩放 img，同步 canvas 覆盖层尺寸
+        function fitImageToEditor() {
+            if (!originalImage) return;
+            const area = document.getElementById('editor-area');
+            const img = document.getElementById('editor-img');
+            const canvas = document.getElementById('editor-canvas');
+
+            // 容器可用空间（减去 padding）
+            const maxW = area.clientWidth - 32;
+            const maxH = area.clientHeight - 32;
+
+            // 计算缩放后尺寸
+            const natW = originalImage.naturalWidth;
+            const natH = originalImage.naturalHeight;
+            const scale = Math.min(maxW / natW, maxH / natH, 1);
+            const dispW = Math.round(natW * scale);
+            const dispH = Math.round(natH * scale);
+
+            // img 用 CSS 缩放（浏览器原生渲染，清晰）
+            img.style.width = dispW + 'px';
+            img.style.height = dispH + 'px';
+
+            // canvas 仅作覆盖层，匹配显示尺寸
+            canvas.width = dispW;
+            canvas.height = dispH;
+            canvas.style.width = dispW + 'px';
+            canvas.style.height = dispH + 'px';
+
+            // 裁剪模式时重置框；否则清空覆盖层（不显示框）
+            if (cropMode) initCropRect();
+            else { cropRect = null; drawCropOverlay(); }
+            // 重置缩放状态
+            resetEditorZoom();
+        }
+
+        function onImgDisplayReady() {
+            // img CSS 布局完成后同步覆盖层
+            if (originalImage) fitImageToEditor();
+        }
+
+        function updateImageInfo() {
+            if (!originalImage) return;
+            document.getElementById('img-info').textContent =
+                originalImage.naturalWidth + ' x ' + originalImage.naturalHeight + ' px';
+        }
+
+        // === 缩放拖拽 ===
+        let editorScale = 1, editorPanX = 0, editorPanY = 0;
+        let editorDragStartX = 0, editorDragStartY = 0, editorDragging = false;
+
+        function applyEditorTransform() {
+            const wrap = document.getElementById('editor-zoom-wrap');
+            if (!wrap) return;
+            wrap.style.transform = 'translate(' + editorPanX + 'px,' + editorPanY + 'px) scale(' + editorScale + ')';
+            wrap.style.transformOrigin = '0 0';
+            const area = document.getElementById('editor-area');
+            if (area) area.style.cursor = editorScale > 1 ? (editorDragging ? 'grabbing' : 'grab') : 'default';
+        }
+
+        function resetEditorZoom() {
+            editorScale = 1; editorPanX = 0; editorPanY = 0;
+            applyEditorTransform();
+        }
+
+        const editorAreaEl = document.getElementById('editor-area');
+
+        editorAreaEl?.addEventListener('wheel', function(e) {
+            e.preventDefault();
+            const oldScale = editorScale;
+            const delta = e.deltaY < 0 ? 0.3 : -0.3;
+            editorScale = Math.max(1, Math.min(8, editorScale + delta));
+            if (editorScale === oldScale) return;
+
+            // 以鼠标为锚缩放：坐标基于 wrap 原始（未变换）左上角，而非容器
+            // （wrap 在容器内居中，用容器坐标会引入居中偏移导致缩放焦点偏移）
+            const wrap = document.getElementById('editor-zoom-wrap');
+            const wr = wrap.getBoundingClientRect();
+            const mx = e.clientX - wr.left + editorPanX;
+            const my = e.clientY - wr.top + editorPanY;
+            const ratio = editorScale / oldScale;
+            editorPanX = mx - ratio * (mx - editorPanX);
+            editorPanY = my - ratio * (my - editorPanY);
+            applyEditorTransform();
+        });
+
+        editorAreaEl?.addEventListener('mousedown', function(e) {
+            if (editorScale <= 1 || e.button !== 0) return;
+            editorDragging = true;
+            editorDragStartX = e.clientX - editorPanX;
+            editorDragStartY = e.clientY - editorPanY;
+            this.style.cursor = 'grabbing';
+            e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', function(e) {
+            if (!editorDragging) return;
+            editorPanX = e.clientX - editorDragStartX;
+            editorPanY = e.clientY - editorDragStartY;
+            applyEditorTransform();
+        });
+
+        document.addEventListener('mouseup', function() {
+            if (!editorDragging) return;
+            editorDragging = false;
+            applyEditorTransform();
+        });
+
+        editorAreaEl?.addEventListener('dblclick', function() {
+            resetEditorZoom();
+        });
+
+        // 窗口大小变化时重新同步 canvas
+        const resizeObserver = new ResizeObserver(function() {
+            if (currentIndex >= 0 && originalImage) {
+                // fitImageToEditor 内部已按新画布尺寸重置裁剪框
+                fitImageToEditor();
+                updateButtonStates();
+            }
+        });
+
+        // === 裁剪：固定分辨率框（锁定宽高比，拖角缩放 / 拖体移动） ===
+        const editorCanvas = document.getElementById('editor-canvas');
+
+        function getCanvasCoords(e) {
+            const rect = editorCanvas.getBoundingClientRect();
+            // clamp 到 canvas 范围内
+            return {
+                x: Math.max(0, Math.min(e.clientX - rect.left, rect.width)),
+                y: Math.max(0, Math.min(e.clientY - rect.top, rect.height))
+            };
+        }
+
+        // 图片内容在 canvas 坐标系中的实际矩形（按 object-fit:contain 推算，排除 letterbox 留空）；
+        // 裁剪框必须限制在此范围内（不能超出图片内容）
+        function imgBoundsInCanvas() {
+            const img = document.getElementById('editor-img');
+            const ir = img.getBoundingClientRect();
+            const cr = editorCanvas.getBoundingClientRect();
+            const elX = ir.left - cr.left, elY = ir.top - cr.top;
+            const elW = Math.max(1, ir.width), elH = Math.max(1, ir.height);
+            const natW = originalImage.naturalWidth, natH = originalImage.naturalHeight;
+            const elRatio = elW / elH, natRatio = natW / natH;
+            let cW, cH, cX, cY;
+            if (natRatio > elRatio) {
+                // 图片更宽：填满宽度，上下留空
+                cW = elW; cH = elW / natRatio; cX = elX; cY = elY + (elH - cH) / 2;
+            } else {
+                // 图片更高：填满高度，左右留空
+                cH = elH; cW = elH * natRatio; cX = elX + (elW - cW) / 2; cY = elY;
+            }
+            return { x: cX, y: cY, w: cW, h: cH };
+        }
+
+        const editorArea = document.getElementById('editor-area');
+
+        // 目标宽高比（来自输入框）
+        function cropRatio() {
+            const w = Math.max(1, parseInt(document.getElementById('crop-w').value) || 1);
+            const h = Math.max(1, parseInt(document.getElementById('crop-h').value) || 1);
+            return w / h;
+        }
+
+        // 初始化/重置裁剪框：按目标分辨率（输入框值）映射到显示空间并居中；
+        // 图小于目标分辨率时等比缩小到图内（保持目标比例）
+        function initCropRect() {
+            if (!originalImage || editorCanvas.width === 0) { cropRect = null; drawCropOverlay(); return; }
+            const b = imgBoundsInCanvas();  // 框限制在图片实际显示区内
+            const img = document.getElementById('editor-img');
+            const scaleX = originalImage.naturalWidth / img.clientWidth;
+            const scaleY = originalImage.naturalHeight / img.clientHeight;
+            const tw = Math.max(1, parseInt(document.getElementById('crop-w').value) || 1);
+            const th = Math.max(1, parseInt(document.getElementById('crop-h').value) || 1);
+            const ratio = tw / th;
+            let w = tw / scaleX;
+            let h = th / scaleY;
+            if (w > b.w) { w = b.w; h = w / ratio; }
+            if (h > b.h) { h = b.h; w = h * ratio; }
+            cropRect = { x: b.x + (b.w - w) / 2, y: b.y + (b.h - h) / 2, w: w, h: h };
+            drawCropOverlay();
+        }
+
+        // 进入/退出裁剪模式
+        function toggleCropMode() {
+            if (currentIndex < 0) return;
+            cropMode = !cropMode;
+            const toolbar = document.getElementById('crop-toolbar');
+            if (toolbar) toolbar.classList.toggle('hidden', !cropMode);
+            // 保持编辑区背景不变（不切黑底），裁剪框外的遮罩仍由 drawCropOverlay 处理
+            if (cropMode) initCropRect();
+            else { cropRect = null; drawCropOverlay(); }
+            updateCropButton();
+        }
+
+        // 更新裁剪按钮文案 + 确定按钮可用性
+        function updateCropButton() {
+            const btn = document.getElementById('btn-crop');
+            btn.innerHTML = cropMode
+                ? '<i class="fa fa-times mr-2"></i> 退出裁剪'
+                : '<i class="fa fa-crop mr-2"></i> 裁剪';
+            const ok = document.getElementById('btn-crop-ok');
+            if (ok) ok.disabled = !cropMode;
+        }
+
+        // 命中检测：返回 'resize-XX' / 'move' / null
+        function hitTest(px, py) {
+            if (!cropRect) return null;
+            const x = cropRect.x, y = cropRect.y, w = cropRect.w, h = cropRect.h;
+            const corners = {
+                'resize-NW': [x, y], 'resize-NE': [x + w, y],
+                'resize-SW': [x, y + h], 'resize-SE': [x + w, y + h]
+            };
+            for (const key in corners) {
+                if (Math.abs(px - corners[key][0]) <= CORNER_HIT && Math.abs(py - corners[key][1]) <= CORNER_HIT) return key;
+            }
+            if (px >= x && px <= x + w && py >= y && py <= y + h) return 'move';
+            return null;
+        }
+
+        editorArea?.addEventListener('mousedown', function(e) {
+            if (e.button !== 0) return;
+            if (editorScale > 1) return; // 缩放时禁用裁剪交互
+            if (!originalImage || editorCanvas.width === 0 || !cropRect) return;
+            const p = getCanvasCoords(e);
+            const mode = hitTest(p.x, p.y);
+            if (!mode) return;
+            dragMode = mode;
+            dragStart = p;
+            dragRect0 = Object.assign({}, cropRect);
+            // 拖拽中锁定光标；同步设到 canvas 与 body，防止鼠标移出画布时光标变回默认
+            const cur = CURSOR_MAP[mode] || 'crosshair';
+            editorArea.style.cursor = cur;
+            editorCanvas.style.cursor = cur;
+            document.body.style.cursor = cur;
+            e.preventDefault();
+        });
+
+        // mousemove：拖拽中更新框；非拖拽时按命中区域设光标。
+        // 绑在 document 上（而非 editorArea），避免事件冒泡不稳定导致框内 hover 失效
+        document.addEventListener('mousemove', function(e) {
+            if (editorScale > 1 || !cropRect) return;
+            const p = getCanvasCoords(e);
+            if (dragMode) {
+                const b = imgBoundsInCanvas();  // 约束在图片实际显示区内
+                const ratio = cropRatio();
+                if (dragMode === 'move') {
+                    let nx = dragRect0.x + (p.x - dragStart.x);
+                    let ny = dragRect0.y + (p.y - dragStart.y);
+                    nx = Math.max(b.x, Math.min(nx, b.x + b.w - cropRect.w));
+                    ny = Math.max(b.y, Math.min(ny, b.y + b.h - cropRect.h));
+                    cropRect.x = nx; cropRect.y = ny;
+                } else {
+                    // 缩放：对角点为锚，保持比例，约束在图片内
+                    const r0 = dragRect0;
+                    let ax, ay, signX, signY;
+                    switch (dragMode) {
+                        case 'resize-SE': ax = r0.x;        ay = r0.y;        signX =  1; signY =  1; break;
+                        case 'resize-NW': ax = r0.x + r0.w; ay = r0.y + r0.h; signX = -1; signY = -1; break;
+                        case 'resize-NE': ax = r0.x;        ay = r0.y + r0.h; signX =  1; signY = -1; break;
+                        case 'resize-SW': ax = r0.x + r0.w; ay = r0.y;        signX = -1; signY =  1; break;
+                    }
+                    // 鼠标相对锚点的有向距离，取主导方向锁比例
+                    const rawW = (p.x - ax) * signX;
+                    const rawH = (p.y - ay) * signY;
+                    let w = Math.max(rawW, rawH * ratio);
+                    // 锚点到图片边界的最大尺寸（保持比例）
+                    const bx0 = b.x, by0 = b.y, bx1 = b.x + b.w, by1 = b.y + b.h;
+                    let maxW;
+                    if (signX > 0 && signY > 0)      maxW = Math.min(bx1 - ax, (by1 - ay) * ratio);
+                    else if (signX < 0 && signY < 0) maxW = Math.min(ax - bx0, (ay - by0) * ratio);
+                    else if (signX > 0)              maxW = Math.min(bx1 - ax, (ay - by0) * ratio);
+                    else                             maxW = Math.min(ax - bx0, (by1 - ay) * ratio);
+                    w = Math.max(20, Math.min(w, maxW));
+                    const h = w / ratio;
+                    // 重建框（锚点不动）
+                    cropRect.x = signX > 0 ? ax : ax - w;
+                    cropRect.y = signY > 0 ? ay : ay - h;
+                    cropRect.w = w; cropRect.h = h;
+                }
+                drawCropOverlay();
+            } else {
+                // hover：按命中区域切换光标
+                const mode = hitTest(p.x, p.y);
+                const cur = CURSOR_MAP[mode] || 'crosshair';
+                editorArea.style.cursor = cur;
+                editorCanvas.style.cursor = cur;
+            }
+        });
+
+        document.addEventListener('mouseup', function() {
+            if (!dragMode) return;
+            dragMode = null;
+            // 解除拖拽光标锁定，交回 hover 驱动
+            document.body.style.cursor = '';
+        });
+
+        function drawCropOverlay() {
+            const canvas = document.getElementById('editor-canvas');
+            const ctx = canvas.getContext('2d');
+            // 清除覆盖层（图片由 img 元素原生渲染）
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (!cropRect) return;
+            const x = cropRect.x, y = cropRect.y, w = cropRect.w, h = cropRect.h;
+
+            // 框边框：白色外描边 + 深色内框，任意背景下都高对比
+            ctx.lineWidth = 4;
+            ctx.strokeStyle = '#ffffff';
+            ctx.strokeRect(x, y, w, h);
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = '#1d4ed8';
+            ctx.strokeRect(x, y, w, h);
+
+            // 三分线（构图辅助）：深色，与边框风格统一
+            ctx.strokeStyle = 'rgba(29,78,216,0.45)';
+            ctx.lineWidth = 1;
+            for (let i = 1; i < 3; i++) {
+                ctx.beginPath(); ctx.moveTo(x + w * i / 3, y); ctx.lineTo(x + w * i / 3, y + h); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(x, y + h * i / 3); ctx.lineTo(x + w, y + h * i / 3); ctx.stroke();
+            }
+
+            // 四角手柄（加大，蓝底白边，更易抓取）
+            ctx.fillStyle = '#1d4ed8';
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 2;
+            const hs = 7;
+            [[x, y], [x + w, y], [x, y + h], [x + w, y + h]].forEach(function (c) {
+                ctx.fillRect(c[0] - hs, c[1] - hs, hs * 2, hs * 2);
+                ctx.strokeRect(c[0] - hs, c[1] - hs, hs * 2, hs * 2);
+            });
+
+            // 框覆盖区域的实际输出分辨率（随框大小变化）
+            if (w > 40 && h > 40 && originalImage) {
+                const imgEl = document.getElementById('editor-img');
+                const sx = originalImage.naturalWidth / imgEl.clientWidth;
+                const sy = originalImage.naturalHeight / imgEl.clientHeight;
+                const realW = Math.max(1, Math.round(w * sx));
+                const realH = Math.max(1, Math.round(h * sy));
+                const text = realW + ' × ' + realH;
+                ctx.font = '12px sans-serif';
+                const txtW = ctx.measureText(text).width;
+                ctx.fillStyle = 'rgba(0,0,0,0.6)';
+                ctx.fillRect(x + w / 2 - txtW / 2 - 5, y + h / 2 - 9, txtW + 10, 18);
+                ctx.fillStyle = '#fff';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(text, x + w / 2, y + h / 2);
+            }
+        }
+
+        // === 旋转操作（前端 Canvas） ===
+        function rotateImage(degrees) {
+            if (!originalImage) return;
+            // 暂存态禁止旋转：旋转会自动落盘，与未保存的裁剪/缩放/超清放大冲突
+            if (editorDirty) {
+                showNotification('请先保存或重置当前编辑，再进行旋转', 'warning');
+                return;
+            }
+            const rad = degrees * Math.PI / 180;
+            const srcW = originalImage.naturalWidth;
+            const srcH = originalImage.naturalHeight;
+
+            const tempCanvas = document.createElement('canvas');
+            const tempCtx = tempCanvas.getContext('2d');
+
+            // 90度倍数：宽高互换
+            const steps = ((degrees / 90) % 4 + 4) % 4;
+            if (steps % 2 === 1) {
+                tempCanvas.width = srcH;
+                tempCanvas.height = srcW;
+            } else {
+                tempCanvas.width = srcW;
+                tempCanvas.height = srcH;
+            }
+
+            tempCtx.translate(tempCanvas.width / 2, tempCanvas.height / 2);
+            tempCtx.rotate(rad);
+            tempCtx.drawImage(originalImage, -srcW / 2, -srcH / 2);
+
+            const rotatedImg = new Image();
+            rotatedImg.onload = function() {
+                originalImage = rotatedImg;
+                cropRect = null;
+                editorDirty = true;
+                const displayImg = document.getElementById('editor-img');
+                displayImg.onload = function() {
+                    fitImageToEditor();
+                    updateImageInfo();
+                    updateButtonStates();
+                    // 旋转自动保存：旋转是不可逆的方向校正，直接覆盖原图，无需用户手动点保存
+                    saveImage(true);  // silent=true：不显示"保存成功"通知
+                };
+                displayImg.src = rotatedImg.src;
+            };
+            rotatedImg.src = tempCanvas.toDataURL('image/png');
+        }
+
+        // === 裁剪操作（前端 Canvas，直接裁出框覆盖区域，框大小即输出分辨率） ===
+        function executeCrop() {
+            if (!cropRect || !originalImage) return;
+
+            const img = document.getElementById('editor-img');
+            const scaleX = originalImage.naturalWidth / img.clientWidth;
+            const scaleY = originalImage.naturalHeight / img.clientHeight;
+            // cropRect 是 canvas 坐标，可能含图片在 canvas 内的偏移；转成相对图片的坐标再映射原图
+            const b = imgBoundsInCanvas();
+
+            // 原图坐标（框覆盖区域 = 实际输出分辨率，不额外缩放）
+            const sx = Math.round((cropRect.x - b.x) * scaleX);
+            const sy = Math.round((cropRect.y - b.y) * scaleY);
+            const sw = Math.max(1, Math.round(cropRect.w * scaleX));
+            const sh = Math.max(1, Math.round(cropRect.h * scaleY));
+
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = sw;
+            tempCanvas.height = sh;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.drawImage(originalImage, sx, sy, sw, sh, 0, 0, sw, sh);
+
+            // 更新 originalImage 和显示图片为裁剪后的结果
+            const croppedImg = new Image();
+            croppedImg.onload = function() {
+                originalImage = croppedImg;
+                editorDirty = true;
+                // 同步 img src 后等它渲染完再同步 canvas
+                const displayImg = document.getElementById('editor-img');
+                displayImg.onload = function() {
+                    fitImageToEditor();
+                    updateImageInfo();
+                    updateButtonStates();
+                    showNotification('已裁剪为 ' + sw + '×' + sh + '，点击保存以覆盖原图', 'info');
+                };
+                displayImg.src = croppedImg.src;
+            };
+            croppedImg.src = tempCanvas.toDataURL('image/png');
+        }
+
+        // === 缩放图像（保持比例，整图重采样） ===
+        function openScaleModal() {
+            if (currentIndex < 0 || !originalImage) return;
+            document.getElementById('scale-w').value = originalImage.naturalWidth;
+            document.getElementById('scale-h').value = originalImage.naturalHeight;
+            document.getElementById('scale-modal').classList.remove('hidden');
+        }
+        function closeScaleModal() {
+            document.getElementById('scale-modal').classList.add('hidden');
+        }
+        // 宽高联动：改一端，另一端按原图比例自动算
+        function onScaleWChange() {
+            if (!originalImage) return;
+            const w = parseInt(document.getElementById('scale-w').value);
+            if (w > 0) {
+                document.getElementById('scale-h').value = Math.max(1, Math.round(w * originalImage.naturalHeight / originalImage.naturalWidth));
+            }
+        }
+        function onScaleHChange() {
+            if (!originalImage) return;
+            const h = parseInt(document.getElementById('scale-h').value);
+            if (h > 0) {
+                document.getElementById('scale-w').value = Math.max(1, Math.round(h * originalImage.naturalWidth / originalImage.naturalHeight));
+            }
+        }
+        // 预设：长边 = 给定值，短边按比例
+        function setScaleLongSide(longSide) {
+            if (!originalImage) return;
+            const natW = originalImage.naturalWidth, natH = originalImage.naturalHeight;
+            if (natW >= natH) {
+                document.getElementById('scale-w').value = longSide;
+                document.getElementById('scale-h').value = Math.max(1, Math.round(longSide * natH / natW));
+            } else {
+                document.getElementById('scale-h').value = longSide;
+                document.getElementById('scale-w').value = Math.max(1, Math.round(longSide * natW / natH));
+            }
+        }
+        function confirmScale() {
+            if (!originalImage) return;
+            const w = parseInt(document.getElementById('scale-w').value);
+            const h = parseInt(document.getElementById('scale-h').value);
+            if (!(w > 0) || !(h > 0)) { showNotification('请输入有效尺寸', 'warning'); return; }
+            closeScaleModal();
+            if (w === originalImage.naturalWidth && h === originalImage.naturalHeight) return;
+            scaleImage(w, h);
+        }
+        // 缩放：整图重采样到目标尺寸（有损，与裁剪的无损不同）
+        function scaleImage(targetW, targetH) {
+            if (!originalImage) return;
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = targetW;
+            tempCanvas.height = targetH;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.imageSmoothingEnabled = true;
+            tempCtx.imageSmoothingQuality = 'high';
+            tempCtx.drawImage(originalImage, 0, 0, targetW, targetH);
+            const scaledImg = new Image();
+            scaledImg.onload = function() {
+                originalImage = scaledImg;
+                editorDirty = true;
+                const displayImg = document.getElementById('editor-img');
+                displayImg.onload = function() {
+                    fitImageToEditor();
+                    updateImageInfo();
+                    updateButtonStates();
+                    showNotification('已缩放为 ' + targetW + '×' + targetH + '，点击保存以覆盖原图', 'info');
+                };
+                displayImg.src = scaledImg.src;
+            };
+            scaledImg.src = tempCanvas.toDataURL('image/png');
+        }
+
+        // ===== 超清放大（Real-ESRGAN）=====
+        // 弹窗打开时记录当前原图尺寸，用于宽高联动和范围校验（原图可能已有未保存的旋转/裁剪）
+        let _upscaleNatW = 0, _upscaleNatH = 0;
+        function openUpscaleModal() {
+            if (currentIndex < 0 || !originalImage) return;
+            _upscaleNatW = originalImage.naturalWidth;
+            _upscaleNatH = originalImage.naturalHeight;
+            // 预填 4x（模型原生倍数，质量最佳）
+            document.getElementById('upscale-w').value = Math.round(_upscaleNatW * 4);
+            document.getElementById('upscale-h').value = Math.round(_upscaleNatH * 4);
+            document.getElementById('upscale-w').min = _upscaleNatW;
+            document.getElementById('upscale-w').max = _upscaleNatW * 4;
+            document.getElementById('upscale-h').min = _upscaleNatH;
+            document.getElementById('upscale-h').max = _upscaleNatH * 4;
+            document.getElementById('upscale-error').classList.add('hidden');
+            document.getElementById('btn-upscale-ok').disabled = false;  // 上次放大成功后可能残留 disabled
+            updateUpscaleHint();
+            document.getElementById('upscale-modal').classList.remove('hidden');
+        }
+        function closeUpscaleModal() {
+            document.getElementById('upscale-modal').classList.add('hidden');
+        }
+        // 宽高联动：保持原图比例
+        function onUpscaleWChange() {
+            if (!_upscaleNatW) return;
+            const w = parseInt(document.getElementById('upscale-w').value);
+            if (w > 0) {
+                document.getElementById('upscale-h').value = Math.max(1, Math.round(w * _upscaleNatH / _upscaleNatW));
+            }
+            updateUpscaleHint();
+        }
+        function onUpscaleHChange() {
+            if (!_upscaleNatH) return;
+            const h = parseInt(document.getElementById('upscale-h').value);
+            if (h > 0) {
+                document.getElementById('upscale-w').value = Math.max(1, Math.round(h * _upscaleNatW / _upscaleNatH));
+            }
+            updateUpscaleHint();
+        }
+        // 预设：n 倍放大
+        function setUpscaleScale(n) {
+            if (!_upscaleNatW) return;
+            document.getElementById('upscale-w').value = Math.round(_upscaleNatW * n);
+            document.getElementById('upscale-h').value = Math.round(_upscaleNatH * n);
+            updateUpscaleHint();
+        }
+        // 提示当前倍数与范围；超界时在弹窗内显示红字错误
+        function updateUpscaleHint() {
+            if (!_upscaleNatW) return;
+            const errEl = document.getElementById('upscale-error');
+            const w = parseInt(document.getElementById('upscale-w').value) || 0;
+            const h = parseInt(document.getElementById('upscale-h').value) || 0;
+            const ratio = (w / _upscaleNatW).toFixed(2);
+            document.getElementById('upscale-hint').textContent =
+                '当前约 ' + ratio + 'x（原图 ' + _upscaleNatW + '×' + _upscaleNatH + '，范围 1~4x）';
+            const minW = _upscaleNatW, maxW = _upscaleNatW * 4;
+            const minH = _upscaleNatH, maxH = _upscaleNatH * 4;
+            if (w < minW || w > maxW || h < minH || h > maxH) {
+                errEl.textContent = '尺寸必须在 ' + minW + '×' + minH + ' 到 ' + maxW + '×' + maxH + ' 之间（1~4x）';
+                errEl.classList.remove('hidden');
+            } else {
+                errEl.classList.add('hidden');
+            }
+        }
+        function confirmUpscale() {
+            if (!originalImage) return;
+            const w = parseInt(document.getElementById('upscale-w').value);
+            const h = parseInt(document.getElementById('upscale-h').value);
+            const errEl = document.getElementById('upscale-error');
+            if (!(w > 0) || !(h > 0)) {
+                errEl.textContent = '请输入有效尺寸';
+                errEl.classList.remove('hidden');
+                return;
+            }
+            // 范围校验：[原图, 原图*4]，错误提示显示在弹窗内而非右下角通知
+            const minW = _upscaleNatW, maxW = _upscaleNatW * 4;
+            const minH = _upscaleNatH, maxH = _upscaleNatH * 4;
+            if (w < minW || w > maxW || h < minH || h > maxH) {
+                errEl.textContent = '尺寸必须在 ' + minW + '×' + minH + ' 到 ' + maxW + '×' + maxH + ' 之间（1~4x）';
+                errEl.classList.remove('hidden');
+                return;
+            }
+            errEl.classList.add('hidden');
+            closeUpscaleModal();
+            runUpscale(w, h);
+        }
+        // 后端 Real-ESRGAN 4x 超分 + 缩放到 (w,h)，前端暂存（editorDirty），点保存才覆盖原图
+        // 用 _upscaleBusy 标志统一管理按钮禁用，避免重置/切图等异步流程的 updateButtonStates
+        // 误改放大中按钮状态（updateButtonStates 会尊重此标志）。
+        let _upscaleBusy = false;
+        // 跟踪 displayImg 当前使用的 objectURL，切图/重置时清理，避免 blob URL 泄漏。
+        // 若为 null 表示 displayImg 用的是 dataURL 或服务器 URL，无需 revoke。
+        let _displayObjectUrl = null;
+        function runUpscale(targetW, targetH) {
+            const okBtn = document.getElementById('btn-upscale-ok');
+            const filename = allImages[currentIndex];
+            _upscaleBusy = true;
+            updateButtonStates();  // 统一显示 spinner + 禁用放大按钮
+            okBtn.disabled = true;
+            const url = '/upscale_realesrgan?target=' + encodeURIComponent(filename) +
+                        '&w=' + targetW + '&h=' + targetH;
+            fetch(url, { method: 'POST' })
+                .then(r => {
+                    const ct = r.headers.get('Content-Type') || '';
+                    if (ct.indexOf('application/json') >= 0) {
+                        // 后端返回错误 JSON
+                        return r.json().then(d => { throw new Error(d.error || '放大失败'); });
+                    }
+                    if (!r.ok) {
+                        return r.text().then(t => { throw new Error(t || '服务器错误'); });
+                    }
+                    return r.blob();
+                })
+                .then(blob => {
+                    const objectUrl = URL.createObjectURL(blob);
+                    const newImg = new Image();
+                    newImg.onload = function() {
+                        originalImage = newImg;
+                        editorDirty = true;
+                        const displayImg = document.getElementById('editor-img');
+                        displayImg.onload = function() {
+                            fitImageToEditor();
+                            updateImageInfo();
+                            _upscaleBusy = false;
+                            updateButtonStates();
+                            showNotification('已放大为 ' + targetW + '×' + targetH + '，点击保存以覆盖原图', 'info');
+                            // objectUrl 现在由 displayImg 持有，登记待后续切图/重置时清理，这里不 revoke
+                        };
+                        // 清理上一次的 objectUrl（若有），再登记本次的
+                        if (_displayObjectUrl && _displayObjectUrl !== objectUrl) {
+                            URL.revokeObjectURL(_displayObjectUrl);
+                        }
+                        _displayObjectUrl = objectUrl;
+                        displayImg.src = objectUrl;
+                    };
+                    newImg.onerror = function() {
+                        URL.revokeObjectURL(objectUrl);
+                        _upscaleBusy = false;
+                        updateButtonStates();
+                        showNotification('放大后的图片解码失败', 'error');
+                    };
+                    newImg.src = objectUrl;
+                })
+                .catch(err => {
+                    _upscaleBusy = false;
+                    updateButtonStates();
+                    okBtn.disabled = false;
+                    showNotification(err.message || '请求失败', 'error');
+                });
+        }
+
+        // 预设/输入变更：更新目标分辨率并重置裁剪框
+        function setCropPreset(w, h) {
+            document.getElementById('crop-w').value = w;
+            document.getElementById('crop-h').value = h;
+            onCropTargetChange();
+        }
+        function onCropTargetChange() {
+            const w = parseInt(document.getElementById('crop-w').value);
+            const h = parseInt(document.getElementById('crop-h').value);
+            if (w > 0 && h > 0) {
+                try { localStorage.setItem('crop_target', JSON.stringify([w, h])); } catch (e) {}
+                initCropRect();
+            }
+        }
+
+        // === 透明转色底：点按钮弹窗，选色 + 单张/全部 ===
+        function openAlphaModal() {
+            if (currentIndex < 0) return;
+            // 暂存态禁止透明转色底：它直接覆盖原图，与未保存的裁剪/缩放/超清放大冲突
+            if (editorDirty) {
+                showNotification('请先保存或重置当前编辑，再进行透明转色底', 'warning');
+                return;
+            }
+            document.getElementById('alpha-modal').classList.remove('hidden');
+        }
+        function closeAlphaModal() {
+            document.getElementById('alpha-modal').classList.add('hidden');
+        }
+        function confirmAlphaToWhite() {
+            const colorInput = document.getElementById('alpha-bg-color');
+            const color = (colorInput && colorInput.value) || '#ffffff';
+            const scopeEl = document.querySelector('input[name="alpha-scope"]:checked');
+            const single = scopeEl && scopeEl.value === 'single';
+            closeAlphaModal();
+            if (single) runAlphaSingle(color);
+            else runAlphaBatch(color);
+        }
+
+        // 单张处理（JSON 返回）
+        function runAlphaSingle(color) {
+            const btn = document.getElementById('btn-alpha');
+            const filename = allImages[currentIndex];
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-2"></i> 处理中...';
+            fetch('/batch_alpha_to_white?color=' + encodeURIComponent(color) + '&target=' + encodeURIComponent(filename), {method: 'POST'})
+                .then(r => r.json())
+                .then(data => {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fa fa-adjust mr-2"></i> 透明转色底';
+                    if (data.success && data.message === 'no_alpha') {
+                        showNotification('当前图片没有透明通道', 'info');
+                    } else if (data.success) {
+                        showNotification('已转换：' + data.item, 'success');
+                        loadImageIntoEditor(filename);  // 刷新预览
+                    } else {
+                        showNotification(data.error || '处理失败', 'error');
+                    }
+                })
+                .catch(() => {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fa fa-adjust mr-2"></i> 透明转色底';
+                    showNotification('请求失败', 'error');
+                });
+        }
+
+        // 全部处理（SSE 流式）
+        function runAlphaBatch(color) {
+            const btn = document.getElementById('btn-alpha');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-2"></i> 处理中...';
+
+            fetch('/batch_alpha_to_white?color=' + encodeURIComponent(color), {method: 'POST'})
+            .then(r => {
+                const ct = r.headers.get('Content-Type') || '';
+                if (ct.includes('application/json')) {
+                    return r.json().then(data => {
+                        btn.disabled = false;
+                        btn.innerHTML = '<i class="fa fa-adjust mr-2"></i> 透明转色底';
+                        if (data.message === 'no_alpha') {
+                            showNotification('没有需要转换的透明图片', 'info');
+                        } else {
+                            showNotification('处理完成', 'success');
+                        }
+                        return null;
+                    });
+                }
+                return r.body;
+            })
+            .then(body => {
+                if (!body) return;
+                openProgressModal('批量透明转底色 ' + color, '正在扫描图片...');
+                const reader = body.getReader();
+                const decoder = new TextDecoder();
+                let buf = '';
+                function read() {
+                    reader.read().then(({done, value}) => {
+                        if (done) return;
+                        buf += decoder.decode(value, {stream: true});
+                        const lines = buf.split('\n');
+                        buf = lines.pop();
+                        let etype = '', edata = '';
+                        for (const line of lines) {
+                            if (line.startsWith('event: ')) etype = line.slice(7).trim();
+                            else if (line.startsWith('data: ')) edata = line.slice(6).trim();
+                            else if (line === '' && etype && edata) {
+                                handleProgressEvent(etype, edata);
+                                etype = ''; edata = '';
+                            }
+                        }
+                        read();
+                    });
+                }
+                read();
+            })
+            .catch(() => {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fa fa-adjust mr-2"></i> 透明转色底';
+                showNotification('请求失败', 'error');
+            });
+
+            function handleProgressEvent(type, raw) {
+                let data;
+                try { data = JSON.parse(raw); } catch { return; }
+                if (type === 'progress') {
+                    const pct = Math.round(data.current / data.total * 100);
+                    document.getElementById('progress-bar').style.width = pct + '%';
+                    document.getElementById('progress-count').textContent = data.current + ' / ' + data.total;
+                    document.getElementById('progress-percent').textContent = pct + '%';
+                    document.getElementById('progress-item').textContent = data.item;
+                } else if (type === 'error') {
+                    const el = document.getElementById('progress-errors');
+                    el.classList.remove('hidden');
+                    el.innerHTML += '<div>' + escapeHtml(data.item) + ': ' + escapeHtml(data.error) + '</div>';
+                } else if (type === 'complete') {
+                    document.getElementById('progress-bar').style.width = '100%';
+                    document.getElementById('progress-count').textContent = data.converted + ' / ' + data.converted;
+                    document.getElementById('progress-percent').textContent = '100%';
+                    document.getElementById('progress-subtitle').textContent =
+                        '完成：转换 ' + data.converted + ' 张' + (data.errors > 0 ? '，失败 ' + data.errors + ' 张' : '');
+                    document.getElementById('progress-item').textContent = '';
+                    document.getElementById('progress-close').classList.remove('hidden');
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fa fa-adjust mr-2"></i> 透明转色底';
+                    // 刷新当前预览
+                    if (currentIndex >= 0) loadImageIntoEditor(allImages[currentIndex]);
+                }
+            }
+        }
+
+        function openProgressModal(title, subtitle) {
+            document.getElementById('progress-title').textContent = title;
+            document.getElementById('progress-subtitle').textContent = subtitle;
+            document.getElementById('progress-bar').style.width = '0%';
+            document.getElementById('progress-count').textContent = '0 / 0';
+            document.getElementById('progress-percent').textContent = '0%';
+            document.getElementById('progress-item').textContent = '';
+            document.getElementById('progress-errors').classList.add('hidden');
+            document.getElementById('progress-errors').innerHTML = '';
+            document.getElementById('progress-close').classList.add('hidden');
+            document.getElementById('progress-modal').classList.remove('hidden');
+        }
+
+        function closeProgressModal() {
+            document.getElementById('progress-modal').classList.add('hidden');
+            location.reload();
+        }
+
+        // === 保存 ===
+        // silent=true 时静默保存（不显示"保存成功"通知），用于旋转等自动保存场景
+        function saveImage(silent) {
+            if (!originalImage || !editorDirty) return;
+
+            const btn = document.getElementById('btn-save');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-2"></i> 保存中...';
+
+            // 导出为 PNG 并以 multipart 直传二进制（避免 base64 膨胀 + JSON 编码开销）
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = originalImage.naturalWidth;
+            tempCanvas.height = originalImage.naturalHeight;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.drawImage(originalImage, 0, 0);
+
+            tempCanvas.toBlob(function(blob) {
+                if (!blob) {
+                    showNotification('图片导出失败', 'error');
+                    btn.disabled = !editorDirty;  // blob 失败时恢复按钮（此 return 不经过下方 finally）
+                    btn.innerHTML = '<i class="fa fa-save mr-2"></i> 保存';
+                    return;
+                }
+                const fd = new FormData();
+                fd.append('filename', allImages[currentIndex]);
+                fd.append('image', blob, allImages[currentIndex]);
+                fetch('/process_image', {
+                    method: 'POST',
+                    body: fd  // 不设 Content-Type，浏览器自动加 multipart boundary
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        editorDirty = false;
+                        if (!silent) showNotification('保存成功 (' + data.width + 'x' + data.height + ')', 'success');
+                        // 如果文件名变了（如 jpg→png），更新列表
+                        if (data.filename !== allImages[currentIndex]) {
+                            allImages[currentIndex] = data.filename;
+                            rebuildFileList();
+                            updateNavUI();
+                        }
+                        // 刷新预览
+                        loadImageIntoEditor(allImages[currentIndex]);
+                    } else {
+                        showNotification(data.error || '保存失败', 'error');
+                    }
+                })
+                .catch(() => showNotification('保存失败', 'error'))
+                .finally(() => {
+                    btn.disabled = !editorDirty;
+                    btn.innerHTML = '<i class="fa fa-save mr-2"></i> 保存';
+                });
+            }, 'image/png');
+        }
+
+        // === 重置 ===
+        function resetEditor() {
+            if (currentIndex < 0) return;
+            editorDirty = false;
+            cropRect = null;
+            // 退出裁剪模式
+            if (cropMode) {
+                cropMode = false;
+                const toolbar = document.getElementById('crop-toolbar');
+                if (toolbar) toolbar.classList.add('hidden');
+                updateCropButton();
+            }
+            loadImageIntoEditor(allImages[currentIndex]);
+        }
+
+        // === 按钮状态 ===
+        function updateButtonStates() {
+            // 裁剪框在有图时始终存在，按钮可用性只取决于是否选中图片
+            document.getElementById('btn-crop').disabled = currentIndex < 0;
+            document.getElementById('btn-reset').disabled = currentIndex < 0;
+            document.getElementById('btn-save').disabled = !editorDirty;
+            // 暂存态（editorDirty，裁剪/缩放/超清放大后）禁止旋转和透明转色底：
+            // 这两者会自动落盘覆盖原图，与暂存态冲突。需先保存或重置才能执行。
+            const blockedByDirty = editorDirty;
+            document.getElementById('btn-rotate').disabled = currentIndex < 0 || blockedByDirty;
+            document.getElementById('btn-alpha').disabled = currentIndex < 0 || blockedByDirty;
+            // 超清放大按钮：放大进行中强制禁用并显示 spinner，其余按是否选中图片决定。
+            // 统一在这里管理，避免重置/切图等异步 onload 误改放大中按钮状态。
+            const upscaleBtn = document.getElementById('btn-upscale');
+            upscaleBtn.disabled = _upscaleBusy || currentIndex < 0;
+            upscaleBtn.innerHTML = _upscaleBusy
+                ? '<i class="fa fa-spinner fa-spin mr-2"></i> 放大中...'
+                : '<i class="fa fa-diamond mr-2"></i> 超清放大';
+        }
+
+        // === 通知 ===
+        let _notifyTimer = null;
+        function showNotification(message, type) {
+            const n = document.getElementById('notification');
+            const colors = {success:'bg-green-500 text-white',error:'bg-red-500 text-white',warning:'bg-amber-500 text-white',info:'bg-blue-500 text-white'};
+            n.className = 'fixed bottom-5 right-5 px-5 py-3 rounded-lg shadow-lg flex items-center z-50 transition-all duration-300 text-sm ' + (colors[type]||colors.info);
+            n.textContent = message;
+            n.style.transform = 'translateY(0)'; n.style.opacity = '1';
+            if (_notifyTimer) clearTimeout(_notifyTimer);
+            _notifyTimer = setTimeout(() => { n.style.transform = 'translateY(20px)'; n.style.opacity = '0'; _notifyTimer = null; }, 3000);
+        }
+
+        // === 工具 ===
+        function navigateToTags() {
+            if (currentIndex >= 0 && allImages[currentIndex]) {
+                window.location.href = '/#' + encodeURIComponent(allImages[currentIndex]);
+                return false;
+            }
+            return true;
+        }
+
+        function escapeHtml(str) {
+            return str.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+
+        // 防止刷新丢失
+        window.addEventListener('beforeunload', function(e) {
+            if (editorDirty) { e.preventDefault(); e.returnValue = ''; }
+        });
+
+        // 底色记忆：恢复上次选择的颜色，变化时持久化
+        (function() {
+            const ci = document.getElementById('alpha-bg-color');
+            if (!ci) return;
+            const saved = localStorage.getItem('alpha_bg_color');
+            if (saved) ci.value = saved;
+            ci.addEventListener('change', function() { localStorage.setItem('alpha_bg_color', this.value); });
+        })();
+
+        // 裁剪目标分辨率记忆
+        (function() {
+            try {
+                const t = JSON.parse(localStorage.getItem('crop_target'));
+                if (Array.isArray(t) && t.length === 2 && t[0] > 0 && t[1] > 0) {
+                    document.getElementById('crop-w').value = t[0];
+                    document.getElementById('crop-h').value = t[1];
+                }
+            } catch (e) {}
+        })();
+
+        // 初始化
+        if (allImages.length > 0) {
+            rebuildFileList();
+            const hashName = decodeURIComponent(window.location.hash.slice(1));
+            const hashIndex = hashName ? allImages.indexOf(hashName) : -1;
+            navigateTo(hashIndex >= 0 ? hashIndex : 0);
+            // 延迟启动 ResizeObserver，确保 DOM 稳定
+            setTimeout(() => {
+                const editorArea = document.getElementById('editor-area');
+                if (editorArea) resizeObserver.observe(editorArea);
+            }, 100);
+        }
+    </script>
+</body>
+</html>

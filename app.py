@@ -30,15 +30,16 @@ app.register_blueprint(image_editor_bp)
 def index():
     """主页"""
     images = get_image_files(app.config['UPLOAD_FOLDER'])
-    return render_template('index.html', images=images, image_count=len(images))
+    return render_template('tag_editor.html', images=images, image_count=len(images))
 
 
 @app.route('/editor')
 def editor():
     """图片编辑器页面"""
     images = get_image_files(app.config['UPLOAD_FOLDER'])
-    return render_template('editor.html', images=images, image_count=len(images))
+    return render_template('image_editor.html', images=images, image_count=len(images))
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # debug 默认关闭（生产避免暴露 Werkzeug 调试器）；通过 FLASK_DEBUG=1 显式开启
+    app.run(debug=os.environ.get('FLASK_DEBUG', '0') == '1', port=8001)
