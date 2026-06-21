@@ -55,12 +55,12 @@ def get_vision_config():
 def get_wd14_config():
     """每次调用时重新读取 WD14 配置"""
     load_env()
-    model_path = os.environ.get('WD14_MODEL_PATH', 'models/wd-swinv2-tagger-v3')
+    model_path = os.environ.get('WD14_MODEL_PATH', 'models/wd-eva02-large-tagger-v3')
     if not os.path.isabs(model_path):
         model_path = str(Path(__file__).parent / model_path)
     return {
         'model_path': model_path,
-        'general_threshold': float(os.environ.get('WD14_GENERAL_THRESHOLD', '0.35')),
+        'general_threshold': float(os.environ.get('WD14_GENERAL_THRESHOLD', '0.3')),
         'character_threshold': float(os.environ.get('WD14_CHARACTER_THRESHOLD', '0.1')),
         'excluded_tags': [t.strip() for t in os.environ.get('WD14_EXCLUDED_TAGS', '').split(',') if t.strip()],
     }
@@ -78,6 +78,24 @@ def get_realesrgan_config():
         'model_path': model_path,
         'tile': int(os.environ.get('REALESRGAN_TILE', '0')),
         'tile_pad': int(os.environ.get('REALESRGAN_TILE_PAD', '10')),
+    }
+
+
+def get_birefnet_config():
+    """每次调用时重新读取 BiRefNet（ToonOut）背景移除配置。
+    base_model_dir：本地 base 模型目录（含 birefnet.py + config.json + 权重），
+                    trust_remote_code 加载所需，从 https://huggingface.co/ZhengPeng7/birefnet 下载。
+    toonout_weights：ToonOut 动漫微调权重 .pth，从 https://huggingface.co/joelseytre/toonout 下载。"""
+    load_env()
+    base_model_dir = os.environ.get('BIREFNET_BASE_MODEL_DIR', 'models/birefnet-base')
+    if not os.path.isabs(base_model_dir):
+        base_model_dir = str(Path(__file__).parent / base_model_dir)
+    toonout_weights = os.environ.get('BIREFNET_TOONOUT_WEIGHTS', 'models/toonout.pth')
+    if not os.path.isabs(toonout_weights):
+        toonout_weights = str(Path(__file__).parent / toonout_weights)
+    return {
+        'base_model_dir': base_model_dir,
+        'toonout_weights': toonout_weights,
     }
 
 

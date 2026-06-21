@@ -56,6 +56,9 @@
                 <button id="btn-upscale" class="flex items-center justify-center bg-accent hover:bg-accent/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed" onclick="openUpscaleModal()" title="Real-ESRGAN 超清放大">
                     <i class="fa fa-diamond mr-2"></i> 超清放大
                 </button>
+                <button id="btn-remove-bg" class="flex items-center justify-center bg-accent hover:bg-accent/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed" onclick="openRemoveBgModal()" title="ToonOut 背景移除">
+                    <i class="fa fa-eraser mr-2"></i> 背景移除
+                </button>
                 <button id="btn-alpha" class="flex items-center justify-center bg-accent hover:bg-accent/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed" onclick="openAlphaModal()" title="透明转色底">
                     <i class="fa fa-adjust mr-2"></i> 透明转色底
                 </button>
@@ -157,6 +160,33 @@
                 <button class="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg text-sm font-medium transition-colors" onclick="closeAlphaModal()">取消</button>
                 <button class="px-4 py-2 bg-accent hover:bg-accent/90 text-white rounded-lg text-sm font-medium transition-colors" onclick="confirmAlphaToWhite()">
                     <i class="fa fa-check mr-1"></i>开始处理
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 背景移除弹窗（ToonOut/BiRefNet） -->
+    <div id="remove-bg-modal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 hidden">
+        <div class="bg-white rounded-xl shadow-xl w-80 p-6">
+            <h3 class="text-lg font-semibold text-gray-800 mb-1">背景移除</h3>
+            <p class="text-xs text-gray-400 mb-4">ToonOut（BiRefNet）动漫背景移除</p>
+            <div class="mb-5">
+                <p class="text-sm text-gray-600 mb-2">输出模式</p>
+                <label class="flex items-center gap-2 text-sm text-gray-700 mb-1.5 cursor-pointer">
+                    <input type="radio" name="removebg-mode" value="transparent" checked class="cursor-pointer" onchange="onRemoveBgModeChange()"> 透明背景
+                </label>
+                <label class="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                    <input type="radio" name="removebg-mode" value="color" class="cursor-pointer" onchange="onRemoveBgModeChange()"> 合成纯色底
+                </label>
+            </div>
+            <div id="removebg-color-row" class="flex items-center gap-3 mb-5 hidden">
+                <span class="text-sm text-gray-600">底色</span>
+                <input type="color" id="removebg-bg-color" value="#ffffff" class="w-10 h-10 rounded border border-gray-300 cursor-pointer p-0 bg-transparent">
+            </div>
+            <div class="flex justify-end gap-2">
+                <button class="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg text-sm font-medium transition-colors" onclick="closeRemoveBgModal()">取消</button>
+                <button id="btn-remove-bg-ok" class="px-4 py-2 bg-accent hover:bg-accent/90 text-white rounded-lg text-sm font-medium transition-colors" onclick="confirmRemoveBg()">
+                    <i class="fa fa-check mr-1"></i>开始移除
                 </button>
             </div>
         </div>
@@ -1042,6 +1072,93 @@
                 });
         }
 
+        // ===== 背景移除（ToonOut/BiRefNet）=====
+        // 用 _removebgBusy 标志统一管理按钮禁用，机制同 _upscaleBusy
+        let _removebgBusy = false;
+        function openRemoveBgModal() {
+            if (currentIndex < 0 || !originalImage) return;
+            // 暂存态禁止背景移除：它会改变图片内容，与未保存的裁剪/缩放/超清放大冲突
+            if (editorDirty) {
+                showNotification('请先保存或重置当前编辑，再进行背景移除', 'warning');
+                return;
+            }
+            document.getElementById('remove-bg-modal').classList.remove('hidden');
+            document.getElementById('btn-remove-bg-ok').disabled = false;
+        }
+        function closeRemoveBgModal() {
+            document.getElementById('remove-bg-modal').classList.add('hidden');
+        }
+        // 切换输出模式：纯色底时显示颜色选择器
+        function onRemoveBgModeChange() {
+            const mode = document.querySelector('input[name="removebg-mode"]:checked').value;
+            document.getElementById('removebg-color-row').classList.toggle('hidden', mode !== 'color');
+        }
+        function confirmRemoveBg() {
+            if (!originalImage) return;
+            const mode = document.querySelector('input[name="removebg-mode"]:checked').value;
+            const bgColor = mode === 'color'
+                ? document.getElementById('removebg-bg-color').value
+                : 'transparent';
+            closeRemoveBgModal();
+            runRemoveBg(bgColor);
+        }
+        // 后端 ToonOut 背景移除，前端暂存（editorDirty），点保存才覆盖原图
+        function runRemoveBg(bgColor) {
+            const okBtn = document.getElementById('btn-remove-bg-ok');
+            const filename = allImages[currentIndex];
+            _removebgBusy = true;
+            updateButtonStates();  // 统一显示 spinner + 禁用背景移除按钮
+            okBtn.disabled = true;
+            const url = '/remove_background?target=' + encodeURIComponent(filename) +
+                        '&bg_color=' + encodeURIComponent(bgColor);
+            fetch(url, { method: 'POST' })
+                .then(r => {
+                    const ct = r.headers.get('Content-Type') || '';
+                    if (ct.indexOf('application/json') >= 0) {
+                        return r.json().then(d => { throw new Error(d.error || '背景移除失败'); });
+                    }
+                    if (!r.ok) {
+                        return r.text().then(t => { throw new Error(t || '服务器错误'); });
+                    }
+                    return r.blob();
+                })
+                .then(blob => {
+                    const objectUrl = URL.createObjectURL(blob);
+                    const newImg = new Image();
+                    newImg.onload = function() {
+                        originalImage = newImg;
+                        editorDirty = true;
+                        const displayImg = document.getElementById('editor-img');
+                        displayImg.onload = function() {
+                            fitImageToEditor();
+                            updateImageInfo();
+                            _removebgBusy = false;
+                            updateButtonStates();
+                            showNotification('背景移除完成，点击保存以覆盖原图', 'info');
+                        };
+                        // 清理上一次的 objectUrl（复用 _displayObjectUrl，与 runUpscale 共享）
+                        if (_displayObjectUrl && _displayObjectUrl !== objectUrl) {
+                            URL.revokeObjectURL(_displayObjectUrl);
+                        }
+                        _displayObjectUrl = objectUrl;
+                        displayImg.src = objectUrl;
+                    };
+                    newImg.onerror = function() {
+                        URL.revokeObjectURL(objectUrl);
+                        _removebgBusy = false;
+                        updateButtonStates();
+                        showNotification('背景移除结果解码失败', 'error');
+                    };
+                    newImg.src = objectUrl;
+                })
+                .catch(err => {
+                    _removebgBusy = false;
+                    updateButtonStates();
+                    okBtn.disabled = false;
+                    showNotification(err.message || '请求失败', 'error');
+                });
+        }
+
         // 预设/输入变更：更新目标分辨率并重置裁剪框
         function setCropPreset(w, h) {
             document.getElementById('crop-w').value = w;
@@ -1285,7 +1402,7 @@
             document.getElementById('btn-crop').disabled = currentIndex < 0;
             document.getElementById('btn-reset').disabled = currentIndex < 0;
             document.getElementById('btn-save').disabled = !editorDirty;
-            // 暂存态（editorDirty，裁剪/缩放/超清放大后）禁止旋转和透明转色底：
+            // 暂存态（editorDirty，裁剪/缩放/超清放大/背景移除后）禁止旋转和透明转色底：
             // 这两者会自动落盘覆盖原图，与暂存态冲突。需先保存或重置才能执行。
             const blockedByDirty = editorDirty;
             document.getElementById('btn-rotate').disabled = currentIndex < 0 || blockedByDirty;
@@ -1297,6 +1414,12 @@
             upscaleBtn.innerHTML = _upscaleBusy
                 ? '<i class="fa fa-spinner fa-spin mr-2"></i> 放大中...'
                 : '<i class="fa fa-diamond mr-2"></i> 超清放大';
+            // 背景移除按钮：进行中显示 spinner；暂存态禁用（与旋转/转色底同组）
+            const removeBgBtn = document.getElementById('btn-remove-bg');
+            removeBgBtn.disabled = _removebgBusy || currentIndex < 0 || blockedByDirty;
+            removeBgBtn.innerHTML = _removebgBusy
+                ? '<i class="fa fa-spinner fa-spin mr-2"></i> 移除中...'
+                : '<i class="fa fa-eraser mr-2"></i> 背景移除';
         }
 
         // === 通知 ===

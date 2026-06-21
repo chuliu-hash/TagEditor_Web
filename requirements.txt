@@ -7,3 +7,8 @@ pandas==3.0.2
 torch>=1.7
 torchvision
 basicsr>=1.4.2
+# 背景移除（BiRefNet/ToonOut）：trust_remote_code 加载 birefnet.py 需要 kornia/einops/timm
+transformers
+kornia
+einops
+timm

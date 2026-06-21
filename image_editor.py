@@ -3,7 +3,7 @@ import os
 import numpy as np
 from io import BytesIO
 from flask import Blueprint, request, jsonify, Response, current_app, send_file
-from config import safe_filename, is_within_directory, get_realesrgan_config
+from config import safe_filename, is_within_directory, get_realesrgan_config, get_birefnet_config
 from sse_utils import sse_event
 
 image_editor_bp = Blueprint('image_editor', __name__)
@@ -277,3 +277,79 @@ def upscale_realesrgan():
 
     return send_file(BytesIO(buf.tobytes()), mimetype='image/png',
                      download_name=os.path.splitext(filename)[0] + '_upscaled.png')
+
+
+def _load_birefnet_model(cfg):
+    """加载 BiRefNet（ToonOut 权重），结果缓存到模块级全局变量。
+    重依赖（torch/transformers）在 birefnet_utils 内懒加载。"""
+    from birefnet_utils import load_birefnet_model
+    return load_birefnet_model(cfg['base_model_dir'], cfg['toonout_weights'])
+
+
+@image_editor_bp.route('/remove_background', methods=['POST'])
+def remove_background():
+    """BiRefNet（ToonOut）背景移除（单张）。
+
+    query: ?target=<filename>&bg_color=<hex|transparent>
+    bg_color=transparent 或缺省：输出透明背景 RGBA PNG。
+    bg_color=<hex>（如 #ffffff）：前景与该底色混合，输出 RGB PNG。
+    成功返回 PNG 二进制（image/png），失败返回 JSON。前端按 Content-Type 区分。
+    后端不写盘——落盘交给既有 /process_image（保存）流程。
+    """
+    import cv2
+
+    target = (request.args.get('target') or '').strip()
+    if not target:
+        return jsonify({'success': False, 'error': '缺少 target 参数'}), 400
+
+    filename = safe_filename(target)
+    ext = os.path.splitext(filename)[1].lstrip('.').lower()
+    if ext == 'gif':
+        return jsonify({'success': False, 'error': '不支持 GIF 图片'}), 400
+
+    upload_dir = os.path.abspath(current_app.config['UPLOAD_FOLDER'])
+    fpath = os.path.abspath(os.path.join(upload_dir, filename))
+    if not is_within_directory(fpath, upload_dir) or not os.path.isfile(fpath):
+        return jsonify({'success': False, 'error': '文件不存在或非法路径'}), 400
+
+    # 解析输出模式：transparent 透明，否则 hex 底色
+    bg_raw = (request.args.get('bg_color') or 'transparent').strip()
+    if bg_raw.lower() == 'transparent':
+        bg_color = None  # 透明背景
+    else:
+        bg_color = _parse_bg_color(bg_raw)  # (R,G,B) float32
+
+    # 读取原图
+    img = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        return jsonify({'success': False, 'error': '无法读取图片'}), 400
+    # 统一为 3 通道 BGR（BiRefNet 只处理 RGB 内容，alpha 通道在此丢弃）
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    elif img.ndim == 3 and img.shape[2] == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+    # 加载模型（带缓存）
+    cfg = get_birefnet_config()
+    try:
+        model = _load_birefnet_model(cfg)
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'模型加载失败: {str(e)}'}), 500
+
+    # 背景移除推理
+    try:
+        from birefnet_utils import remove_background as _remove_bg
+        output = _remove_bg(model, img, bg_color=bg_color)
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'背景移除失败: {str(e)}'}), 500
+
+    # 编码为 PNG 二进制返回（不写盘）
+    try:
+        ok, buf = cv2.imencode('.png', output, [cv2.IMWRITE_PNG_COMPRESSION, 3])
+        if not ok:
+            return jsonify({'success': False, 'error': 'PNG 编码失败'}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'PNG 编码失败: {str(e)}'}), 500
+
+    return send_file(BytesIO(buf.tobytes()), mimetype='image/png',
+                     download_name=os.path.splitext(filename)[0] + '_nobg.png')
