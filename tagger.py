@@ -73,8 +73,8 @@ def wd14_load_model(model_path):
     return _wd14_model_cache
 
 
-def wd14_filter_tags(label_df, probabilities, general_threshold, character_threshold, excluded_tags):
-    """按阈值过滤标签，返回逗号分隔的标签字符串"""
+def wd14_filter_tags(label_df, probabilities, general_threshold, character_threshold):
+    """按阈值过滤标签，返回逗号分隔的标签字符串。"""
     tags = []
     for i, row in label_df.iterrows():
         category = row['category']
@@ -84,8 +84,7 @@ def wd14_filter_tags(label_df, probabilities, general_threshold, character_thres
         threshold = character_threshold if category == 4 else general_threshold
         if prob >= threshold:
             tag_name = row['name'].replace('_', ' ')
-            if tag_name not in excluded_tags:
-                tags.append(tag_name)
+            tags.append(tag_name)
     return ', '.join(tags)
 
 
@@ -249,8 +248,7 @@ def auto_tag_wd14():
                     try:
                         tags = wd14_filter_tags(
                             label_df, probs_batch[k],
-                            cfg['general_threshold'], cfg['character_threshold'],
-                            cfg['excluded_tags']
+                            cfg['general_threshold'], cfg['character_threshold']
                         )
                         if tags:
                             txt_path = os.path.join(upload_dir, f"{os.path.splitext(filename)[0]}.txt")

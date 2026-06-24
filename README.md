@@ -95,7 +95,6 @@ python app.py
 | `WD14_MODEL_PATH` | 模型目录（需含 `model.onnx` 和 `selected_tags.csv`） | `models/wd-eva02-large-tagger-v3` |
 | `WD14_GENERAL_THRESHOLD` | general 标签置信度阈值 | `0.3` |
 | `WD14_CHARACTER_THRESHOLD` | character 标签置信度阈值 | `0.1` |
-| `WD14_EXCLUDED_TAGS` | 逗号分隔的排除标签 | — |
 
 ### Real-ESRGAN 超清放大
 

@@ -62,7 +62,6 @@ def get_wd14_config():
         'model_path': model_path,
         'general_threshold': float(os.environ.get('WD14_GENERAL_THRESHOLD', '0.3')),
         'character_threshold': float(os.environ.get('WD14_CHARACTER_THRESHOLD', '0.1')),
-        'excluded_tags': [t.strip() for t in os.environ.get('WD14_EXCLUDED_TAGS', '').split(',') if t.strip()],
     }
 
 
