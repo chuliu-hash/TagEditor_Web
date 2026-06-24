@@ -228,20 +228,37 @@ def upsert_tag(conn, name, cn_name='', en_wiki='', cn_wiki='', other_names='[]',
 
 
 def lookup_tags(conn, tags):
-    """批量查标签翻译。返回 {tag: {cn_name, en_wiki, cn_wiki, other_names}}"""
+    """批量查标签翻译。返回 {name: {cn_name, en_wiki, cn_wiki, other_names}}（key 为规范化 name）。
+
+    分批查询（每批 ≤ 500 个占位符）：SQLite 默认 SQLITE_MAX_VARIABLE_NUMBER=999，
+    一次 IN (?,...) 超过限制会抛 OperationalError: too many SQL variables。
+    tag_stats 可能传入数千个唯一标签，故分块避免崩溃。
+    去重输入减少重复查询（同 tag 多次出现只查一次）。"""
     if not tags:
         return {}
-    placeholders = ','.join('?' * len(tags))
-    rows = conn.execute(
-        f"SELECT name, cn_name, en_wiki, cn_wiki, other_names "
-        f"FROM tags WHERE name IN ({placeholders})",
-        [t.strip().replace(' ', '_') for t in tags]
-    ).fetchall()
+    # 规范化 + 去重，减少查询次数
+    norm_map = {}  # name -> 原始 tags 中的引用（无实际用途，仅去重）
+    norm_list = []
+    for t in tags:
+        n = t.strip().replace(' ', '_')
+        if n and n not in norm_map:
+            norm_map[n] = True
+            norm_list.append(n)
+
     result = {}
-    for r in rows:
-        result[r[0]] = {
-            'cn_name': r[1], 'en_wiki': r[2], 'cn_wiki': r[3], 'other_names': r[4],
-        }
+    BATCH = 500  # 远低于 999 上限，留余量
+    for i in range(0, len(norm_list), BATCH):
+        chunk = norm_list[i:i+BATCH]
+        placeholders = ','.join('?' * len(chunk))
+        rows = conn.execute(
+            f"SELECT name, cn_name, en_wiki, cn_wiki, other_names "
+            f"FROM tags WHERE name IN ({placeholders})",
+            chunk
+        ).fetchall()
+        for r in rows:
+            result[r[0]] = {
+                'cn_name': r[1], 'en_wiki': r[2], 'cn_wiki': r[3], 'other_names': r[4],
+            }
     return result
 
 
