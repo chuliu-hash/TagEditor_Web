@@ -32,15 +32,16 @@ CREATE TABLE IF NOT EXISTS tags (
 );
 """
 
-# search_tags 全文索引：FTS5 trigram 虚拟表，对 name(规范化) + other_names 做子串匹配。
+# search_tags 全文索引：FTS5 trigram 虚拟表，对 name(规范化) + other_names + cn_name 做子串匹配。
 # trigram 分词器原生支持任意子串（≥3 字符），配合 name_norm（连字符→下划线）实现
-# 「on bed / on_bed / side-tie」三种写法互通。比 LIKE 全表扫描快约 1000 倍（2ms vs 2s）。
-# cn_name 为中文（常 ≤2 字符，trigram 跳过），仍用 LIKE（仅扫一列，约 100ms）。
+# 「on bed / on_bed / side-tie」三种写法互通。cn_name 也纳入 FTS（≥3 字符查询走 FTS，~2ms；
+# <3 字符的短中文查询回退 LIKE）。比 LIKE 全表扫描快约 1000 倍（2ms vs 2s），P95 < 200ms。
 # 由 _ensure_fts_index 建表 + 触发器，自动随 tags 表增删改同步，无需每个写入点手动维护。
 _FTS_INDEX_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS tags_fts USING fts5(
     name_norm,        -- 规范化 name（连字符→下划线），与 keyword 规范化口径一致
     other_names,
+    cn_name,          -- 中文翻译（≥3 字符查询走 FTS，避免 cn_name LIKE 全表扫 ~160ms）
     content='',       -- contentless：自身存副本，避免外部内容表的 rowid 对齐负担
     tokenize = "trigram"
 );
@@ -50,18 +51,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS tags_fts USING fts5(
 # name_norm 在触发器内对 NEW.name 做 REPLACE('-','_') 计算，保证两侧规范化口径一致。
 _FTS_TRIGGERS_SQL = """
 CREATE TRIGGER IF NOT EXISTS tags_fts_ai AFTER INSERT ON tags BEGIN
-    INSERT INTO tags_fts(rowid, name_norm, other_names)
-    VALUES (NEW.rowid, REPLACE(NEW.name, '-', '_'), NEW.other_names);
+    INSERT INTO tags_fts(rowid, name_norm, other_names, cn_name)
+    VALUES (NEW.rowid, REPLACE(NEW.name, '-', '_'), NEW.other_names, NEW.cn_name);
 END;
 CREATE TRIGGER IF NOT EXISTS tags_fts_ad AFTER DELETE ON tags BEGIN
-    INSERT INTO tags_fts(tags_fts, rowid, name_norm, other_names)
-    VALUES ('delete', OLD.rowid, REPLACE(OLD.name, '-', '_'), OLD.other_names);
+    INSERT INTO tags_fts(tags_fts, rowid, name_norm, other_names, cn_name)
+    VALUES ('delete', OLD.rowid, REPLACE(OLD.name, '-', '_'), OLD.other_names, OLD.cn_name);
 END;
-CREATE TRIGGER IF NOT EXISTS tags_fts_au AFTER UPDATE OF name, other_names ON tags BEGIN
-    INSERT INTO tags_fts(tags_fts, rowid, name_norm, other_names)
-    VALUES ('delete', OLD.rowid, REPLACE(OLD.name, '-', '_'), OLD.other_names);
-    INSERT INTO tags_fts(rowid, name_norm, other_names)
-    VALUES (NEW.rowid, REPLACE(NEW.name, '-', '_'), NEW.other_names);
+CREATE TRIGGER IF NOT EXISTS tags_fts_au AFTER UPDATE OF name, other_names, cn_name ON tags BEGIN
+    INSERT INTO tags_fts(tags_fts, rowid, name_norm, other_names, cn_name)
+    VALUES ('delete', OLD.rowid, REPLACE(OLD.name, '-', '_'), OLD.other_names, OLD.cn_name);
+    INSERT INTO tags_fts(rowid, name_norm, other_names, cn_name)
+    VALUES (NEW.rowid, REPLACE(NEW.name, '-', '_'), NEW.other_names, NEW.cn_name);
 END;
 """
 
@@ -69,9 +70,24 @@ END;
 def _ensure_fts_index(conn):
     """确保 FTS5 索引表与同步触发器存在。
     全量重建场景（init_from_files 先 DELETE 再批量 INSERT）会通过触发器自动填充索引，
-    无需手动重建。若 FTS 表已存在但为空（旧库升级），调用 _rebuild_fts_index 补数据。"""
+    无需手动重建。若 FTS 表已存在但为空（旧库升级），调用 _rebuild_fts_index 补数据。
+    若旧版 FTS 表列集合不符（如缺少 cn_name 列），DROP 表 + 旧触发器后重建为新结构。
+    CREATE TRIGGER IF NOT EXISTS 不会更新已存在的触发器，故旧版升级时必须先 DROP 再 CREATE。"""
+    needs_rebuild = False
+    if _table_exists(conn, 'tags_fts'):
+        fts_cols = {r[1] for r in conn.execute("PRAGMA table_info(tags_fts)").fetchall()}
+        if 'cn_name' not in fts_cols:
+            # 旧版 FTS 表：DROP 表 + 三个旧触发器，重新创建带 cn_name 的新版
+            conn.executescript("""
+                DROP TABLE IF EXISTS tags_fts;
+                DROP TRIGGER IF EXISTS tags_fts_ai;
+                DROP TRIGGER IF EXISTS tags_fts_ad;
+                DROP TRIGGER IF EXISTS tags_fts_au;
+            """)
+            needs_rebuild = True
     conn.executescript(_FTS_INDEX_SQL)
     conn.executescript(_FTS_TRIGGERS_SQL)
+    return needs_rebuild  # 调用方可据此触发 _rebuild_fts_index 填充数据
 
 
 def _rebuild_fts_index(conn):
@@ -79,8 +95,8 @@ def _rebuild_fts_index(conn):
     用于：旧库首次升级到 FTS5（触发器建好后表仍空），或索引损坏修复。"""
     conn.execute("DELETE FROM tags_fts")
     conn.execute("""
-        INSERT INTO tags_fts(rowid, name_norm, other_names)
-        SELECT rowid, REPLACE(name, '-', '_'), other_names FROM tags
+        INSERT INTO tags_fts(rowid, name_norm, other_names, cn_name)
+        SELECT rowid, REPLACE(name, '-', '_'), other_names, cn_name FROM tags
     """)
 
 # 已废弃的旧列名（用于迁移检测）。迁移时若 tags 表含任一此列，则重建为精简结构。
@@ -153,10 +169,10 @@ def get_conn(db_path=None):
     if _migrate_to_target_schema(conn):
         conn.commit()
     # FTS5 全文索引：建表 + 触发器；若索引为空（旧库升级或迁移后）补数据
-    _ensure_fts_index(conn)
+    fts_rebuilt = _ensure_fts_index(conn)
     fts_count = conn.execute("SELECT count(*) FROM tags_fts").fetchone()[0]
     tag_count = conn.execute("SELECT count(*) FROM tags").fetchone()[0]
-    if tag_count > 0 and fts_count == 0:
+    if tag_count > 0 and (fts_count == 0 or fts_rebuilt):
         _rebuild_fts_index(conn)
         conn.commit()
     return conn
@@ -323,9 +339,9 @@ def search_tags(conn, keyword, limit=20):
         用户输入 "side tie" → 规范化 "side_tie" → FTS 匹配 name_norm "side_tie_panties" ✓
         用户输入 "on bed"  → 规范化 "on_bed"  → FTS 匹配 name_norm "on_bed" ✓
 
-    性能：name/other_names 走 FTS5 trigram 索引（子串匹配，≈2ms），
-    cn_name（中文，常 ≤2 字符，trigram 跳过）走 LIKE（仅扫一列，≈100ms）。
-    keyword 规范化后 <3 字符时 trigram 无法用，name/other_names 也回退 LIKE。
+    性能：name/other_names/cn_name 均走 FTS5 trigram 索引（子串匹配，≈2ms）。
+    keyword 规范化后 <3 字符时 trigram 无法用，回退全表 LIKE（仅扫 name/cn_name/other_names）。
+    cn_name 用原始 keyword 匹配（中文无需空格/连字符规范化）。
 
     keyword 中的 FTS 特殊字符（" * ( ) 等）会按 FTS5 双引号转义，避免被当查询语法。"""
     kw = (keyword or '').strip()
@@ -343,25 +359,24 @@ def search_tags(conn, keyword, limit=20):
     name_pat = _make_like_pattern(kw_norm) # name/other_names 用规范化 keyword
 
     # trigram 要求 keyword ≥3 字符才能命中（<3 时退化为全表 LIKE）
-    use_fts = len(kw_norm) >= 3 and _table_exists(conn, 'tags_fts')
+    use_fts = len(kw) >= 3 and _table_exists(conn, 'tags_fts')
 
     if use_fts:
         # FTS5 trigram MATCH：双引号包裹避免特殊字符被当查询语法。
-        # trigram 原生支持子串（≥3 字符），name_norm 已规范化，直接匹配。
-        # 用 UNION（非 OR）合并 FTS 命中与 cn_name LIKE 命中：
-        # OR 会让查询规划器退化为全表扫描（~1.8s），UNION 两路独立走各自索引（~2ms）。
-        fts_query = '"' + kw_norm.replace('"', '""') + '"'
+        # name_norm/other_names 用规范化 keyword；cn_name 用原始 keyword（中文无需规范化）。
+        # 三列用列限定语法「col:"q"」+ OR 合并为一个 MATCH（单次 FTS 索引扫描，最快）。
+        fts_q_norm = kw_norm.replace('"', '""')
+        fts_q_kw = kw.replace('"', '""')
+        match_expr = 'name_norm:"{0}" OR other_names:"{0}" OR cn_name:"{1}"'.format(fts_q_norm, fts_q_kw)
         rows = conn.execute(
             """
             SELECT name, cn_name, en_wiki, cn_wiki, other_names FROM tags WHERE rowid IN (
                 SELECT rowid FROM tags_fts WHERE tags_fts MATCH ?
-                UNION
-                SELECT rowid FROM tags WHERE cn_name LIKE ? ESCAPE '\\'
             )
             ORDER BY name
             LIMIT ?
             """,
-            (fts_query, cn_pat, limit)
+            (match_expr, limit)
         ).fetchall()
     else:
         # 短 keyword（<3 字符，trigram 无效）或 FTS 未建：回退全表 LIKE
