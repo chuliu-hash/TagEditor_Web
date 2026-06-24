@@ -137,6 +137,9 @@ def batch_alpha_to_white():
         errors = 0
         total = len(alpha_images)
         try:
+            # 先发一个总数预告事件（current:0）：让前端立即显示「0 / N」与预估总数，
+            # 而非停留在「正在扫描图片...」无进度信息。扫描已在路由层完成，此处 total 已知。
+            yield sse_event('progress', {'current': 0, 'total': total, 'item': '准备开始转换 ' + str(total) + ' 张图片...'})
             for i, (fname, fpath) in enumerate(alpha_images):
                 try:
                     img = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)
