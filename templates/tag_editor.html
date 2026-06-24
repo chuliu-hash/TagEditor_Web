@@ -104,6 +104,9 @@
                 <button class="flex items-center justify-center bg-gray-600 hover:bg-gray-700 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs" onclick="openTagStats()">
                     <i class="fa fa-bar-chart mr-1.5"></i> 标签统计
                 </button>
+                <button class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs" onclick="openRenameModal()">
+                    <i class="fa fa-i-cursor mr-1.5"></i> 批量重命名
+                </button>
                 <div class="w-px h-5 bg-gray-200 mx-1"></div>
                 <!-- 清理组 -->
                 <button id="clear-all" class="flex items-center justify-center bg-danger hover:bg-danger/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs">
@@ -315,6 +318,48 @@
             <div class="flex justify-end gap-2 mt-5">
                 <button class="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" onclick="closePrepend()">取消</button>
                 <button id="prepend-execute-btn" class="px-4 py-2 text-sm bg-primary hover:bg-primary/90 text-white rounded-lg transition-colors" onclick="executePrepend()">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 批量重命名弹窗 -->
+    <div id="rename-modal" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center hidden" onclick="if(event.target===this)closeRename()">
+        <div class="bg-white rounded-xl shadow-xl w-[640px] max-h-[85vh] flex flex-col">
+            <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+                <h3 class="text-lg font-semibold text-gray-800">批量重命名</h3>
+                <button class="text-gray-400 hover:text-gray-600 transition-colors" onclick="closeRename()"><i class="fa fa-times"></i></button>
+            </div>
+            <div class="px-6 py-3 border-b border-gray-100 space-y-2">
+                <div class="flex items-center gap-2">
+                    <label class="text-xs text-gray-500 w-16 flex-shrink-0">命名前缀</label>
+                    <input id="rename-name" type="text" class="flex-1 border border-blue-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-primary transition-colors" placeholder="输入名称（如 character）" oninput="debouncedPreviewRename()">
+                    <span class="text-xs text-gray-400">-宽x高-编号</span>
+                </div>
+                <p class="text-xs text-gray-400">格式：<span class="font-mono text-gray-600">{名称}-{宽}x{高}-{编号}</span>，编号从 1 开始，按文件名自然排序。扩展名统一为 .png，同名 .txt 标签联动重命名。</p>
+            </div>
+            <!-- 预览表格 -->
+            <div class="flex-grow overflow-y-auto min-h-0" id="rename-preview-body">
+                <table class="w-full text-sm">
+                    <thead class="bg-gray-50 sticky top-0">
+                        <tr>
+                            <th class="text-left px-6 py-2 font-medium text-gray-500 w-8">#</th>
+                            <th class="text-left px-4 py-2 font-medium text-gray-500">原文件名</th>
+                            <th class="text-center px-2 py-2 font-medium text-gray-300 w-8"></th>
+                            <th class="text-left px-4 py-2 font-medium text-gray-500">新文件名</th>
+                            <th class="text-right px-4 py-2 font-medium text-gray-500 w-20">尺寸</th>
+                        </tr>
+                    </thead>
+                    <tbody id="rename-preview-tbody">
+                        <tr><td colspan="5" class="text-center text-gray-300 py-8">输入名称后显示预览</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="flex items-center justify-between px-6 py-3 border-t border-gray-200 bg-gray-50">
+                <span id="rename-info" class="text-xs text-gray-400"></span>
+                <div class="flex gap-2">
+                    <button class="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" onclick="closeRename()">取消</button>
+                    <button id="rename-execute-btn" class="px-4 py-2 text-sm bg-primary hover:bg-primary/90 text-white rounded-lg transition-colors disabled:opacity-40" onclick="executeRename()" disabled>执行重命名</button>
+                </div>
             </div>
         </div>
     </div>
@@ -1079,6 +1124,146 @@
         }
         document.getElementById('prepend-modal').addEventListener('click', function(e) {
             if (e.target === this) closePrepend();
+        });
+
+        // === 批量重命名（{name}-{w}x{h}-编号，编号从 1 开始）===
+        let _renamePreviewSeq = 0;  // 预览请求序列守卫，丢弃过期响应
+        let debouncedPreviewRename = debounce(previewRename, 250);
+
+        function openRenameModal() {
+            // 未保存提示，避免重命名落盘与编辑态冲突
+            if (isDirty()) {
+                showConfirm({
+                    title: '未保存的修改',
+                    message: '当前标签有未保存的修改，重命名前建议先保存。是否保存后继续？',
+                    danger: false,
+                    okText: '保存',
+                    cancelText: '不保存',
+                    onOk: function() { saveCaption().then(openRenameModalImpl).catch(function(){}); },
+                    onCancel: openRenameModalImpl
+                });
+                return;
+            }
+            openRenameModalImpl();
+        }
+
+        function openRenameModalImpl() {
+            document.getElementById('rename-modal').classList.remove('hidden');
+            document.getElementById('rename-name').value = '';
+            document.getElementById('rename-info').textContent = '';
+            document.getElementById('rename-execute-btn').disabled = true;
+            document.getElementById('rename-preview-tbody').innerHTML =
+                '<tr><td colspan="5" class="text-center text-gray-300 py-8">输入名称后显示预览</td></tr>';
+            // 延迟聚焦，避免触发 isDirty 链
+            setTimeout(function() { document.getElementById('rename-name').focus(); }, 50);
+        }
+
+        function closeRename() {
+            document.getElementById('rename-modal').classList.add('hidden');
+        }
+
+        // 预览：向后端发 preview=true 请求，渲染新旧名对照表
+        function previewRename() {
+            const name = document.getElementById('rename-name').value.trim();
+            const tbody = document.getElementById('rename-preview-tbody');
+            const execBtn = document.getElementById('rename-execute-btn');
+            const info = document.getElementById('rename-info');
+
+            if (!name) {
+                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-gray-300 py-8">输入名称后显示预览</td></tr>';
+                execBtn.disabled = true;
+                info.textContent = '';
+                return;
+            }
+
+            const seq = ++_renamePreviewSeq;
+            info.textContent = '加载预览中...';
+            execBtn.disabled = true;
+            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-gray-400 py-8"><i class="fa fa-spinner fa-spin mr-1"></i>加载中...</td></tr>';
+
+            fetch('/rename_files', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: name, preview: true})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (seq !== _renamePreviewSeq) return;  // 过期响应
+                if (data.error) {
+                    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-red-400 py-8">' + escapeHtml(data.error) + '</td></tr>';
+                    info.textContent = '';
+                    return;
+                }
+                const items = data.preview || [];
+                if (!items.length) {
+                    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-gray-300 py-8">暂无图片</td></tr>';
+                    info.textContent = '';
+                    return;
+                }
+                tbody.innerHTML = items.map(function(it, i) {
+                    return '<tr class="border-b border-gray-50 hover:bg-gray-50/80">'
+                        + '<td class="px-6 py-1.5 text-gray-300">' + (i + 1) + '</td>'
+                        + '<td class="px-4 py-1.5 font-mono text-gray-500">' + escapeHtml(it.old) + '</td>'
+                        + '<td class="px-2 py-1.5 text-center text-gray-300"><i class="fa fa-arrow-right"></i></td>'
+                        + '<td class="px-4 py-1.5 font-mono text-gray-800">' + escapeHtml(it.new) + '</td>'
+                        + '<td class="px-4 py-1.5 text-right text-gray-400">' + it.width + '×' + it.height + '</td>'
+                        + '</tr>';
+                }).join('');
+                info.textContent = '共 ' + data.total + ' 张图片将被重命名';
+                execBtn.disabled = false;
+            })
+            .catch(function() {
+                if (seq !== _renamePreviewSeq) return;
+                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-red-400 py-8">预览请求失败</td></tr>';
+                info.textContent = '';
+            });
+        }
+
+        function executeRename() {
+            const name = document.getElementById('rename-name').value.trim();
+            if (!name) { showNotification('请输入名称', 'warning'); return; }
+            const btn = document.getElementById('rename-execute-btn');
+
+            showConfirm({
+                title: '批量重命名',
+                message: '将重命名全部图片及其标签文件为「' + name + '-{宽}x{高}-{编号}」，该操作不可撤销，是否继续？',
+                danger: true,
+                okText: '执行',
+                onOk: function() {
+                    btn.disabled = true; btn.textContent = '重命名中...';
+                    fetch('/rename_files', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({name: name, preview: false})
+                    })
+                    .then(r => r.json())
+                    .then(data => {
+                        btn.disabled = false; btn.textContent = '执行重命名';
+                        if (data.error) { showNotification(data.error, 'error'); return; }
+                        showNotification('重命名完成：' + data.renamed + '/' + data.total + ' 张'
+                            + (data.errors ? '，失败 ' + data.errors : ''), data.errors ? 'warning' : 'success');
+                        closeRename();
+                        // 文件名全变，整页刷新重建文件列表与当前选中态
+                        setTimeout(function() {
+                            // 清空 hash（旧文件名已失效）
+                            window.location.hash = '';
+                            window.location.reload();
+                        }, 600);
+                    })
+                    .catch(function() {
+                        btn.disabled = false; btn.textContent = '执行重命名';
+                        showNotification('重命名失败', 'error');
+                    });
+                },
+                onCancel: null
+            });
+        }
+
+        // ESC 关闭重命名弹窗（与其他弹窗交互一致）
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape' && !document.getElementById('rename-modal').classList.contains('hidden')) {
+                closeRename();
+            }
         });
 
         // === 批量翻译所有未翻译标签 ===
