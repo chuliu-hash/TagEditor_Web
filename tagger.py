@@ -10,6 +10,10 @@ from sse_utils import sse_event
 
 tagger_bp = Blueprint('tagger', __name__)
 
+# 进程级 requests.Session：视觉模型 API 连接池复用（keep-alive）。
+# auto_tag 对每张图发一次请求，复用 TCP/TLS 连接省去每次握手开销。
+_vision_session = requests.Session()
+
 # WD14 模型缓存（首次加载后常驻内存）。只读缓存，无并发一致性问题；
 # 但多进程部署时每个 worker 会各自加载一份模型到显存，建议单 worker 运行。
 _wd14_model_cache = {'session': None, 'label_df': None, 'model_name': None}
@@ -122,50 +126,53 @@ def auto_tag():
     def generate():
         tagged = 0
         error_count = 0
+        try:
+            for idx, filename in enumerate(to_tag, start=1):
+                yield sse_event('progress', {'current': idx, 'total': total, 'item': filename})
 
-        for idx, filename in enumerate(to_tag, start=1):
-            yield sse_event('progress', {'current': idx, 'total': total, 'item': filename})
+                file_path = os.path.join(upload_dir, filename)
+                ext = os.path.splitext(filename)[1].lstrip('.')
+                mime_map = {'jpg': 'jpeg', 'jpeg': 'jpeg', 'png': 'png', 'gif': 'gif', 'webp': 'webp'}
+                mime = f"image/{mime_map.get(ext, 'jpeg')}"
 
-            file_path = os.path.join(upload_dir, filename)
-            ext = os.path.splitext(filename)[1].lstrip('.')
-            mime_map = {'jpg': 'jpeg', 'jpeg': 'jpeg', 'png': 'png', 'gif': 'gif', 'webp': 'webp'}
-            mime = f"image/{mime_map.get(ext, 'jpeg')}"
+                try:
+                    with open(file_path, 'rb') as f:
+                        img_b64 = base64.b64encode(f.read()).decode('utf-8')
 
-            try:
-                with open(file_path, 'rb') as f:
-                    img_b64 = base64.b64encode(f.read()).decode('utf-8')
+                    payload = {
+                        'model': vcfg['model'],
+                        'messages': [
+                            {'role': 'system', 'content': vcfg['prompt']},
+                            {'role': 'user', 'content': [
+                                {'type': 'image_url', 'image_url': {'url': f'data:{mime};base64,{img_b64}'}},
+                                {'type': 'text', 'text': '开始分析并输出标签：'}
+                            ]}
+                        ],
+                        'temperature': 0.3,
+                    }
 
-                payload = {
-                    'model': vcfg['model'],
-                    'messages': [
-                        {'role': 'system', 'content': vcfg['prompt']},
-                        {'role': 'user', 'content': [
-                            {'type': 'image_url', 'image_url': {'url': f'data:{mime};base64,{img_b64}'}},
-                            {'type': 'text', 'text': '开始分析并输出标签：'}
-                        ]}
-                    ],
-                    'temperature': 0.3,
-                }
+                    response = _vision_session.post(vcfg['api_url'], headers=headers, json=payload, timeout=120)
+                    result = response.json()
 
-                response = requests.post(vcfg['api_url'], headers=headers, json=payload, timeout=120)
-                result = response.json()
+                    if 'error' in result:
+                        error_count += 1
+                        yield sse_event('error', {'item': filename, 'error': result['error'].get('message', '未知错误')})
+                        continue
 
-                if 'error' in result:
+                    tags = result['choices'][0]['message']['content'].strip()
+                    txt_path = os.path.join(upload_dir, f"{os.path.splitext(filename)[0]}.txt")
+                    with open(txt_path, 'w', encoding='utf-8') as f:
+                        f.write(tags)
+                    tagged += 1
+
+                except Exception as e:
                     error_count += 1
-                    yield sse_event('error', {'item': filename, 'error': result['error'].get('message', '未知错误')})
-                    continue
+                    yield sse_event('error', {'item': filename, 'error': str(e)})
 
-                tags = result['choices'][0]['message']['content'].strip()
-                txt_path = os.path.join(upload_dir, f"{os.path.splitext(filename)[0]}.txt")
-                with open(txt_path, 'w', encoding='utf-8') as f:
-                    f.write(tags)
-                tagged += 1
-
-            except Exception as e:
-                error_count += 1
-                yield sse_event('error', {'item': filename, 'error': str(e)})
-
-        yield sse_event('complete', {'tagged': tagged, 'skipped': skipped, 'errors': error_count})
+            yield sse_event('complete', {'tagged': tagged, 'skipped': skipped, 'errors': error_count})
+        except Exception as e:
+            # 生成器级别的未预期异常：发 fatal，前端能正常收尾
+            yield sse_event('fatal', {'error': f'自动打标异常终止: {e}'})
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
@@ -190,73 +197,77 @@ def auto_tag_wd14():
         error_count = 0
         done = 0  # 已处理张数（含失败），用于进度推送
 
-        yield sse_event('progress', {'current': 0, 'total': total, 'item': '正在加载 WD14 模型...'})
-
         try:
-            model_cache = wd14_load_model(cfg['model_path'])
-        except Exception as e:
-            yield sse_event('fatal', {'error': f'WD14 模型加载失败: {str(e)}'})
-            return
+            yield sse_event('progress', {'current': 0, 'total': total, 'item': '正在加载 WD14 模型...'})
 
-        session = model_cache['session']
-        label_df = model_cache['label_df']
-        input_name = session.get_inputs()[0].name
-
-        for batch_start in range(0, total, WD14_BATCH_SIZE):
-            batch_files = to_tag[batch_start:batch_start + WD14_BATCH_SIZE]
-
-            # 预处理阶段：逐张解码+缩放，失败的单独记错并跳过（不进 batch）
-            imgs = []
-            ok_files = []
-            for filename in batch_files:
-                try:
-                    imgs.append(wd14_preprocess_image(os.path.join(upload_dir, filename)))
-                    ok_files.append(filename)
-                except Exception as e:
-                    done += 1
-                    error_count += 1
-                    yield sse_event('progress', {'current': done, 'total': total, 'item': filename})
-                    yield sse_event('error', {'item': filename, 'error': str(e)})
-
-            if not imgs:
-                continue
-
-            # 批量推理：(N,448,448,3) -> (N, num_tags)
             try:
-                batch_input = np.concatenate(imgs, axis=0)
-                probs_batch = session.run(None, {input_name: batch_input})[0]
+                model_cache = wd14_load_model(cfg['model_path'])
             except Exception as e:
-                # 整批推理失败，逐张报错
-                for filename in ok_files:
-                    done += 1
-                    error_count += 1
-                    yield sse_event('progress', {'current': done, 'total': total, 'item': filename})
-                    yield sse_event('error', {'item': filename, 'error': str(e)})
-                continue
+                yield sse_event('fatal', {'error': f'WD14 模型加载失败: {str(e)}'})
+                return
 
-            # 逐张过滤+写标签（进度仍逐张推送）
-            for k, filename in enumerate(ok_files):
-                done += 1
-                yield sse_event('progress', {'current': done, 'total': total, 'item': filename})
-                try:
-                    tags = wd14_filter_tags(
-                        label_df, probs_batch[k],
-                        cfg['general_threshold'], cfg['character_threshold'],
-                        cfg['excluded_tags']
-                    )
-                    if tags:
-                        txt_path = os.path.join(upload_dir, f"{os.path.splitext(filename)[0]}.txt")
-                        with open(txt_path, 'w', encoding='utf-8') as f:
-                            f.write(tags)
-                        tagged += 1
-                    else:
+            session = model_cache['session']
+            label_df = model_cache['label_df']
+            input_name = session.get_inputs()[0].name
+
+            for batch_start in range(0, total, WD14_BATCH_SIZE):
+                batch_files = to_tag[batch_start:batch_start + WD14_BATCH_SIZE]
+
+                # 预处理阶段：逐张解码+缩放，失败的单独记错并跳过（不进 batch）
+                imgs = []
+                ok_files = []
+                for filename in batch_files:
+                    try:
+                        imgs.append(wd14_preprocess_image(os.path.join(upload_dir, filename)))
+                        ok_files.append(filename)
+                    except Exception as e:
+                        done += 1
                         error_count += 1
-                        yield sse_event('error', {'item': filename, 'error': '未产生有效标签'})
-                except Exception as e:
-                    error_count += 1
-                    yield sse_event('error', {'item': filename, 'error': str(e)})
+                        yield sse_event('progress', {'current': done, 'total': total, 'item': filename})
+                        yield sse_event('error', {'item': filename, 'error': str(e)})
 
-        yield sse_event('complete', {'tagged': tagged, 'skipped': skipped, 'errors': error_count})
+                if not imgs:
+                    continue
+
+                # 批量推理：(N,448,448,3) -> (N, num_tags)
+                try:
+                    batch_input = np.concatenate(imgs, axis=0)
+                    probs_batch = session.run(None, {input_name: batch_input})[0]
+                except Exception as e:
+                    # 整批推理失败，逐张报错
+                    for filename in ok_files:
+                        done += 1
+                        error_count += 1
+                        yield sse_event('progress', {'current': done, 'total': total, 'item': filename})
+                        yield sse_event('error', {'item': filename, 'error': str(e)})
+                    continue
+
+                # 逐张过滤+写标签（进度仍逐张推送）
+                for k, filename in enumerate(ok_files):
+                    done += 1
+                    yield sse_event('progress', {'current': done, 'total': total, 'item': filename})
+                    try:
+                        tags = wd14_filter_tags(
+                            label_df, probs_batch[k],
+                            cfg['general_threshold'], cfg['character_threshold'],
+                            cfg['excluded_tags']
+                        )
+                        if tags:
+                            txt_path = os.path.join(upload_dir, f"{os.path.splitext(filename)[0]}.txt")
+                            with open(txt_path, 'w', encoding='utf-8') as f:
+                                f.write(tags)
+                            tagged += 1
+                        else:
+                            error_count += 1
+                            yield sse_event('error', {'item': filename, 'error': '未产生有效标签'})
+                    except Exception as e:
+                        error_count += 1
+                        yield sse_event('error', {'item': filename, 'error': str(e)})
+
+            yield sse_event('complete', {'tagged': tagged, 'skipped': skipped, 'errors': error_count})
+        except Exception as e:
+            # 生成器级别的未预期异常：发 fatal，前端能正常收尾
+            yield sse_event('fatal', {'error': f'WD14 自动打标异常终止: {e}'})
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})

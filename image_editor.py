@@ -136,32 +136,36 @@ def batch_alpha_to_white():
         converted = 0
         errors = 0
         total = len(alpha_images)
-        for i, (fname, fpath) in enumerate(alpha_images):
-            try:
-                img = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)
-                if img is None:
+        try:
+            for i, (fname, fpath) in enumerate(alpha_images):
+                try:
+                    img = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)
+                    if img is None:
+                        errors += 1
+                        yield sse_event('error', {'item': fname, 'error': '无法读取图片'})
+                        continue
+                    # 透明像素与底色按 alpha 混合（bg_rgb 在路由层解析，闭包捕获）
+                    alpha = img[:, :, 3:4] / 255.0
+                    result = img[:, :, :3] * alpha + bg_rgb * (1.0 - alpha)
+                    result = result.astype(np.uint8)
+
+                    cv2.imwrite(fpath, result, [cv2.IMWRITE_PNG_COMPRESSION, 3])
+                    converted += 1
+                    yield sse_event('progress', {
+                        'current': i + 1, 'total': total, 'item': fname
+                    })
+                except Exception as e:
                     errors += 1
-                    yield sse_event('error', {'item': fname, 'error': '无法读取图片'})
-                    continue
-                # 透明像素与底色按 alpha 混合（bg_rgb 在路由层解析，闭包捕获）
-                alpha = img[:, :, 3:4] / 255.0
-                result = img[:, :, :3] * alpha + bg_rgb * (1.0 - alpha)
-                result = result.astype(np.uint8)
+                    yield sse_event('error', {
+                        'item': fname, 'error': str(e)
+                    })
 
-                cv2.imwrite(fpath, result, [cv2.IMWRITE_PNG_COMPRESSION, 3])
-                converted += 1
-                yield sse_event('progress', {
-                    'current': i + 1, 'total': total, 'item': fname
-                })
-            except Exception as e:
-                errors += 1
-                yield sse_event('error', {
-                    'item': fname, 'error': str(e)
-                })
-
-        yield sse_event('complete', {
-            'converted': converted, 'skipped': len(images) - total, 'errors': errors
-        })
+            yield sse_event('complete', {
+                'converted': converted, 'skipped': len(images) - total, 'errors': errors
+            })
+        except Exception as e:
+            # 生成器级别的未预期异常：发 fatal，前端能正常收尾
+            yield sse_event('fatal', {'error': f'批量转换异常终止: {e}'})
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})

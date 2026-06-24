@@ -2,7 +2,6 @@
 import os
 from flask import Blueprint, request, redirect, url_for, jsonify, send_from_directory, current_app
 from config import allowed_file, safe_filename, is_within_directory
-from translation import load_cache, save_cache
 
 file_ops_bp = Blueprint('file_ops', __name__)
 
@@ -30,8 +29,8 @@ def upload_files():
 
 @file_ops_bp.route('/get_caption/<image_name>')
 def get_caption(image_name):
-    """获取图片对应的标签，同时返回翻译缓存"""
-    from translation import load_cache, lookup_tag
+    """获取图片对应的标签，同时从 SQLite 查翻译返回"""
+    from translation import _lookup_cn_from_db
     base_name = os.path.splitext(image_name)[0]
     caption_file = f"{base_name}.txt"
     caption_path = os.path.join(current_app.config['UPLOAD_FOLDER'], caption_file)
@@ -44,19 +43,17 @@ def get_caption(image_name):
         except Exception as e:
             print(f"读取标签文件失败: {str(e)}")
 
-    # 一次性返回标签 + 翻译
+    # 一次性返回标签 + 翻译（从 SQLite cn_name 查）
     tags = [t.strip() for t in caption.split(',') if t.strip()] if caption else []
-    cache = load_cache()
-    translations = []
-    for tag in tags:
-        translations.append(lookup_tag(tag.lower(), cache))
+    hits = _lookup_cn_from_db(tags)
+    translations = [hits.get(tag, '') for tag in tags]
 
     return jsonify({'caption': caption, 'translations': translations})
 
 
 @file_ops_bp.route('/save_caption/<image_name>', methods=['POST'])
 def save_caption(image_name):
-    """保存标签到文件，同时将翻译列的变动更新到翻译缓存"""
+    """保存标签到文件。用户编辑的翻译回写到 SQLite cn_name 列"""
     data = request.get_json()
     content = data.get('content', '')
     translations = data.get('translations', {})
@@ -84,26 +81,29 @@ def save_caption(image_name):
         print(f"保存标签文件失败: {str(e)}")
         return jsonify({'success': False, 'error': str(e)})
 
-    # 更新翻译缓存：对比前端传来的翻译与缓存，有变化则更新
+    # 用户手动编辑的翻译回写 SQLite（覆盖 LLM/Danbooru 的结果）
     if translations:
-        cache = load_cache()
-        changed = False
-        for tag, tr in translations.items():
-            tag = tag.lower().strip()
-            tr = tr.strip()
-            if tag and tr and cache.get(tag) != tr:
-                cache[tag] = tr
-                changed = True
-        if changed:
-            save_cache(cache)
+        try:
+            from translation import _get_tag_db_conn
+            from build_tag_db import update_translation
+            conn = _get_tag_db_conn()
+            if conn is not None:
+                for tag, tr in translations.items():
+                    tag = tag.strip()
+                    tr = tr.strip()
+                    if tag and tr:
+                        update_translation(conn, tag, tr)
+        except Exception as e:
+            print(f"翻译回写 SQLite 失败: {e}")
 
     return jsonify({'success': True})
 
 
 @file_ops_bp.route('/tag_stats')
 def tag_stats():
-    """统计所有标签出现次数，附翻译缓存"""
+    """统计所有标签出现次数，附翻译（从 SQLite 查）"""
     from collections import Counter
+    from translation import _lookup_cn_from_db
     upload_dir = current_app.config['UPLOAD_FOLDER']
     counter = Counter()
     for filename in os.listdir(upload_dir):
@@ -118,11 +118,13 @@ def tag_stats():
             if tag:
                 counter[tag] += 1  # 保留原始大小写，使查找/替换可区分大小写
 
-    cache = load_cache()
+    # 批量从 SQLite 查翻译
+    all_tags = list(counter.keys())
+    hits = _lookup_cn_from_db(all_tags)
     stats = []
     for tag, count in counter.most_common():
         entry = {'tag': tag, 'count': count}
-        tr = cache.get(tag.lower()) or ''  # 翻译缓存 key 全小写，用原 tag 的小写形式查
+        tr = hits.get(tag, '')
         if tr:
             entry['translation'] = tr
         stats.append(entry)

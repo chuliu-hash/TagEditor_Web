@@ -99,6 +99,48 @@ def get_birefnet_config():
     }
 
 
+def get_danbooru_config():
+    """每次调用时重新读取 Danbooru wiki 抓取配置（用于标签翻译时获取英文释义作参考）。
+    抓取 https://danbooru.donmai.us/wiki_pages.json?search[title]=<tag> 取 body 字段。
+    国内访问需配置代理（DANBOORU_PROXY）。enabled=False 时跳过抓取，回退为纯标签名翻译。
+
+    速率控制说明（基于 help:api 官方文档）：
+    - Danbooru 读请求全局上限 10 req/s，与账号无关（认证不提高额度）。
+    - delay 为主请求间隔基准，叠加 delay_jitter 范围的随机抖动。
+      delay=0.15 + jitter 0~0.3 → 平均约 0.3s/请求（≈3 req/s，远低于 10 req/s 上限）。
+    - page_limit 为每页请求数（wiki_pages.json 官方上限 200）。
+    - pause_every_pages / pause_seconds：连续抓取多少页后强制休息，避免长任务累积风险。"""
+    load_env()
+    return {
+        'enabled': os.environ.get('DANBOORU_ENABLED', 'true').strip().lower() in ('true', '1', 'yes'),
+        'api_url': os.environ.get('DANBOORU_API_URL', 'https://danbooru.donmai.us'),
+        'proxy': os.environ.get('DANBOORU_PROXY', ''),  # 如 http://127.0.0.1:7897，空表示直连
+        'user_agent': os.environ.get('DANBOORU_USER_AGENT', 'TagEditorWeb/1.0'),
+        'timeout': int(os.environ.get('DANBOORU_TIMEOUT', '15')),
+        'delay': float(os.environ.get('DANBOORU_DELAY', '0.15')),  # 主请求间隔（秒），默认 0.15
+        'delay_jitter': float(os.environ.get('DANBOORU_DELAY_JITTER', '0.3')),  # 随机抖动上限（秒）
+        'page_limit': int(os.environ.get('DANBOORU_PAGE_LIMIT', '200')),  # 每页条数（wiki_pages.json 上限 200）
+        'pause_every_pages': int(os.environ.get('DANBOORU_PAUSE_EVERY_PAGES', '100')),  # 每多少页休息一次
+        'pause_seconds': float(os.environ.get('DANBOORU_PAUSE_SECONDS', '5')),  # 休息秒数
+    }
+
+
+def get_tag_db_config():
+    """Danbooru 标签本地数据库配置（SQLite）。
+    schema：tags(name PK, cn_name, en_wiki, cn_wiki, other_names, updated_at)
+    由 build_tag_db.py 从 tags_enhanced.csv + wiki_pages.parquet 构建并增量更新。"""
+    load_env()
+    db_path = os.environ.get('TAG_DB_PATH', 'data/danbooru_tags.db')
+    if not os.path.isabs(db_path):
+        db_path = str(Path(__file__).parent / db_path)
+    return {
+        'db_path': db_path,
+        # Danbooru 账号（认证用户有更高 API 配额，匿名受限）。留空则匿名抓取
+        'username': os.environ.get('DANBOORU_USER_NAME', ''),
+        'api_key': os.environ.get('DANBOORU_API_KEY', ''),
+    }
+
+
 ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 ALLOWED_TEXT_EXTENSIONS = {'txt'}
 

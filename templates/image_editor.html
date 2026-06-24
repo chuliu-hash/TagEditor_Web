@@ -68,6 +68,9 @@
                 <button id="btn-save" class="flex items-center justify-center bg-secondary hover:bg-secondary/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed" onclick="saveImage()" disabled>
                     <i class="fa fa-save mr-2"></i> 保存
                 </button>
+                <a href="/danbooru" class="flex items-center justify-center bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium py-2 px-4 rounded-lg transition-all text-sm" onclick="navigateAway('/danbooru'); return false;">
+                    <i class="fa fa-book mr-1.5"></i> Danbooru 查询
+                </a>
                 <a id="link-to-tags" href="/" class="flex items-center justify-center bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium py-2 px-4 rounded-lg transition-all text-sm" onclick="return navigateToTags()">
                     <i class="fa fa-tags mr-2"></i> 标签编辑
                 </a>
@@ -271,6 +274,25 @@
         </div>
     </div>
 
+    <!-- 统一确认弹窗（替代浏览器原生 confirm） -->
+    <div id="confirm-modal" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center hidden" onclick="if(event.target===this)closeConfirm()">
+        <div class="bg-white rounded-xl shadow-xl w-96 p-6">
+            <div class="flex items-start gap-3">
+                <div id="confirm-icon-wrap" class="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center flex-shrink-0">
+                    <i id="confirm-icon" class="fa fa-exclamation-triangle text-red-500"></i>
+                </div>
+                <div class="flex-1 pt-1">
+                    <h3 id="confirm-title" class="text-base font-semibold text-gray-800 mb-1">确认操作</h3>
+                    <p id="confirm-message" class="text-sm text-gray-500 leading-relaxed"></p>
+                </div>
+            </div>
+            <div class="flex justify-end gap-2 mt-5">
+                <button id="confirm-cancel-btn" class="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" onclick="confirmCancel()">取消</button>
+                <button id="confirm-ok-btn" class="px-4 py-2 text-sm text-white rounded-lg transition-colors bg-red-500 hover:bg-red-600" onclick="confirmOk()">确定</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         const allImages = {{ images | tojson }};
         let currentIndex = -1;
@@ -301,7 +323,7 @@
             list.innerHTML = allImages.map((img, i) =>
                 '<div class="file-item flex items-center px-2 py-1.5 text-sm cursor-pointer border-l-2 border-transparent hover:bg-primary/5 transition-colors group"'
                 + ' data-image="' + escapeHtml(img) + '" data-index="' + i + '">'
-                + '<button class="del-btn flex-shrink-0 w-5 h-5 flex items-center justify-center text-gray-300 hover:text-red-500 transition-colors rounded opacity-0 group-hover:opacity-100" data-name="' + escapeHtml(img) + '" data-index="' + i + '" title="删除">'
+                + '<button class="del-btn flex-shrink-0 w-5 h-5 flex items-center justify-center text-gray-500 hover:text-red-500 transition-colors rounded opacity-0 group-hover:opacity-100" data-name="' + escapeHtml(img) + '" data-index="' + i + '" title="删除">'
                 + '<i class="fa fa-times text-xs"></i></button>'
                 + '<span class="flex-1 min-w-0 truncate ml-1 text-gray-600 group-hover:text-gray-800" title="' + escapeHtml(img) + '">' + escapeHtml(img) + '</span></div>'
             ).join('');
@@ -317,6 +339,74 @@
             if (item) navigateTo(parseInt(item.dataset.index));
         });
 
+        // === 统一确认弹窗（替代浏览器原生 confirm）===
+        // 用法：showConfirm({message, onOk, title, danger, okText, cancelText, onCancel})
+        let _confirmOnOk = null;
+        let _confirmOnCancel = null;
+        function showConfirm(opts) {
+            const o = opts || {};
+            document.getElementById('confirm-title').textContent = o.title || '确认操作';
+            document.getElementById('confirm-message').textContent = o.message || '';
+            const okBtn = document.getElementById('confirm-ok-btn');
+            const cancelBtn = document.getElementById('confirm-cancel-btn');
+            okBtn.textContent = o.okText || '确定';
+            cancelBtn.textContent = o.cancelText || '取消';
+            const danger = o.danger !== false;
+            okBtn.className = 'px-4 py-2 text-sm text-white rounded-lg transition-colors ' +
+                (danger ? 'bg-red-500 hover:bg-red-600' : 'bg-primary hover:bg-primary/90');
+            const icon = document.getElementById('confirm-icon');
+            const iconWrap = document.getElementById('confirm-icon-wrap');
+            if (danger) {
+                icon.className = 'fa fa-exclamation-triangle text-red-500';
+                iconWrap.className = 'w-10 h-10 rounded-full bg-red-50 flex items-center justify-center flex-shrink-0';
+            } else {
+                icon.className = 'fa fa-question-circle text-primary';
+                iconWrap.className = 'w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0';
+            }
+            _confirmOnOk = o.onOk || null;
+            _confirmOnCancel = o.onCancel || null;
+            document.getElementById('confirm-modal').classList.remove('hidden');
+        }
+        function closeConfirm() {
+            document.getElementById('confirm-modal').classList.add('hidden');
+            _confirmOnOk = null;
+            _confirmOnCancel = null;
+        }
+        function confirmOk() {
+            const cb = _confirmOnOk;
+            closeConfirm();
+            if (cb) cb();
+        }
+        function confirmCancel() {
+            const cb = _confirmOnCancel;
+            closeConfirm();
+            if (cb) cb();
+        }
+
+        // 统一离开当前页导航：未保存编辑时弹自定义确认窗（保存/放弃/取消）
+        function navigateAway(url) {
+            if (!editorDirty) {
+                window.location.href = url;
+                return;
+            }
+            document.getElementById('confirm-title').textContent = '未保存的修改';
+            document.getElementById('confirm-message').textContent = '当前图片有未保存的编辑，是否放弃修改并离开？';
+            const okBtn = document.getElementById('confirm-ok-btn');
+            const cancelBtn = document.getElementById('confirm-cancel-btn');
+            okBtn.textContent = '放弃修改';
+            okBtn.className = 'px-4 py-2 text-sm text-white rounded-lg transition-colors bg-red-500 hover:bg-red-600';
+            cancelBtn.textContent = '取消';
+            const icon = document.getElementById('confirm-icon');
+            const iconWrap = document.getElementById('confirm-icon-wrap');
+            icon.className = 'fa fa-exclamation-triangle text-red-500';
+            iconWrap.className = 'w-10 h-10 rounded-full bg-red-50 flex items-center justify-center flex-shrink-0';
+            _confirmOnOk = function() {
+                editorDirty = false;  // 放弃修改，重置脏状态避免 beforeunload 再弹原生框
+                window.location.href = url;
+            };
+            document.getElementById('confirm-modal').classList.remove('hidden');
+        }
+
         // === 删除图片 ===
         function deleteImage(name, index) {
             // 删除的是当前正在编辑且有未保存修改的图时，先要求保存/重置
@@ -324,10 +414,15 @@
                 showNotification('当前图片有未保存的编辑，请先保存或重置', 'warning');
                 return;
             }
-            if (!confirm('确定要删除 ' + name + ' 吗？')) return;
-            fetch('/delete/' + encodeURIComponent(name), {method: 'POST'})
-                .then(r => r.json())
-                .then(data => {
+            showConfirm({
+                title: '删除图片',
+                message: '确定要删除 ' + name + ' 吗？',
+                danger: true,
+                okText: '删除',
+                onOk: function() {
+                    fetch('/delete/' + encodeURIComponent(name), {method: 'POST'})
+                        .then(r => r.json())
+                        .then(data => {
                     if (!data.success) { showNotification('删除失败', 'error'); return; }
                     allImages.splice(index, 1);
                     rebuildFileList();
@@ -350,19 +445,46 @@
                     showNotification('已删除 ' + name, 'success');
                 })
                 .catch(() => showNotification('删除失败', 'error'));
+                }
+            });
         }
 
         // === 导航 ===
         function navigateTo(index) {
             if (index < 0 || index >= allImages.length) return;
             if (editorDirty && currentIndex !== -1) {
-                if (!confirm('当前图片未保存，是否放弃修改？')) return;
+                // 未保存编辑：弹自定义确认窗（放弃/取消）
+                document.getElementById('confirm-title').textContent = '未保存的修改';
+                document.getElementById('confirm-message').textContent = '当前图片有未保存的编辑，是否放弃修改并切换？';
+                const okBtn = document.getElementById('confirm-ok-btn');
+                const cancelBtn = document.getElementById('confirm-cancel-btn');
+                okBtn.textContent = '放弃修改';
+                okBtn.className = 'px-4 py-2 text-sm text-white rounded-lg transition-colors bg-red-500 hover:bg-red-600';
+                cancelBtn.textContent = '取消';
+                const icon = document.getElementById('confirm-icon');
+                const iconWrap = document.getElementById('confirm-icon-wrap');
+                icon.className = 'fa fa-exclamation-triangle text-red-500';
+                iconWrap.className = 'w-10 h-10 rounded-full bg-red-50 flex items-center justify-center flex-shrink-0';
+                _confirmOnOk = function() {
+                    editorDirty = false;
+                    doNavigate(index);
+                };
+                document.getElementById('confirm-modal').classList.remove('hidden');
+                return;
             }
+            doNavigate(index);
+        }
+        function doNavigate(index) {
             currentIndex = index;
             editorDirty = false;
             cropRect = null;
             updateNavUI();
             loadImageIntoEditor(allImages[index]);
+            // 预取下一张图片字节到浏览器缓存（不带 ?t= 缓存破坏，因为下一张是独立文件未编辑过），
+            // 切换时 loadImageIntoEditor 命中缓存秒开。loadImageIntoEditor 用 ?t= 仅用于当前图编辑保存后强制刷新。
+            if (index < allImages.length - 1) {
+                new Image().src = '/uploads/' + encodeURIComponent(allImages[index + 1]);
+            }
         }
 
         function updateNavUI() {
@@ -391,7 +513,8 @@
         });
 
         // === 图片加载 ===
-        function loadImageIntoEditor(filename) {
+        // bypassCache: 文件已被编辑覆盖后需强制刷新（加 ?t=）。导航切换默认 false 以复用预加载缓存。
+        function loadImageIntoEditor(filename, bypassCache) {
             const img = document.getElementById('editor-img');
             // 清理上一次放大产生的 objectURL（若 displayImg 当前用的是 blob URL）
             if (_displayObjectUrl) {
@@ -410,7 +533,9 @@
                 };
                 originalImage.src = img.src;
             };
-            img.src = '/uploads/' + encodeURIComponent(filename) + '?t=' + Date.now();
+            // 仅在文件被编辑后（bypassCache）加 ?t=，否则用纯 URL 命中预加载/浏览器缓存
+            const base = '/uploads/' + encodeURIComponent(filename);
+            img.src = bypassCache ? (base + '?t=' + Date.now()) : base;
             img.style.display = '';
         }
 
@@ -1016,11 +1141,15 @@
         let _displayObjectUrl = null;
         function runUpscale(targetW, targetH) {
             const okBtn = document.getElementById('btn-upscale-ok');
-            const filename = allImages[currentIndex];
+            // 捕获发起放大时的索引/文件名。放大是 ~10s 异步操作，进行中若用户导航到其他图片，
+            // 回调里的 currentIndex 已变 → 会把放大结果错误应用到新图（覆盖预览、设错 dirty）。
+            // 用快照保证「仅当用户仍停留在发起放大的那张图时才应用结果」，否则丢弃。
+            const upscaleIndex = currentIndex;
+            const upscaleFilename = allImages[upscaleIndex];
             _upscaleBusy = true;
             updateButtonStates();  // 统一显示 spinner + 禁用放大按钮
             okBtn.disabled = true;
-            const url = '/upscale_realesrgan?target=' + encodeURIComponent(filename) +
+            const url = '/upscale_realesrgan?target=' + encodeURIComponent(upscaleFilename) +
                         '&w=' + targetW + '&h=' + targetH;
             fetch(url, { method: 'POST' })
                 .then(r => {
@@ -1035,9 +1164,23 @@
                     return r.blob();
                 })
                 .then(blob => {
+                    // 若用户已导航离开，丢弃放大结果（不覆盖当前图预览，不设 dirty）
+                    if (currentIndex !== upscaleIndex) {
+                        // blob 已到，但结果不再应用；无需建 objectUrl，blob 自身会被 GC 回收
+                        _upscaleBusy = false;
+                        updateButtonStates();
+                        return;
+                    }
                     const objectUrl = URL.createObjectURL(blob);
                     const newImg = new Image();
                     newImg.onload = function() {
+                        // 二次校验：解码期间用户可能又切了图
+                        if (currentIndex !== upscaleIndex) {
+                            URL.revokeObjectURL(objectUrl);
+                            _upscaleBusy = false;
+                            updateButtonStates();
+                            return;
+                        }
                         originalImage = newImg;
                         editorDirty = true;
                         const displayImg = document.getElementById('editor-img');
@@ -1105,7 +1248,10 @@
         // 后端 ToonOut 背景移除，前端暂存（editorDirty），点保存才覆盖原图
         function runRemoveBg(bgColor) {
             const okBtn = document.getElementById('btn-remove-bg-ok');
-            const filename = allImages[currentIndex];
+            // 捕获发起时的索引/文件名。背景移除是异步（模型推理数秒），进行中若用户导航离开，
+            // 回调会把移除结果错误应用到新图（覆盖预览、设错 dirty）。仅当仍停留在该图时才应用。
+            const rmbgIndex = currentIndex;
+            const filename = allImages[rmbgIndex];
             _removebgBusy = true;
             updateButtonStates();  // 统一显示 spinner + 禁用背景移除按钮
             okBtn.disabled = true;
@@ -1123,9 +1269,22 @@
                     return r.blob();
                 })
                 .then(blob => {
+                    // 若用户已导航离开，丢弃结果（不覆盖当前图预览，不设 dirty）
+                    if (currentIndex !== rmbgIndex) {
+                        _removebgBusy = false;
+                        updateButtonStates();
+                        return;
+                    }
                     const objectUrl = URL.createObjectURL(blob);
                     const newImg = new Image();
                     newImg.onload = function() {
+                        // 二次校验：解码期间用户可能又切了图
+                        if (currentIndex !== rmbgIndex) {
+                            URL.revokeObjectURL(objectUrl);
+                            _removebgBusy = false;
+                            updateButtonStates();
+                            return;
+                        }
                         originalImage = newImg;
                         editorDirty = true;
                         const displayImg = document.getElementById('editor-img');
@@ -1200,7 +1359,11 @@
         // 单张处理（JSON 返回）
         function runAlphaSingle(color) {
             const btn = document.getElementById('btn-alpha');
-            const filename = allImages[currentIndex];
+            // 捕获发起时的索引。转换是异步（~1s），进行中若用户导航离开，
+            // 回调里 loadImageIntoEditor 会把编辑器错误切回该图（覆盖用户刚切到的新图）。
+            // 仅当仍停留在该图时才刷新预览。
+            const alphaIndex = currentIndex;
+            const filename = allImages[alphaIndex];
             btn.disabled = true;
             btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-2"></i> 处理中...';
             fetch('/batch_alpha_to_white?color=' + encodeURIComponent(color) + '&target=' + encodeURIComponent(filename), {method: 'POST'})
@@ -1212,7 +1375,10 @@
                         showNotification('当前图片没有透明通道', 'info');
                     } else if (data.success) {
                         showNotification('已转换：' + data.item, 'success');
-                        loadImageIntoEditor(filename);  // 刷新预览
+                        // 仅当用户仍停留在该图时刷新预览；已导航离开则不强行切回（文件已正确落盘）
+                        if (currentIndex === alphaIndex) {
+                            loadImageIntoEditor(filename, true);  // 刷新预览（文件已改，强制刷新）
+                        }
                     } else {
                         showNotification(data.error || '处理失败', 'error');
                     }
@@ -1253,9 +1419,25 @@
                 const reader = body.getReader();
                 const decoder = new TextDecoder();
                 let buf = '';
+                let streamCompleted = false;  // 是否收到 complete 事件（handleProgressEvent 内置位）
+                let streamError = null;       // 错误信息（handleProgressEvent 的 error 事件累积）
+
+                function finishStream() {
+                    if (streamCompleted) return;  // 已由 complete 事件正常收尾，无需兜底
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fa fa-adjust mr-2"></i> 透明转色底';
+                    // 流提前结束（后端崩溃/代理超时/网络中断）且未收到 complete
+                    const el = document.getElementById('progress-errors');
+                    el.classList.remove('hidden');
+                    el.innerHTML += '<div>连接异常中断：' + escapeHtml(streamError || '未收到完成信号') + '</div>';
+                    document.getElementById('progress-close').classList.remove('hidden');
+                    document.getElementById('progress-subtitle').textContent = '处理中断，请重试';
+                    if (currentIndex >= 0) loadImageIntoEditor(allImages[currentIndex], true);  // 刷新已处理部分（文件可能已改）
+                }
+
                 function read() {
                     reader.read().then(({done, value}) => {
-                        if (done) return;
+                        if (done) { finishStream(); return; }
                         buf += decoder.decode(value, {stream: true});
                         const lines = buf.split('\n');
                         buf = lines.pop();
@@ -1269,6 +1451,15 @@
                             }
                         }
                         read();
+                    }).catch(err => {
+                        // 读取异常（网络中断/代理断开）：恢复按钮，提示错误
+                        btn.disabled = false;
+                        btn.innerHTML = '<i class="fa fa-adjust mr-2"></i> 透明转色底';
+                        const el = document.getElementById('progress-errors');
+                        el.classList.remove('hidden');
+                        el.innerHTML += '<div>读取流失败：' + escapeHtml(err.message || '网络中断') + '</div>';
+                        document.getElementById('progress-close').classList.remove('hidden');
+                        document.getElementById('progress-subtitle').textContent = '连接异常，已停止';
                     });
                 }
                 read();
@@ -1283,16 +1474,27 @@
                 let data;
                 try { data = JSON.parse(raw); } catch { return; }
                 if (type === 'progress') {
-                    const pct = Math.round(data.current / data.total * 100);
-                    document.getElementById('progress-bar').style.width = pct + '%';
-                    document.getElementById('progress-count').textContent = data.current + ' / ' + data.total;
-                    document.getElementById('progress-percent').textContent = pct + '%';
-                    document.getElementById('progress-item').textContent = data.item;
+                    // total 可能是数字或 '?'（总数未知时）。非数字时不计算百分比，避免 NaN。
+                    const totalNum = (typeof data.total === 'number' && data.total > 0) ? data.total : null;
+                    if (totalNum) {
+                        const pct = Math.round(data.current / totalNum * 100);
+                        document.getElementById('progress-bar').style.width = pct + '%';
+                        document.getElementById('progress-percent').textContent = pct + '%';
+                    } else {
+                        // 未知总数：仅显示当前进度，进度条保持原状（不回退到 NaN%）
+                        document.getElementById('progress-percent').textContent = '';
+                    }
+                    document.getElementById('progress-count').textContent = totalNum
+                        ? (data.current + ' / ' + data.total)
+                        : (data.current || '');
+                    document.getElementById('progress-item').textContent = data.item || '';
                 } else if (type === 'error') {
                     const el = document.getElementById('progress-errors');
                     el.classList.remove('hidden');
                     el.innerHTML += '<div>' + escapeHtml(data.item) + ': ' + escapeHtml(data.error) + '</div>';
+                    streamError = (data.item ? data.item + ': ' : '') + (data.error || '');  // 记录最近错误，供中断兜底引用
                 } else if (type === 'complete') {
+                    streamCompleted = true;  // 标记正常完成，done 触发时 finishStream 跳过错误兜底
                     document.getElementById('progress-bar').style.width = '100%';
                     document.getElementById('progress-count').textContent = data.converted + ' / ' + data.converted;
                     document.getElementById('progress-percent').textContent = '100%';
@@ -1303,7 +1505,7 @@
                     btn.disabled = false;
                     btn.innerHTML = '<i class="fa fa-adjust mr-2"></i> 透明转色底';
                     // 刷新当前预览
-                    if (currentIndex >= 0) loadImageIntoEditor(allImages[currentIndex]);
+                    if (currentIndex >= 0) loadImageIntoEditor(allImages[currentIndex], true);
                 }
             }
         }
@@ -1331,6 +1533,13 @@
         function saveImage(silent) {
             if (!originalImage || !editorDirty) return;
 
+            // 在异步操作（toBlob → fetch）开始前捕获当前文件名与索引。
+            // 旋转的自动保存会在 onload 内静默触发，若保存进行中用户已导航到其他图片，
+            // 回调里的 currentIndex 会指向新图片 → 误存到错误的文件名。捕获快照保证存的是
+            // 「发起保存时正在编辑的那张」，且回调里只在用户仍停留在该图时刷新其预览。
+            const saveIndex = currentIndex;
+            const saveFilename = allImages[saveIndex];
+
             const btn = document.getElementById('btn-save');
             btn.disabled = true;
             btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-2"></i> 保存中...';
@@ -1350,8 +1559,8 @@
                     return;
                 }
                 const fd = new FormData();
-                fd.append('filename', allImages[currentIndex]);
-                fd.append('image', blob, allImages[currentIndex]);
+                fd.append('filename', saveFilename);
+                fd.append('image', blob, saveFilename);
                 fetch('/process_image', {
                     method: 'POST',
                     body: fd  // 不设 Content-Type，浏览器自动加 multipart boundary
@@ -1359,16 +1568,20 @@
                 .then(r => r.json())
                 .then(data => {
                     if (data.success) {
-                        editorDirty = false;
-                        if (!silent) showNotification('保存成功 (' + data.width + 'x' + data.height + ')', 'success');
-                        // 如果文件名变了（如 jpg→png），更新列表
-                        if (data.filename !== allImages[currentIndex]) {
-                            allImages[currentIndex] = data.filename;
-                            rebuildFileList();
-                            updateNavUI();
+                        // 仅当用户仍停留在发起保存的那张图时，才重置脏状态 + 刷新预览。
+                        // 若已导航离开，该图的保存仍会落盘（正确），但不干扰当前查看的新图。
+                        if (currentIndex === saveIndex) {
+                            editorDirty = false;
+                            if (!silent) showNotification('保存成功 (' + data.width + 'x' + data.height + ')', 'success');
+                            // 如果文件名变了（如 jpg→png），更新列表
+                            if (data.filename !== allImages[saveIndex]) {
+                                allImages[saveIndex] = data.filename;
+                                rebuildFileList();
+                                updateNavUI();
+                            }
+                            // 刷新预览（文件已覆盖保存，强制刷新）
+                            loadImageIntoEditor(allImages[saveIndex], true);
                         }
-                        // 刷新预览
-                        loadImageIntoEditor(allImages[currentIndex]);
                     } else {
                         showNotification(data.error || '保存失败', 'error');
                     }
@@ -1436,11 +1649,11 @@
 
         // === 工具 ===
         function navigateToTags() {
-            if (currentIndex >= 0 && allImages[currentIndex]) {
-                window.location.href = '/#' + encodeURIComponent(allImages[currentIndex]);
-                return false;
-            }
-            return true;
+            const target = (currentIndex >= 0 && allImages[currentIndex])
+                ? '/#' + encodeURIComponent(allImages[currentIndex])
+                : '/';
+            navigateAway(target);
+            return false;  // 阻止 a 标签默认跳转（由 navigateAway 处理）
         }
 
         function escapeHtml(str) {

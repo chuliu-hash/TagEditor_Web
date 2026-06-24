@@ -8,13 +8,13 @@
 
 - **批量上传**：支持上传图片（PNG/JPG/JPEG/GIF/WEBP）及同名 txt 标签文件，总上传上限 256MB
 - **在线编辑**：三栏布局（文件列表 / 图片预览 / 标签编辑器），支持键盘左右键导航、标签拖拽排序
-- **双向翻译**：通过 OpenAI 兼容 API 进行中英标签翻译，带本地 JSON 缓存，避免重复翻译
+- **双向翻译**：通过 OpenAI 兼容 API 进行中英标签翻译，结果持久化到 SQLite，避免重复翻译
 - **自动打标**：
   - API 打标：调用视觉模型为图片生成 Danbooru 格式标签
   - WD14 本地打标：使用 ONNX 模型离线推理
 - **批量操作**：全局查找替换、触发词添加（开头/末尾）、批量翻译所有未缓存标签、标签统计
 
-### 图片编辑器（`/editor`）
+### 图片编辑器（`/img_editor`）
 
 - **Canvas 裁剪**：锁定宽高比的裁剪框，拖角缩放、拖体移动，框大小即输出分辨率
 - **旋转**：顺时针旋转，自动保存覆盖原图
@@ -117,10 +117,38 @@ python app.py
 ## 数据存储
 
 - `uploads/` — 图片及对应 txt 标签文件（如 `photo.png` ↔ `photo.txt`）
-- `translation_cache.json` — 标签翻译缓存（英文 key → 中文 value）
+- `data/danbooru_tags.db` — Danbooru 标签本地数据库（SQLite，含英文标签/中文翻译/英文 wiki/中文 wiki/多语言别名）。由 `build_tag_db.py` 构建
 - `models/` — WD14、Real-ESRGAN、BiRefNet 模型文件（需自行准备，不入库）
 
 图片与标签通过文件名关联，标签以**逗号分隔**存储在 txt 中（如 `1girl, blue hair, smile`）。保存时自动去重（大小写不敏感）。
+
+### 标签数据库（SQLite）
+
+翻译数据统一存储在 `data/danbooru_tags.db`，schema 为 6 列：
+
+| 列 | 含义 | 来源 |
+|----|------|------|
+| `name` | 英文标签名（主键，如 `blue_hair`） | CSV + parquet + Danbooru 增量 |
+| `cn_name` | 中文翻译（逗号分隔多词，如 `蓝发,蓝色头发`） | CSV（LLM 翻译产物）+ 手动编辑 |
+| `en_wiki` | 英文 wiki 正文（Danbooru DText 格式） | parquet + Danbooru 增量 + 手动编辑 |
+| `cn_wiki` | 中文 wiki（LLM 翻译或手写） | LLM 翻译 + 手动编辑 |
+| `other_names` | 多语言别名（JSON 数组，如 `["蓝发","蓝毛","青髪"]`） | parquet + Danbooru 增量 |
+| `updated_at` | 最后更新时间（**增量抓取的时间锚点**，不展示） | parquet + Danbooru 增量 |
+
+由 `build_tag_db.py` 管理：
+
+```bash
+# 1. 首次构建（从 danbooru-tag-pipeline 项目的 csv + parquet 导入）
+python build_tag_db.py init --csv <tags_enhanced.csv> --parquet <wiki_pages.parquet>
+
+# 2. 增量更新（从 Danbooru 抓取最新 wiki，需配置 DANBOORU_USER_NAME/API_KEY）
+python build_tag_db.py update
+
+# 3. 查看统计
+python build_tag_db.py stats
+```
+
+翻译查询优先级：**SQLite（cn_name）→ LLM（未命中时）→ 回写 SQLite**。用户手动编辑翻译也会回写 SQLite。每个标签行右侧有「详情」按钮，可查看英文/中文 wiki：英文 wiki 和中文 wiki 均支持内联编辑保存，中文 wiki 不存在时还可一键翻译并保存。
 
 ## 项目结构
 
@@ -128,7 +156,8 @@ python app.py
 .
 ├── app.py                  # 入口，注册 Blueprint + 页面路由
 ├── config.py               # .env 加载、各模型配置读取、文件工具函数
-├── translation.py          # 翻译缓存 + 翻译路由
+├── translation.py          # 翻译 + 标签数据库读写 + 标签详情/wiki 编辑路由
+├── build_tag_db.py         # 标签数据库构建与查询（init 全量 / update 增量 / stats 统计）
 ├── tagger.py               # WD14 预处理/加载/过滤 + API/WD14 打标路由
 ├── file_ops.py             # 上传/删除/清空/标签读写/静态文件/标签统计路由
 ├── tag_operations.py       # 触发词/查找替换路由
@@ -138,7 +167,9 @@ python app.py
 ├── sse_utils.py            # SSE 事件格式化工具
 ├── templates/
 │   ├── tag_editor.html     # 标签编辑主页（三栏布局）
-│   └── image_editor.html   # 图片编辑器
+│   ├── image_editor.html   # 图片编辑器
+│   └── danbooru_wiki.html  # Danbooru 标签查询页（搜索/详情/wiki 内联编辑）
+├── data/                   # 标签数据库 danbooru_tags.db（运行时生成）
 ├── uploads/                # 图片 + 标签（运行时生成）
 ├── models/                 # 模型权重（需自行下载）
 └── .env                    # 配置文件（不入库）

@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Danbooru 标签查询</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#3B82F6',
+                        secondary: '#10B981',
+                        accent: '#F59E0B',
+                        danger: '#EF4444',
+                        dark: '#1E293B',
+                        light: '#F8FAFC'
+                    },
+                    fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },
+                }
+            }
+        }
+    </script>
+    <style>
+        #search-results::-webkit-scrollbar { width: 4px; }
+        #search-results::-webkit-scrollbar-track { background: transparent; }
+        #search-results::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 2px; }
+        #wiki-body::-webkit-scrollbar { width: 4px; }
+        #wiki-body::-webkit-scrollbar-track { background: transparent; }
+        #wiki-body::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 2px; }
+        #wiki-editor::-webkit-scrollbar { width: 4px; }
+        #wiki-editor::-webkit-scrollbar-track { background: transparent; }
+        #wiki-editor::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 2px; }
+    </style>
+</head>
+<body class="bg-gray-50 font-sans text-gray-800 min-h-screen flex flex-col">
+    <!-- 顶部导航 -->
+    <header class="bg-white shadow-sm sticky top-0 z-50 border-b border-gray-200">
+        <div class="container mx-auto px-4 py-3 flex justify-between items-center">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
+                    <i class="fa fa-book text-primary"></i>
+                </div>
+                <h1 class="text-xl font-bold text-dark">Danbooru 标签查询</h1>
+            </div>
+            <div class="flex items-center gap-2">
+                <button id="btn-update" class="flex items-center justify-center bg-secondary hover:bg-secondary/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs" onclick="runUpdate()">
+                    <i class="fa fa-refresh mr-1.5"></i> 增量更新
+                </button>
+                <div class="w-px h-5 bg-gray-200 mx-0.5"></div>
+                <a href="/" class="flex items-center justify-center bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium py-1.5 px-3 rounded-lg transition-all text-xs">
+                    <i class="fa fa-tags mr-1.5"></i> 标签编辑
+                </a>
+                <a href="/img_editor" class="flex items-center justify-center bg-gray-800 hover:bg-gray-900 text-white font-medium py-1.5 px-3 rounded-lg transition-all text-xs">
+                    <i class="fa fa-crop mr-1.5"></i> 图片编辑
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <!-- 主内容 -->
+    <main class="flex-grow container mx-auto px-4 py-4">
+        <!-- 搜索栏 -->
+        <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-4 mb-4">
+            <div class="flex gap-2">
+                <div class="flex-1 relative">
+                    <i class="fa fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"></i>
+                    <input id="search-input" type="text" class="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary transition-colors" placeholder="搜索标签（英文/中文/别名）..." onkeydown="if(event.key==='Enter')searchTags()">
+                </div>
+                <button class="px-4 py-2 bg-primary hover:bg-primary/90 text-white rounded-lg text-sm font-medium transition-colors" onclick="searchTags()">
+                    <i class="fa fa-search mr-1"></i>搜索
+                </button>
+            </div>
+        </div>
+
+        <div class="flex gap-3" style="height:calc(100vh - 180px)">
+            <!-- 左侧：搜索结果列表 -->
+            <div class="w-80 flex-shrink-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+                <div class="px-3 py-2 bg-gray-50 border-b border-gray-200 font-semibold text-xs text-gray-500 uppercase tracking-wide flex items-center justify-between">
+                    <span>搜索结果</span>
+                    <span id="result-count" class="text-xs text-gray-400 font-normal"></span>
+                </div>
+                <div id="search-results" class="flex-grow overflow-y-auto">
+                    <div class="p-8 text-center text-gray-300 text-sm">输入关键词搜索标签</div>
+                </div>
+            </div>
+
+            <!-- 右侧：标签详情 -->
+            <div class="flex-grow bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+                <div id="detail-empty" class="flex-grow flex items-center justify-center text-gray-300 text-sm">
+                    <div class="text-center">
+                        <i class="fa fa-book text-gray-200 text-6xl mb-4"></i>
+                        <p>点击左侧标签查看详情</p>
+                    </div>
+                </div>
+                <div id="detail-card" class="hidden flex-grow flex flex-col overflow-hidden">
+                    <!-- 标题栏 -->
+                    <div class="px-6 py-4 border-b border-gray-200">
+                        <div class="flex items-baseline gap-3 flex-wrap">
+                            <h2 id="d-name" class="text-2xl font-bold text-dark"></h2>
+                            <span id="d-cn-name" class="text-lg text-gray-600"></span>
+                        </div>
+                        <div id="d-other-names-wrap" class="hidden items-center gap-1.5 mt-2 text-xs text-gray-400 flex-wrap">
+                            <i class="fa fa-tags"></i><span>别名：</span><span id="d-other-names" class="font-medium text-gray-600"></span>
+                        </div>
+                    </div>
+                    <!-- Wiki 区 -->
+                    <div class="px-6 py-3 border-b border-gray-100 flex gap-2">
+                        <button id="wiki-tab-en" class="px-3 py-1 text-sm bg-primary text-white rounded-lg" onclick="switchWikiTab('en')">英文 Wiki</button>
+                        <button id="wiki-tab-zh" class="px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg" onclick="switchWikiTab('zh')">中文 Wiki</button>
+                    </div>
+                    <div id="wiki-body" class="flex-grow overflow-y-auto px-6 py-4 text-sm text-gray-700">
+                        <!-- 只读视图 -->
+                        <div id="wiki-view" class="whitespace-pre-wrap min-h-[120px]"></div>
+                        <!-- 编辑视图（默认隐藏） -->
+                        <textarea id="wiki-editor" class="hidden w-full h-[calc(100vh-360px)] min-h-[200px] border border-gray-300 rounded-lg p-3 text-sm font-mono focus:outline-none focus:border-primary resize-none"></textarea>
+                    </div>
+                    <div id="wiki-action-row" class="flex justify-end gap-2 px-6 py-3 border-t border-gray-200">
+                        <!-- 只读态按钮：编辑 -->
+                        <button id="wiki-edit-btn" class="px-4 py-2 text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg transition-colors" onclick="enterWikiEditMode()">
+                            <i class="fa fa-pencil mr-1"></i>编辑
+                        </button>
+                        <!-- 编辑态按钮：保存 / 取消（默认隐藏） -->
+                        <button id="wiki-save-btn" class="hidden px-4 py-2 text-sm bg-secondary hover:bg-secondary/90 text-white rounded-lg transition-colors" onclick="saveWiki()">
+                            <i class="fa fa-check mr-1"></i>保存
+                        </button>
+                        <button id="wiki-cancel-btn" class="hidden px-4 py-2 text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg transition-colors" onclick="cancelWikiEdit()">
+                            <i class="fa fa-times mr-1"></i>取消
+                        </button>
+                        <!-- 中文 tab 专用：翻译并保存（默认隐藏，仅 cn_wiki 为空且有 en_wiki 时显示） -->
+                        <button id="wiki-translate-btn" class="hidden px-4 py-2 text-sm bg-primary hover:bg-primary/90 text-white rounded-lg transition-colors" onclick="translateWiki()">
+                            <i class="fa fa-language mr-1"></i>翻译并保存
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- 进度弹窗（增量更新用） -->
+    <div id="progress-modal" class="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center hidden">
+        <div class="bg-white rounded-xl shadow-2xl w-[480px] p-6">
+            <h3 id="progress-title" class="text-lg font-semibold text-gray-800 mb-1">处理中</h3>
+            <p id="progress-subtitle" class="text-sm text-gray-400 mb-4"></p>
+            <div class="w-full bg-gray-200 rounded-full h-3 mb-3 overflow-hidden">
+                <div id="progress-bar" class="bg-primary h-3 rounded-full transition-all duration-300 ease-out" style="width: 0%"></div>
+            </div>
+            <div class="flex justify-between text-sm text-gray-500 mb-3">
+                <span id="progress-count"></span>
+                <span id="progress-percent"></span>
+            </div>
+            <div class="text-sm text-gray-600 mb-2 truncate" id="progress-item"></div>
+            <div id="progress-errors" class="hidden max-h-32 overflow-y-auto text-sm text-red-600 bg-red-50 rounded-lg p-3 mb-4 space-y-1"></div>
+            <div class="flex justify-end">
+                <button id="progress-close-btn" class="hidden px-4 py-2 text-sm bg-primary hover:bg-primary/90 text-white rounded-lg transition-colors" onclick="closeProgressModal()">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 通知 -->
+    <div id="notification" class="fixed bottom-5 right-5 px-5 py-3 rounded-lg shadow-lg transform translate-y-20 opacity-0 transition-all duration-300 flex items-center z-50 text-sm"></div>
+
+    <script>
+        let _detailState = {tag: '', enWiki: '', cnWiki: '', tab: 'en'};
+        let _searchSeq = 0;  // 搜索序列守卫，丢弃过期响应避免快速搜索时旧结果覆盖新结果
+        // 搜索结果增量渲染：FTS 后可一次取数百条，但一次性渲染全部 DOM 节点（滚动卡顿）。
+        // 改为「先渲染前 N 条，滚动到底部时再追加下一批」，保持 DOM 节点数受控、滚动流畅。
+        let _searchResults = [];   // 当前搜索的完整结果（未渲染部分待滚动加载）
+        let _searchRendered = 0;   // 已渲染条数
+        const SEARCH_PAGE_SIZE = 50;  // 每次增量渲染的条数
+
+        // 渲染单条结果项（复用，避免重复 HTML 拼接逻辑）
+        function _renderSearchItem(item) {
+            const cn = (item.cn_name || '').split(',')[0];
+            return '<div class="px-3 py-2 border-b border-gray-100 hover:bg-primary/5 cursor-pointer transition-colors" onclick="showTagDetail(\'' + escapeAttr(item.name) + '\')">'
+                + '<span class="font-medium text-sm text-gray-800 truncate block">' + escapeHtml(item.name) + '</span>'
+                + (cn ? '<span class="text-xs text-gray-500 truncate block">' + escapeHtml(cn) + '</span>' : '')
+                + '</div>';
+        }
+        // 增量追加下一批结果（滚动到底部时调用）
+        function appendSearchResults() {
+            if (_searchRendered >= _searchResults.length) return;
+            const resultsEl = document.getElementById('search-results');
+            const chunk = _searchResults.slice(_searchRendered, _searchRendered + SEARCH_PAGE_SIZE);
+            // appendChild 避免重建已有节点（innerHTML 会重渲染全部，丢失滚动位置）
+            const frag = document.createElement('div');
+            frag.innerHTML = chunk.map(_renderSearchItem).join('');
+            while (frag.firstChild) resultsEl.appendChild(frag.firstChild);
+            _searchRendered += chunk.length;
+        }
+
+        // === 搜索 ===
+        function searchTags() {
+            const keyword = document.getElementById('search-input').value.trim();
+            if (!keyword) return;
+            const seq = ++_searchSeq;
+            const resultsEl = document.getElementById('search-results');
+            resultsEl.innerHTML = '<div class="p-8 text-center text-gray-400 text-sm"><i class="fa fa-spinner fa-spin mr-1"></i>搜索中...</div>';
+
+            fetch('/danbooru_search', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({keyword: keyword, limit: 200})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (seq !== _searchSeq) return;  // 过期响应（用户已发起新搜索），丢弃
+                if (data.error) {
+                    resultsEl.innerHTML = '<div class="p-8 text-center text-red-400 text-sm">' + data.error + '</div>';
+                    return;
+                }
+                const results = data.results || [];
+                document.getElementById('result-count').textContent = results.length + ' 条';
+                if (results.length === 0) {
+                    _searchResults = []; _searchRendered = 0;
+                    resultsEl.innerHTML = '<div class="p-8 text-center text-gray-300 text-sm">无匹配标签</div>';
+                    return;
+                }
+                // 存完整结果，先渲染首页，剩余滚动时增量加载
+                _searchResults = results;
+                _searchRendered = 0;
+                resultsEl.innerHTML = '';
+                appendSearchResults();
+            })
+            .catch(() => {
+                if (seq !== _searchSeq) return;
+                resultsEl.innerHTML = '<div class="p-8 text-center text-red-400 text-sm">请求失败</div>';
+            });
+        }
+
+        // 滚动加载：结果列表滚到底部时追加下一批
+        document.getElementById('search-results').addEventListener('scroll', function() {
+            if (_searchRendered >= _searchResults.length) return;  // 已全部渲染
+            // 距底部 < 80px 时触发加载（提前预取，滚动更顺滑）
+            if (this.scrollHeight - this.scrollTop - this.clientHeight < 80) {
+                appendSearchResults();
+            }
+        });
+
+        // === 标签详情 ===
+        function showTagDetail(tag) {
+            fetch('/tag_detail/' + encodeURIComponent(tag))
+                .then(r => r.json())
+                .then(data => {
+                    if (data.error) { showNotification('加载失败：' + data.error, 'error'); return; }
+                    renderDetail(data);
+                })
+                .catch(() => showNotification('请求失败', 'error'));
+        }
+
+        function renderDetail(data) {
+            // 加载新标签前，先确保退出编辑态（隐藏 textarea、显示只读视图）
+            if (typeof _wikiEditing !== 'undefined' && _wikiEditing) {
+                _wikiEditing = false;
+                document.getElementById('wiki-editor').classList.add('hidden');
+                document.getElementById('wiki-view').classList.remove('hidden');
+            }
+            _detailState = {tag: data.tag, enWiki: data.en_wiki || '', cnWiki: data.cn_wiki || '', tab: 'en'};
+            document.getElementById('detail-empty').classList.add('hidden');
+            document.getElementById('detail-card').classList.remove('hidden');
+
+            document.getElementById('d-name').textContent = data.tag;
+            document.getElementById('d-cn-name').textContent = (data.cn_name || '').split(',')[0] || '';
+
+            // 别名（other_names 为 JSON 数组字符串）
+            const onw = document.getElementById('d-other-names-wrap');
+            let names = [];
+            try { names = JSON.parse(data.other_names || '[]'); } catch(e) {}
+            if (names.length) {
+                onw.classList.remove('hidden');
+                onw.classList.add('flex');
+                document.getElementById('d-other-names').textContent = names.join('、');
+            } else {
+                onw.classList.add('hidden');
+                onw.classList.remove('flex');
+            }
+
+            switchWikiTab('en');
+        }
+
+        let _wikiEditing = false;  // 是否处于编辑态（跨 tab 切换时强制退出）
+
+        function switchWikiTab(lang) {
+            // 切换 tab 时若处于编辑态，先退回只读态（放弃未保存改动，避免跨 tab 内容混淆）
+            if (_wikiEditing) exitWikiEditMode(false);
+            _detailState.tab = lang;
+            const tabEn = document.getElementById('wiki-tab-en');
+            const tabZh = document.getElementById('wiki-tab-zh');
+            const view = document.getElementById('wiki-view');
+
+            if (lang === 'en') {
+                tabEn.className = 'px-3 py-1 text-sm bg-primary text-white rounded-lg';
+                tabZh.className = 'px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg';
+                view.textContent = _detailState.enWiki || '(该标签暂无英文 wiki)';
+            } else {
+                tabZh.className = 'px-3 py-1 text-sm bg-primary text-white rounded-lg';
+                tabEn.className = 'px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg';
+                if (_detailState.cnWiki) {
+                    view.textContent = _detailState.cnWiki;
+                } else if (_detailState.enWiki) {
+                    view.textContent = '(暂无中文 wiki，可点击"翻译并保存"生成，或点"编辑"手写)';
+                } else {
+                    view.textContent = '(该标签暂无 wiki)';
+                }
+            }
+            refreshActionButtons();
+        }
+
+        // 根据当前 tab 与内容状态，刷新底部操作按钮的显隐
+        function refreshActionButtons() {
+            const editBtn = document.getElementById('wiki-edit-btn');
+            const saveBtn = document.getElementById('wiki-save-btn');
+            const cancelBtn = document.getElementById('wiki-cancel-btn');
+            const trBtn = document.getElementById('wiki-translate-btn');
+
+            if (_wikiEditing) {
+                // 编辑态：只露保存/取消
+                editBtn.classList.add('hidden');
+                saveBtn.classList.remove('hidden');
+                cancelBtn.classList.remove('hidden');
+                trBtn.classList.add('hidden');
+                return;
+            }
+            saveBtn.classList.add('hidden');
+            cancelBtn.classList.add('hidden');
+            editBtn.classList.remove('hidden');
+            // 翻译按钮：仅中文 tab + cn_wiki 为空 + 有 en_wiki 可翻译
+            const showTranslate = (_detailState.tab === 'zh' && !_detailState.cnWiki && _detailState.enWiki);
+            trBtn.classList.toggle('hidden', !showTranslate);
+        }
+
+        function enterWikiEditMode() {
+            _wikiEditing = true;
+            const view = document.getElementById('wiki-view');
+            const editor = document.getElementById('wiki-editor');
+            // 预填当前 tab 的实际内容（不预填占位提示文本）
+            const cur = (_detailState.tab === 'en') ? _detailState.enWiki : _detailState.cnWiki;
+            editor.value = cur;
+            view.classList.add('hidden');
+            editor.classList.remove('hidden');
+            editor.focus();
+            editor.setSelectionRange(editor.value.length, editor.value.length);
+            refreshActionButtons();
+        }
+
+        function exitWikiEditMode(restoreView) {
+            _wikiEditing = false;
+            const view = document.getElementById('wiki-view');
+            const editor = document.getElementById('wiki-editor');
+            editor.classList.add('hidden');
+            view.classList.remove('hidden');
+            if (restoreView) {
+                // 回到只读视图时用最新的 _detailState 重渲染文本
+                if (_detailState.tab === 'en') {
+                    view.textContent = _detailState.enWiki || '(该标签暂无英文 wiki)';
+                } else {
+                    view.textContent = _detailState.cnWiki
+                        || (_detailState.enWiki ? '(暂无中文 wiki，可点击"翻译并保存"生成，或点"编辑"手写)' : '(该标签暂无 wiki)');
+                }
+            }
+            refreshActionButtons();
+        }
+
+        function cancelWikiEdit() {
+            exitWikiEditMode(true);
+        }
+
+        function saveWiki() {
+            const editor = document.getElementById('wiki-editor');
+            const content = editor.value;
+            const lang = _detailState.tab;
+            const saveBtn = document.getElementById('wiki-save-btn');
+            saveBtn.disabled = true;
+            saveBtn.innerHTML = '<i class="fa fa-spinner fa-spin mr-1"></i>保存中...';
+
+            fetch('/update_tag_wiki', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({tag: _detailState.tag, lang: lang, content: content})
+            })
+            .then(r => r.json())
+            .then(data => {
+                saveBtn.disabled = false;
+                saveBtn.innerHTML = '<i class="fa fa-check mr-1"></i>保存';
+                if (data.error) { showNotification('保存失败：' + data.error, 'error'); return; }
+                // 更新本地状态
+                if (lang === 'en') _detailState.enWiki = data.content;
+                else _detailState.cnWiki = data.content;
+                exitWikiEditMode(true);
+                showNotification((lang === 'en' ? '英文' : '中文') + ' wiki 已保存', 'success');
+            })
+            .catch(() => {
+                saveBtn.disabled = false;
+                saveBtn.innerHTML = '<i class="fa fa-check mr-1"></i>保存';
+                showNotification('请求失败', 'error');
+            });
+        }
+
+        function translateWiki() {
+            if (!_detailState.enWiki) { showNotification('无英文 wiki 可翻译', 'warning'); return; }
+            const btn = document.getElementById('wiki-translate-btn');
+            const view = document.getElementById('wiki-view');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-1"></i>翻译中...';
+            view.innerHTML = '<i class="fa fa-spinner fa-spin mr-1"></i>正在翻译，请稍候...';
+
+            fetch('/translate_tag_wiki', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({tag: _detailState.tag, en_wiki: _detailState.enWiki})
+            })
+            .then(r => r.json())
+            .then(data => {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fa fa-language mr-1"></i>翻译并保存';
+                if (data.error) {
+                    showNotification('翻译失败：' + data.error, 'error');
+                    view.textContent = '翻译失败：' + data.error;
+                    return;
+                }
+                _detailState.cnWiki = data.cn_wiki;
+                view.textContent = _detailState.cnWiki;
+                refreshActionButtons();
+                showNotification('中文 wiki 已翻译并保存', 'success');
+            })
+            .catch(() => {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fa fa-language mr-1"></i>翻译并保存';
+                showNotification('请求失败', 'error');
+            });
+        }
+
+        // === 增量更新 ===
+        function runUpdate() {
+            const btn = document.getElementById('btn-update');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-1.5"></i> 更新中...';
+            executeWithProgress('/danbooru_update', {}, '增量更新 Danbooru', '正在抓取最新 wiki...',
+                function() {  // onComplete
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fa fa-refresh mr-1.5"></i> 增量更新';
+                },
+                function(data) {  // summaryFn
+                    return '增量更新完成：新增/更新 ' + (data.new_count || 0) + ' 条';
+                }
+            );
+        }
+
+        // === SSE 通用流式消费器（从 tag_editor.html 复制） ===
+        function executeWithProgress(url, body, title, subtitle, onComplete, summaryFn) {
+            const modal = document.getElementById('progress-modal');
+            const bar = document.getElementById('progress-bar');
+            const count = document.getElementById('progress-count');
+            const pct = document.getElementById('progress-percent');
+            const itemEl = document.getElementById('progress-item');
+            const errBox = document.getElementById('progress-errors');
+            const closeBtn = document.getElementById('progress-close-btn');
+
+            function openModal() {
+                document.getElementById('progress-title').textContent = title;
+                document.getElementById('progress-subtitle').textContent = subtitle;
+                bar.style.width = '0%';
+                bar.classList.remove('bg-red-500'); bar.classList.add('bg-primary');
+                count.textContent = ''; pct.textContent = '';
+                itemEl.textContent = '';
+                errBox.innerHTML = ''; errBox.classList.add('hidden');
+                closeBtn.classList.add('hidden');
+                modal.classList.remove('hidden');
+            }
+
+            fetch(url, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            }).then(function(response) {
+                var contentType = response.headers.get('Content-Type') || '';
+                if (contentType.includes('application/json')) {
+                    return response.json().then(function(data) {
+                        if (data.error) showNotification(data.error, 'error');
+                        else if (data.message) showNotification(data.message, 'info');
+                        if (onComplete) onComplete(data);
+                        return null;
+                    });
+                }
+                if (!response.ok) {
+                    return response.text().then(function(text) {
+                        var msg = '请求失败';
+                        try { msg = JSON.parse(text).error || msg; } catch(e) {}
+                        throw new Error(msg);
+                    });
+                }
+                openModal();
+                var reader = response.body.getReader();
+                var decoder = new TextDecoder();
+                var buffer = '';
+                var currentEventType = '';
+                var streamFinished = false;  // 是否收到 complete/fatal 正常收尾事件
+
+                function processLines() {
+                    var lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+                    for (var i = 0; i < lines.length; i++) {
+                        var line = lines[i];
+                        if (line.startsWith('event: ')) {
+                            currentEventType = line.slice(7).trim();
+                        } else if (line.startsWith('data: ')) {
+                            try {
+                                var data = JSON.parse(line.slice(6));
+                            } catch(e) { currentEventType = ''; continue; }
+                            if (currentEventType === 'progress') {
+                                itemEl.textContent = data.item || '';
+                                if (data.total && data.total !== '?') {
+                                    var percent = Math.round((data.current / data.total) * 100);
+                                    bar.style.width = percent + '%';
+                                    count.textContent = data.current + ' / ' + data.total;
+                                    pct.textContent = percent + '%';
+                                } else {
+                                    count.textContent = data.current || '';
+                                    pct.textContent = '';
+                                }
+                            } else if (currentEventType === 'error') {
+                                errBox.classList.remove('hidden');
+                                var div = document.createElement('div');
+                                div.textContent = (data.item ? data.item + ': ' : '') + data.error;
+                                errBox.appendChild(div);
+                            } else if (currentEventType === 'complete') {
+                                streamFinished = true;
+                                bar.style.width = '100%';
+                                pct.textContent = '100%';
+                                itemEl.textContent = '';
+                                if (summaryFn) {
+                                    document.getElementById('progress-subtitle').textContent = summaryFn(data);
+                                }
+                                closeBtn.classList.remove('hidden');
+                                if (onComplete) onComplete(data);
+                            } else if (currentEventType === 'fatal') {
+                                streamFinished = true;
+                                bar.style.width = '100%';
+                                bar.classList.remove('bg-primary'); bar.classList.add('bg-red-500');
+                                itemEl.textContent = data.error;
+                                closeBtn.classList.remove('hidden');
+                                if (onComplete) onComplete(data);
+                            }
+                            currentEventType = '';
+                        }
+                    }
+                }
+
+                // 流提前结束兜底：done 但未收到 complete/fatal（后端崩溃/代理超时）
+                function finishStream() {
+                    if (streamFinished) return;  // 已正常收尾
+                    bar.style.width = '100%';
+                    bar.classList.remove('bg-primary'); bar.classList.add('bg-red-500');
+                    errBox.classList.remove('hidden');
+                    var div = document.createElement('div');
+                    div.textContent = '连接异常中断：未收到完成信号';
+                    errBox.appendChild(div);
+                    document.getElementById('progress-subtitle').textContent = '抓取中断，请重试';
+                    closeBtn.classList.remove('hidden');
+                    if (onComplete) onComplete({});
+                }
+
+                function read() {
+                    reader.read().then(function(result) {
+                        if (result.done) {
+                            if (buffer.trim()) { buffer += '\n'; processLines(); }
+                            finishStream();  // 兜底：未收到 complete/fatal 时提示中断
+                            return;
+                        }
+                        buffer += decoder.decode(result.value, {stream: true});
+                        processLines();
+                        read();
+                    }).catch(function(err) {
+                        // 读取异常（网络中断/代理断开）：提示错误，恢复可关闭
+                        bar.style.width = '100%';
+                        bar.classList.remove('bg-primary'); bar.classList.add('bg-red-500');
+                        errBox.classList.remove('hidden');
+                        var div = document.createElement('div');
+                        div.textContent = '读取流失败：' + (err && err.message ? err.message : '网络中断');
+                        errBox.appendChild(div);
+                        document.getElementById('progress-subtitle').textContent = '连接异常，已停止';
+                        closeBtn.classList.remove('hidden');
+                        if (onComplete) onComplete({});
+                    });
+                }
+                read();
+                return null;
+            }).catch(function(err) {
+                showNotification(err.message || '请求失败', 'error');
+                if (onComplete) onComplete({});
+            });
+        }
+
+        function closeProgressModal() {
+            document.getElementById('progress-modal').classList.add('hidden');
+        }
+
+        // === 工具 ===
+        let _notifyTimer = null;
+        function showNotification(message, type) {
+            const n = document.getElementById('notification');
+            const colors = {success:'bg-green-500 text-white',error:'bg-red-500 text-white',warning:'bg-amber-500 text-white',info:'bg-blue-500 text-white'};
+            n.className = 'fixed bottom-5 right-5 px-5 py-3 rounded-lg shadow-lg flex items-center z-50 transition-all duration-300 text-sm ' + (colors[type]||colors.info);
+            n.textContent = message;
+            n.style.transform = 'translateY(0)'; n.style.opacity = '1';
+            if (_notifyTimer) clearTimeout(_notifyTimer);
+            _notifyTimer = setTimeout(() => { n.style.transform = 'translateY(20px)'; n.style.opacity = '0'; _notifyTimer = null; }, 3000);
+        }
+
+        function escapeHtml(str) {
+            return String(str).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+        function escapeAttr(str) {
+            return String(str).replace(/'/g, "\\'").replace(/"/g, '&quot;');
+        }
+
+        // 页面加载后聚焦搜索框
+        document.getElementById('search-input').focus();
+    </script>
+</body>
+</html>

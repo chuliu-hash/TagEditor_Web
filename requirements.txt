@@ -4,6 +4,8 @@ numpy==1.26.4
 onnxruntime-gpu==1.18.0  # cuda 12.x, cudnn 8.x: pip install onnxruntime-gpu==1.18.0 --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
 opencv-python==4.13.0.92
 pandas==3.0.2
+python-dateutil
+pyarrow  # 读取 wiki_pages.parquet（构建标签数据库用）
 torch>=1.7
 torchvision
 basicsr>=1.4.2
