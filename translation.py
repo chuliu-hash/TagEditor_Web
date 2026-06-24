@@ -93,7 +93,7 @@ def _lookup_cn_from_db(tags):
         rows = lookup_tags(conn, tags)  # 返回 {normalized_name: info}
         result = {}
         for tag in tags:  # 用原始 tag 作 key，保证下游 hits.get(tag) 命中
-            norm = tag.strip().replace(' ', '_')
+            norm = tag.strip().replace(' ', '_').lower()  # 与 lookup_tags 内部规范化一致
             info = rows.get(norm)
             if info:
                 cn = (info.get('cn_name') or '').strip()
@@ -132,7 +132,7 @@ def _fetch_en_wiki_from_db(tags):
         rows = lookup_tags(conn, tags)
         result = {}
         for tag in tags:  # 用原始 tag 作 key
-            norm = tag.strip().replace(' ', '_')
+            norm = tag.strip().replace(' ', '_').lower()  # 与 lookup_tags 内部规范化一致
             info = rows.get(norm)
             if info:
                 wiki = (info.get('en_wiki') or '').strip()

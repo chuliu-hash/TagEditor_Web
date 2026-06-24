@@ -236,11 +236,11 @@ def lookup_tags(conn, tags):
     去重输入减少重复查询（同 tag 多次出现只查一次）。"""
     if not tags:
         return {}
-    # 规范化 + 去重，减少查询次数
+    # 规范化 + 去重，减少查询次数（统一小写+空格→下划线，与保存口径一致）
     norm_map = {}  # name -> 原始 tags 中的引用（无实际用途，仅去重）
     norm_list = []
     for t in tags:
-        n = t.strip().replace(' ', '_')
+        n = t.strip().replace(' ', '_').lower()
         if n and n not in norm_map:
             norm_map[n] = True
             norm_list.append(n)
@@ -264,7 +264,7 @@ def lookup_tags(conn, tags):
 
 def lookup_tag_en_wiki(conn, tag):
     """单标签查英文 wiki（翻译时取 body 注入 LLM 用）"""
-    row = conn.execute("SELECT en_wiki FROM tags WHERE name = ?", (tag.strip().replace(' ', '_'),)).fetchone()
+    row = conn.execute("SELECT en_wiki FROM tags WHERE name = ?", (tag.strip().replace(' ', '_').lower(),)).fetchone()
     return row[0] if row else ''
 
 
@@ -272,7 +272,7 @@ def update_translation(conn, name, cn_name, commit=True):
     """更新标签的中文翻译（cn_name 列）。标签不存在时自动插入空记录。
     用于：LLM 翻译回写、用户手动编辑翻译回写。不受 updated_at 时间戳守卫限制。
     commit=False 时延迟提交（批量场景由调用方统一 commit，避免逐条磁盘同步拖慢）。"""
-    name = name.strip().replace(' ', '_')
+    name = name.strip().replace(' ', '_').lower()
     if not name:
         return
     conn.execute("""
@@ -287,7 +287,7 @@ def update_cn_wiki(conn, name, cn_wiki, commit=True):
     """更新标签的中文 wiki（cn_wiki 列）。标签不存在时自动插入空记录。
     用于：详情弹窗翻译英文 wiki 后回写、用户手动编辑中文 wiki 后回写。
     不受 updated_at 时间戳守卫限制。"""
-    name = name.strip().replace(' ', '_')
+    name = name.strip().replace(' ', '_').lower()
     if not name:
         return
     conn.execute("""
@@ -302,7 +302,7 @@ def update_en_wiki(conn, name, en_wiki, commit=True):
     """更新标签的英文 wiki（en_wiki 列）。标签不存在时自动插入空记录。
     用于：用户手动编辑英文 wiki 后回写。不受 updated_at 时间戳守卫限制，
     因此手动编辑不会被 Danbooru 增量更新误判为时间锚点前移。"""
-    name = name.strip().replace(' ', '_')
+    name = name.strip().replace(' ', '_').lower()
     if not name:
         return
     conn.execute("""
@@ -325,7 +325,7 @@ def upsert_wiki_incremental(conn, name, en_wiki, other_names, updated_at):
             other_names=excluded.other_names,
             updated_at=excluded.updated_at
         WHERE excluded.updated_at > tags.updated_at OR tags.updated_at = ''
-    """, (name.strip().replace(' ', '_'), en_wiki, other_names, updated_at))
+    """, (name.strip().replace(' ', '_').lower(), en_wiki, other_names, updated_at))
 
 
 def lookup_tag_by_cn(conn, cn_name):
@@ -365,8 +365,8 @@ def search_tags(conn, keyword, limit=20):
     if not kw:
         return []
 
-    # 空格/连字符统一为下划线，匹配 name_norm 的规范化口径
-    kw_norm = kw.replace(' ', '_').replace('-', '_')
+    # 统一小写 + 空格/连字符→下划线，匹配 name_norm 的规范化口径（保存统一小写，搜索也应小写）
+    kw_norm = kw.replace(' ', '_').replace('-', '_').lower()
 
     def _make_like_pattern(text):
         esc = text.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
