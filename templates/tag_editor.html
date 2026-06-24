@@ -335,7 +335,7 @@
                     <input id="rename-name" type="text" class="flex-1 border border-blue-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-primary transition-colors" placeholder="输入名称（如 character）" oninput="debouncedPreviewRename()">
                     <span class="text-xs text-gray-400">-宽x高-编号</span>
                 </div>
-                <p class="text-xs text-gray-400">格式：<span class="font-mono text-gray-600">{名称}-{宽}x{高}-{编号}</span>，编号从 1 开始，按文件名自然排序。扩展名统一为 .png，同名 .txt 标签联动重命名。</p>
+                <p class="text-xs text-gray-400">格式：<span class="font-mono text-gray-600">{名称}-{宽}x{高}-{编号}</span>，编号从 1 开始，按文件名自然排序。保留原图后缀（jpg/png/gif/webp 等），同名 .txt 标签联动重命名。</p>
             </div>
             <!-- 预览表格 -->
             <div class="flex-grow overflow-y-auto min-h-0" id="rename-preview-body">
@@ -1003,8 +1003,10 @@
 
             const tags = savedCurrentTags.map(t => t.tag.trim()).filter(t => t);
             const seen = new Set();
-            // 保存时去重：大小写不敏感（'Girl' 与 'girl' 视为相同），保留首次出现的标签（含原始大小写）
-            const content = tags.filter(t => { const k = t.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; }).join(', ');
+            // 保存时统一转小写 + 去重（大小写不敏感）。
+            // 统一小写保证 DB name 列（存小写）与查询 key（小写）一致，避免翻译查不到。
+            // 标签首字母大小写在 Danbooru 规范中无语义意义（1girl / 1Girl 等价）。
+            const content = tags.filter(t => { const k = t.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; }).map(t => t.toLowerCase()).join(', ');
 
             // 先查找缓存，将用户手动编辑的翻译与缓存合并后更新缓存
             const tagKeys = savedCurrentTags.map(t => t.tag.trim().toLowerCase()).filter(t => t);

@@ -159,15 +159,17 @@ def save_caption(image_name):
     content = data.get('content', '')
     translations = data.get('translations', {})
 
-    # 大小写不敏感去重（与前端逻辑一致），防止非浏览器客户端写入重复标签
+    # 保存时统一转小写 + 去重（与前端逻辑一致）。
+    # 统一小写保证 DB name 列与查询 key 一致，避免翻译查不到；
+    # 也防止非浏览器客户端写入重复/混合大小写标签。
     seen = set()
     deduped = []
     for t in content.split(','):
         t = t.strip()
         if t:
-            key = t.lower()
-            if key not in seen:
-                seen.add(key)
+            t = t.lower()
+            if t not in seen:
+                seen.add(t)
                 deduped.append(t)
     content = ', '.join(deduped)
 
@@ -288,7 +290,8 @@ def rename_files():
         错误 → { error: str } (HTTP 400)
 
     重命名采用两阶段（old → __tmp__{i} → new）避免源/目标名碰撞时互相覆盖，
-    图片扩展名保留为 .png（原图统一转 PNG，与编辑器落盘约定一致），同名 .txt 标签随之联动。
+    图片扩展名保留原图后缀（jpg/jpeg/gif/webp/png 均原样保留，仅改主干名），
+    同名 .txt 标签随之联动。
     """
     from config import get_image_files
 
@@ -303,12 +306,13 @@ def rename_files():
     images = get_image_files(upload_dir)  # 已按自然排序
 
     # 计算每张图的新文件名
-    plan = []  # [(old_base, new_base, width, height)]
+    # plan: [(old_base, new_base, ext, width, height)]  ext 含点号（如 '.jpg'），保留原图格式
+    plan = []
     used = set()  # 已生成的新文件名（防冲突）
     for i, filename in enumerate(images):
-        old_base = os.path.splitext(filename)[0]
+        old_base, ext = os.path.splitext(filename)
         w, h = _get_image_size(os.path.join(upload_dir, filename))
-        # 编号从 1 开始，宽度补零到与总数位数一致（便于自然排序，如 001/010/100）
+        # 编号从 1 开始
         num = i + 1
         new_base = f"{name}-{w}x{h}-{num}"
 
@@ -321,40 +325,44 @@ def rename_files():
             candidate = f"{new_base}_{suffix}"
         new_base = candidate
         used.add(new_base)
-        plan.append((old_base, new_base, w, h))
+        plan.append((old_base, new_base, ext, w, h))
 
     # 预览模式：不落盘，返回新旧名对照
     if preview:
         return jsonify({
             'preview': [
-                {'old': old_base, 'new': new_base, 'width': w, 'height': h}
-                for old_base, new_base, w, h in plan
+                {'old': old_base + ext, 'new': new_base + ext,
+                 'width': w, 'height': h}
+                for old_base, new_base, ext, w, h in plan
             ],
             'total': len(plan)
         })
 
     # 执行重命名：两阶段（避免源/目标同名覆盖）
-    # 阶段1：old_base.{png,txt} → __tageditor_rename_tmp_{i}.{png,txt}
-    # 阶段2：__tageditor_rename_tmp_{i}.{png,txt} → new_base.{png,txt}
+    # 阶段1：old_base.<图片后缀> 和 old_base.txt → __tageditor_rename_tmp_{i}.<后缀>
+    # 阶段2：__tageditor_rename_tmp_{i}.<后缀> → new_base.<后缀>
+    # 图片用原图扩展名（保留格式），标签固定 .txt。
     tmp_prefix = '__tageditor_rename_tmp_'
     renamed = 0
     errors = 0
-    for i, (old_base, new_base, _, _) in enumerate(plan):
+    for i, (old_base, new_base, ext, _, _) in enumerate(plan):
+        # 该图的两个待重命名后缀：图片原后缀 + 标签 .txt
+        exts = (ext, '.txt')
         # 阶段1：old → tmp
-        for ext in ('.png', '.txt'):
-            old_path = os.path.join(upload_dir, old_base + ext)
-            tmp_path = os.path.join(upload_dir, f"{tmp_prefix}{i}{ext}")
+        for e in exts:
+            old_path = os.path.join(upload_dir, old_base + e)
+            tmp_path = os.path.join(upload_dir, f"{tmp_prefix}{i}{e}")
             if os.path.exists(old_path):
                 try:
                     os.rename(old_path, tmp_path)
-                except Exception as e:
-                    print(f"[重命名] 阶段1失败 {old_path} -> {tmp_path}: {e}")
+                except Exception as ex:
+                    print(f"[重命名] 阶段1失败 {old_path} -> {tmp_path}: {ex}")
                     errors += 1
         # 阶段2：tmp → new
         moved_any = False
-        for ext in ('.png', '.txt'):
-            tmp_path = os.path.join(upload_dir, f"{tmp_prefix}{i}{ext}")
-            new_path = os.path.join(upload_dir, new_base + ext)
+        for e in exts:
+            tmp_path = os.path.join(upload_dir, f"{tmp_prefix}{i}{e}")
+            new_path = os.path.join(upload_dir, new_base + e)
             if os.path.exists(tmp_path):
                 try:
                     # 防御：若 new_path 已被别的源占用（不该发生），先清理
@@ -362,8 +370,8 @@ def rename_files():
                         os.unlink(new_path)
                     os.rename(tmp_path, new_path)
                     moved_any = True
-                except Exception as e:
-                    print(f"[重命名] 阶段2失败 {tmp_path} -> {new_path}: {e}")
+                except Exception as ex:
+                    print(f"[重命名] 阶段2失败 {tmp_path} -> {new_path}: {ex}")
                     errors += 1
         if moved_any:
             renamed += 1
