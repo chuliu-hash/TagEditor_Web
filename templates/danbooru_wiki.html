@@ -215,10 +215,9 @@
             });
             return text;
         }
-        // DText 链接点击：搜索该标签
+        // DText 链接点击：直接跳转到该标签的详情页（查询 DB 加载详情卡片）
         function dtextSearchTag(tag) {
-            document.getElementById('search-input').value = tag;
-            searchTags();
+            showTagDetail(tag);
         }
         // DText 图片懒加载：用 Danbooru API 获取缩略图 URL
         function _dtextLoadThumbnails(container) {
