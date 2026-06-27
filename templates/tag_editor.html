@@ -938,17 +938,47 @@
             });
             return text;
         }
-        // DText 链接点击：在标签详情中搜索该标签
+        // DText 链接点击：直接用标签名查 DB 并展示详情（不依赖标签列表是否包含该标签）
         function dtextSearchTag(tag) {
-            // 关闭当前详情弹窗，用该标签名打开新详情
-            closeTagDetail();
-            // 在标签列表中找匹配的标签，打开详情
-            var idx = currentTags.findIndex(function(t) { return t.tag.trim().toLowerCase() === tag.toLowerCase(); });
-            if (idx >= 0) {
-                openTagDetail(idx);
-            } else {
-                showNotification('当前图片无标签 ' + tag + '，可在 Danbooru 查询页搜索', 'info');
-            }
+            tag = tag.trim();
+            if (!tag) return;
+            const seq = ++_detailSeq;
+            _detailState = { tag: tag, cnName: '', otherNames: '', enWiki: '', cnWiki: '', tab: 'en' };
+            document.getElementById('tag-detail-title').textContent = tag;
+            document.getElementById('td-cn-name').textContent = '';
+            document.getElementById('td-other-names-wrap').classList.add('hidden');
+            document.getElementById('tag-detail-body').innerHTML = '<i class="fa fa-spinner fa-spin mr-1"></i>加载中...';
+            document.getElementById('td-translate-row').classList.add('hidden');
+            document.getElementById('tag-detail-modal').classList.remove('hidden');
+
+            fetch('/tag_detail/' + encodeURIComponent(tag))
+                .then(r => r.json())
+                .then(data => {
+                    if (seq !== _detailSeq) return;
+                    if (data.error) {
+                        document.getElementById('tag-detail-body').textContent = '加载失败：' + data.error;
+                        return;
+                    }
+                    _detailState.cnName = data.cn_name || '';
+                    _detailState.otherNames = data.other_names || '[]';
+                    _detailState.enWiki = data.en_wiki || '';
+                    _detailState.cnWiki = data.cn_wiki || '';
+                    document.getElementById('td-cn-name').textContent = (_detailState.cnName.split(',')[0] || '').trim() || '(暂无)';
+                    let names = [];
+                    try { names = JSON.parse(_detailState.otherNames || '[]'); } catch(e) {}
+                    const onwWrap = document.getElementById('td-other-names-wrap');
+                    if (names.length) {
+                        document.getElementById('td-other-names').textContent = names.join('、');
+                        onwWrap.classList.remove('hidden');
+                    } else {
+                        onwWrap.classList.add('hidden');
+                    }
+                    switchDetailTab('en');
+                })
+                .catch(() => {
+                    if (seq !== _detailSeq) return;
+                    document.getElementById('tag-detail-body').textContent = '请求失败';
+                });
         }
         // DText 图片懒加载：post #ID 的缩略图需要从 API 获取真实缩略图 URL
         // 页面渲染后异步解析 .dtext-post-thumb，用 Danbooru API 获取缩略图
