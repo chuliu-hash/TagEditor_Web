@@ -67,9 +67,9 @@
             <div class="flex gap-2">
                 <div class="flex-1 relative">
                     <i class="fa fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"></i>
-                    <input id="search-input" type="text" autocomplete="off" class="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary transition-colors" placeholder="搜索标签（英文/中文/别名）..." onkeydown="if(event.key==='Enter')searchTags()">
+                    <input id="search-input" type="text" autocomplete="off" class="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary transition-colors" placeholder="搜索标签（英文/中文/别名）..." oninput="debouncedLiveSearch()" onkeydown="if(event.key==='Enter')openFirstResult()">
                 </div>
-                <button class="px-4 py-2 bg-primary hover:bg-primary/90 text-white rounded-lg text-sm font-medium transition-colors" onclick="searchTags()">
+                <button class="px-4 py-2 bg-primary hover:bg-primary/90 text-white rounded-lg text-sm font-medium transition-colors" onclick="openFirstResult()">
                     <i class="fa fa-search mr-1"></i>搜索
                 </button>
             </div>
@@ -268,6 +268,49 @@
             const searchBox = e.target.closest('.relative');
             if (!dropdown.contains(e.target) && !searchBox) closeSearchDropdown();
         });
+
+        // 输入时实时搜索（防抖 200ms），空输入时关闭下拉
+        function debounce(fn, wait) {
+            let timer = null;
+            return function() {
+                clearTimeout(timer);
+                const args = arguments, ctx = this;
+                timer = setTimeout(function() { fn.apply(ctx, args); }, wait);
+            };
+        }
+        function liveSearch() {
+            const keyword = document.getElementById('search-input').value.trim();
+            if (!keyword) { closeSearchDropdown(); _searchResults = []; return; }
+            searchTags();
+        }
+        const debouncedLiveSearch = debounce(liveSearch, 200);
+
+        // 回车/搜索按钮：打开第一条结果的详情
+        function openFirstResult() {
+            if (_searchResults.length > 0) {
+                showTagDetail(_searchResults[0].name);
+                closeSearchDropdown();
+                return;
+            }
+            // 无缓存结果时先搜索再打开
+            const keyword = document.getElementById('search-input').value.trim();
+            if (!keyword) return;
+            const seq = _searchSeq;
+            fetch('/danbooru_search', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({keyword: keyword, limit: 1})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (seq !== _searchSeq) return;
+                const results = data.results || [];
+                if (results.length > 0) {
+                    showTagDetail(results[0].name);
+                    closeSearchDropdown();
+                }
+            });
+        }
 
         function searchTags() {
             const keyword = document.getElementById('search-input').value.trim();
