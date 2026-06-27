@@ -167,7 +167,7 @@
                 <!-- 底部按钮栏 -->
                 <div class="flex gap-2 px-3 py-2.5 border-t border-gray-200 bg-gray-50">
                     <button class="bg-white hover:bg-gray-100 text-gray-600 font-medium py-1.5 px-3 rounded-md transition-all flex items-center justify-center text-sm border border-gray-200" onclick="addTag()">
-                        <i class="fa fa-plus mr-1"></i> 添加行
+                        <i class="fa fa-plus mr-1"></i> 添加标签
                     </button>
                     <button class="flex-1 bg-white hover:bg-gray-100 text-gray-600 font-medium py-1.5 px-3 rounded-md transition-all flex items-center justify-center text-sm border border-gray-200" onclick="moveTag(-1)">
                         <i class="fa fa-arrow-up mr-1"></i> 上移
@@ -721,7 +721,7 @@
         function renderTags() {
             const container = document.getElementById('tags-container');
             if (currentTags.length === 0) {
-                container.innerHTML = '<div class="p-8 text-center text-gray-300 text-sm">暂无标签，点击"添加行"新增</div>';
+                container.innerHTML = '<div class="p-8 text-center text-gray-300 text-sm">暂无标签，点击"添加标签"新增</div>';
                 return;
             }
             let html = '';
