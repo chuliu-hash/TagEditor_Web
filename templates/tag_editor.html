@@ -406,7 +406,7 @@
                 <button id="td-tab-en" class="px-3 py-1 text-sm bg-primary text-white rounded-lg" onclick="switchDetailTab('en')">英文 Wiki</button>
                 <button id="td-tab-zh" class="px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg" onclick="switchDetailTab('zh')">中文 Wiki</button>
             </div>
-            <div id="tag-detail-body" class="flex-grow overflow-y-auto min-h-0 px-6 py-4 text-sm text-gray-700 whitespace-pre-wrap"></div>
+            <div id="tag-detail-body" class="flex-grow overflow-y-auto min-h-0 px-6 py-4 text-sm text-gray-700 leading-relaxed"></div>
             <div id="td-translate-row" class="hidden flex justify-end gap-2 px-6 py-3 border-t border-gray-200">
                 <button id="td-translate-btn" class="px-4 py-2 text-sm bg-primary hover:bg-primary/90 text-white rounded-lg transition-colors" onclick="translateTagWiki()">
                     <i class="fa fa-language mr-1"></i>翻译并保存
@@ -874,6 +874,106 @@
             }
         });
 
+        // === DText（Danbooru wiki 标记）渲染器 ===
+        // 解析 Danbooru 的 DText 格式为安全 HTML：
+        //   [[tag]]        → 可点击链接（在本页搜索该标签）
+        //   !post #12345   → 图片缩略图（链接到 Danbooru 帖子页，联网显示缩略图）
+        //   h4. heading    → 加粗标题
+        //   * item         → 无序列表
+        //   其他文本原样显示（先 HTML 转义防 XSS）
+        function renderDText(text) {
+            if (!text) return '';
+            // 1. 先按行处理结构（标题/列表项）
+            var lines = text.split('\n');
+            var html = [];
+            var inList = false;
+            for (var i = 0; i < lines.length; i++) {
+                var line = lines[i];
+                // 转义 HTML
+                line = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                // h4. 标题
+                var h4 = line.match(/^h4\.\s+(.*)/);
+                if (h4) {
+                    if (inList) { html.push('</ul>'); inList = false; }
+                    html.push('<h4 class="font-semibold text-gray-800 mt-3 mb-1">' + _dtextInline(h4[1]) + '</h4>');
+                    continue;
+                }
+                // * 列表项
+                var li = line.match(/^\*\s+(.*)/);
+                if (li) {
+                    if (!inList) { html.push('<ul class="list-disc ml-5 my-1">'); inList = true; }
+                    html.push('<li>' + _dtextInline(li[1]) + '</li>');
+                    continue;
+                }
+                // 空行：关闭列表
+                if (line.trim() === '') {
+                    if (inList) { html.push('</ul>'); inList = false; }
+                    html.push('');
+                    continue;
+                }
+                // 普通段落
+                if (inList) { html.push('</ul>'); inList = false; }
+                html.push('<p class="my-1">' + _dtextInline(line) + '</p>');
+            }
+            if (inList) html.push('</ul>');
+            return html.join('\n');
+        }
+        // DText 行内标记：[[tag]] 链接 + !post #ID 图片
+        function _dtextInline(text) {
+            // [[tag name]] 或 [[link|display]] → 可点击链接
+            text = text.replace(/\[\[([^\]]+)\]\]/g, function(_, inner) {
+                var parts = inner.split('|');
+                var tag = parts[0].trim();
+                var display = (parts[1] || parts[0]).trim();
+                return '<a href="#" class="text-primary underline hover:text-primary/80" onclick="dtextSearchTag(\'' + tag.replace(/'/g, "\\'") + '\');return false;">' + display + '</a>';
+            });
+            // !post #12345 → 图片缩略图（Danbooru 缩略图 CDN URL）
+            text = text.replace(/!\s*post\s*#(\d+)/g, function(_, id) {
+                return '<a href="https://danbooru.donmai.us/posts/' + id + '" target="_blank" class="inline-block">' +
+                    '<img src="https://danbooru.donmai.us/posts/' + id + '.json" ' +
+                    'data-post-id="' + id + '" ' +
+                    'class="dtext-post-thumb inline-block rounded border border-gray-200 max-w-[150px] max-h-[150px] align-middle my-0.5" ' +
+                    'loading="lazy" alt="post #' + id + '" ' +
+                    'onerror="this.style.display=\'none\'"></a>';
+            });
+            return text;
+        }
+        // DText 链接点击：在标签详情中搜索该标签
+        function dtextSearchTag(tag) {
+            // 关闭当前详情弹窗，用该标签名打开新详情
+            closeTagDetail();
+            // 在标签列表中找匹配的标签，打开详情
+            var idx = currentTags.findIndex(function(t) { return t.tag.trim().toLowerCase() === tag.toLowerCase(); });
+            if (idx >= 0) {
+                openTagDetail(idx);
+            } else {
+                showNotification('当前图片无标签 ' + tag + '，可在 Danbooru 查询页搜索', 'info');
+            }
+        }
+        // DText 图片懒加载：post #ID 的缩略图需要从 API 获取真实缩略图 URL
+        // 页面渲染后异步解析 .dtext-post-thumb，用 Danbooru API 获取缩略图
+        function _dtextLoadThumbnails(container) {
+            var imgs = (container || document).querySelectorAll('.dtext-post-thumb[data-post-id]');
+            imgs.forEach(function(img) {
+                if (img.dataset.loaded) return;
+                img.dataset.loaded = '1';
+                var postId = img.dataset.postId;
+                // Danbooru 缩略图 CDN 规律：https://cdn.donmai.us/original/xx/xx/hash.ext 不确定，
+                // 故用 API 获取 preview_file_url。但跨域+认证复杂，直接用 Danbooru 的 /posts/ID.json
+                fetch('https://danbooru.donmai.us/posts/' + postId + '.json')
+                    .then(function(r) { return r.json(); })
+                    .then(function(data) {
+                        if (data.preview_file_url) {
+                            img.src = data.preview_file_url;
+                            img.style.display = '';
+                        } else {
+                            img.style.display = 'none';
+                        }
+                    })
+                    .catch(function() { img.style.display = 'none'; });
+            });
+        }
+
         function switchDetailTab(lang) {
             _detailState.tab = lang;
             const tabEn = document.getElementById('td-tab-en');
@@ -884,7 +984,13 @@
             if (lang === 'en') {
                 tabEn.className = 'px-3 py-1 text-sm bg-primary text-white rounded-lg';
                 tabZh.className = 'px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg';
-                body.textContent = _detailState.enWiki || '(该标签暂无英文 wiki)';
+                // 英文 wiki 用 DText 渲染（[[标签]]链接 + !post 图片）
+                if (_detailState.enWiki) {
+                    body.innerHTML = renderDText(_detailState.enWiki);
+                    _dtextLoadThumbnails(body);
+                } else {
+                    body.textContent = '(该标签暂无英文 wiki)';
+                }
                 translateRow.classList.add('hidden');
             } else {
                 tabZh.className = 'px-3 py-1 text-sm bg-primary text-white rounded-lg';

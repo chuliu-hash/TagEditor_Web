@@ -113,7 +113,7 @@
                     </div>
                     <div id="wiki-body" class="flex-grow overflow-y-auto px-6 py-4 text-sm text-gray-700">
                         <!-- 只读视图 -->
-                        <div id="wiki-view" class="whitespace-pre-wrap min-h-[120px]"></div>
+                        <div id="wiki-view" class="min-h-[120px] leading-relaxed"></div>
                         <!-- 编辑视图（默认隐藏） -->
                         <textarea id="wiki-editor" class="hidden w-full h-[calc(100vh-360px)] min-h-[200px] border border-gray-300 rounded-lg p-3 text-sm font-mono focus:outline-none focus:border-primary resize-none"></textarea>
                     </div>
@@ -163,6 +163,82 @@
     <div id="notification" class="fixed bottom-5 right-5 px-5 py-3 rounded-lg shadow-lg transform translate-y-20 opacity-0 transition-all duration-300 flex items-center z-50 text-sm"></div>
 
     <script>
+        // === DText（Danbooru wiki 标记）渲染器 ===
+        // 解析 Danbooru 的 DText 格式为安全 HTML：
+        //   [[tag]]        → 可点击链接（在本页搜索该标签）
+        //   !post #12345   → 图片缩略图（链接到 Danbooru 帖子页，联网显示缩略图）
+        //   h4. heading    → 加粗标题
+        //   * item         → 无序列表
+        function renderDText(text) {
+            if (!text) return '';
+            var lines = text.split('\n');
+            var html = [], inList = false;
+            for (var i = 0; i < lines.length; i++) {
+                var line = lines[i];
+                line = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                var h4 = line.match(/^h4\.\s+(.*)/);
+                if (h4) {
+                    if (inList) { html.push('</ul>'); inList = false; }
+                    html.push('<h4 class="font-semibold text-gray-800 mt-3 mb-1">' + _dtextInline(h4[1]) + '</h4>');
+                    continue;
+                }
+                var li = line.match(/^\*\s+(.*)/);
+                if (li) {
+                    if (!inList) { html.push('<ul class="list-disc ml-5 my-1">'); inList = true; }
+                    html.push('<li>' + _dtextInline(li[1]) + '</li>');
+                    continue;
+                }
+                if (line.trim() === '') {
+                    if (inList) { html.push('</ul>'); inList = false; }
+                    html.push('');
+                    continue;
+                }
+                if (inList) { html.push('</ul>'); inList = false; }
+                html.push('<p class="my-1">' + _dtextInline(line) + '</p>');
+            }
+            if (inList) html.push('</ul>');
+            return html.join('\n');
+        }
+        function _dtextInline(text) {
+            text = text.replace(/\[\[([^\]]+)\]\]/g, function(_, inner) {
+                var parts = inner.split('|');
+                var tag = parts[0].trim();
+                var display = (parts[1] || parts[0]).trim();
+                return '<a href="#" class="text-primary underline hover:text-primary/80" onclick="dtextSearchTag(\'' + tag.replace(/'/g, "\\'") + '\');return false;">' + display + '</a>';
+            });
+            text = text.replace(/!\s*post\s*#(\d+)/g, function(_, id) {
+                return '<a href="https://danbooru.donmai.us/posts/' + id + '" target="_blank" class="inline-block">' +
+                    '<img data-post-id="' + id + '" ' +
+                    'class="dtext-post-thumb inline-block rounded border border-gray-200 max-w-[150px] max-h-[150px] align-middle my-0.5" ' +
+                    'loading="lazy" alt="post #' + id + '" style="display:none" ' +
+                    'onerror="this.style.display=\'none\'"></a>';
+            });
+            return text;
+        }
+        // DText 链接点击：搜索该标签
+        function dtextSearchTag(tag) {
+            document.getElementById('search-input').value = tag;
+            searchTags();
+        }
+        // DText 图片懒加载：用 Danbooru API 获取缩略图 URL
+        function _dtextLoadThumbnails(container) {
+            var imgs = (container || document).querySelectorAll('.dtext-post-thumb[data-post-id]');
+            imgs.forEach(function(img) {
+                if (img.dataset.loaded) return;
+                img.dataset.loaded = '1';
+                var postId = img.dataset.postId;
+                fetch('https://danbooru.donmai.us/posts/' + postId + '.json')
+                    .then(function(r) { return r.json(); })
+                    .then(function(data) {
+                        if (data.preview_file_url) {
+                            img.src = data.preview_file_url;
+                            img.style.display = '';
+                        }
+                    })
+                    .catch(function() { img.style.display = 'none'; });
+            });
+        }
+
         let _detailState = {tag: '', enWiki: '', cnWiki: '', tab: 'en'};
         let _searchSeq = 0;  // 搜索序列守卫，丢弃过期响应避免快速搜索时旧结果覆盖新结果
         // 搜索结果增量渲染：FTS 后可一次取数百条，但一次性渲染全部 DOM 节点（滚动卡顿）。
@@ -293,7 +369,13 @@
             if (lang === 'en') {
                 tabEn.className = 'px-3 py-1 text-sm bg-primary text-white rounded-lg';
                 tabZh.className = 'px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg';
-                view.textContent = _detailState.enWiki || '(该标签暂无英文 wiki)';
+                // 英文 wiki 用 DText 渲染（[[标签]]链接 + !post 图片）
+                if (_detailState.enWiki) {
+                    view.innerHTML = renderDText(_detailState.enWiki);
+                    _dtextLoadThumbnails(view);
+                } else {
+                    view.textContent = '(该标签暂无英文 wiki)';
+                }
             } else {
                 tabZh.className = 'px-3 py-1 text-sm bg-primary text-white rounded-lg';
                 tabEn.className = 'px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg';
@@ -352,9 +434,14 @@
             editor.classList.add('hidden');
             view.classList.remove('hidden');
             if (restoreView) {
-                // 回到只读视图时用最新的 _detailState 重渲染文本
+                // 回到只读视图时用最新的 _detailState 重渲染（英文用 DText，中文纯文本）
                 if (_detailState.tab === 'en') {
-                    view.textContent = _detailState.enWiki || '(该标签暂无英文 wiki)';
+                    if (_detailState.enWiki) {
+                        view.innerHTML = renderDText(_detailState.enWiki);
+                        _dtextLoadThumbnails(view);
+                    } else {
+                        view.textContent = '(该标签暂无英文 wiki)';
+                    }
                 } else {
                     view.textContent = _detailState.cnWiki
                         || (_detailState.enWiki ? '(暂无中文 wiki，可点击"翻译并保存"生成，或点"编辑"手写)' : '(该标签暂无 wiki)');
