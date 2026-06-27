@@ -438,9 +438,11 @@ def tag_detail(tag):
     try:
         from build_tag_db import lookup_tags
         rows = lookup_tags(conn, [tag])
-        if tag not in rows:
+        # lookup_tags 返回的 key 是规范化后的（小写+下划线），不能用原始 tag 直接 in 检查
+        norm = tag.strip().replace(' ', '_').lower()
+        if norm not in rows:
             return jsonify({'tag': tag, 'cn_name': '', 'en_wiki': '', 'cn_wiki': '', 'other_names': '[]'})
-        info = rows[tag]
+        info = rows[norm]
         return jsonify({'tag': tag, **info})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
