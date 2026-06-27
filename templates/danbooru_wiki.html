@@ -360,6 +360,9 @@
 
         // === 标签详情 ===
         function showTagDetail(tag) {
+            // 同步搜索框：打开任何详情时都把标签名写入搜索框，
+            // 确保搜索框始终反映当前查看的标签，后续操作基于搜索框内容
+            document.getElementById('search-input').value = tag;
             fetch('/tag_detail/' + encodeURIComponent(tag))
                 .then(r => r.json())
                 .then(data => {
