@@ -62,37 +62,30 @@
 
     <!-- 主内容 -->
     <main class="flex-grow container mx-auto px-4 py-4">
-        <!-- 搜索栏 -->
-        <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-4 mb-4">
+        <!-- 搜索栏 + 下拉结果 -->
+        <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-4 mb-4 relative">
             <div class="flex gap-2">
                 <div class="flex-1 relative">
                     <i class="fa fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"></i>
-                    <input id="search-input" type="text" class="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary transition-colors" placeholder="搜索标签（英文/中文/别名）..." onkeydown="if(event.key==='Enter')searchTags()">
+                    <input id="search-input" type="text" autocomplete="off" class="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary transition-colors" placeholder="搜索标签（英文/中文/别名）..." onkeydown="if(event.key==='Enter')searchTags()">
                 </div>
                 <button class="px-4 py-2 bg-primary hover:bg-primary/90 text-white rounded-lg text-sm font-medium transition-colors" onclick="searchTags()">
                     <i class="fa fa-search mr-1"></i>搜索
                 </button>
             </div>
+            <!-- 下拉搜索结果（绝对定位，悬浮在搜索栏下方） -->
+            <div id="search-dropdown" class="hidden absolute left-4 right-4 top-full mt-1 bg-white rounded-lg shadow-xl border border-gray-200 max-h-80 overflow-y-auto z-50">
+                <div id="search-results"></div>
+            </div>
         </div>
 
-        <div class="flex gap-3" style="height:calc(100vh - 180px)">
-            <!-- 左侧：搜索结果列表 -->
-            <div class="w-80 flex-shrink-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
-                <div class="px-3 py-2 bg-gray-50 border-b border-gray-200 font-semibold text-xs text-gray-500 uppercase tracking-wide flex items-center justify-between">
-                    <span>搜索结果</span>
-                    <span id="result-count" class="text-xs text-gray-400 font-normal"></span>
-                </div>
-                <div id="search-results" class="flex-grow overflow-y-auto">
-                    <div class="p-8 text-center text-gray-300 text-sm">输入关键词搜索标签</div>
-                </div>
-            </div>
-
-            <!-- 右侧：标签详情 -->
-            <div class="flex-grow bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+        <div style="height:calc(100vh - 140px)">
+            <!-- 标签详情（全宽） -->
+            <div class="h-full bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
                 <div id="detail-empty" class="flex-grow flex items-center justify-center text-gray-300 text-sm">
                     <div class="text-center">
                         <i class="fa fa-book text-gray-200 text-6xl mb-4"></i>
-                        <p>点击左侧标签查看详情</p>
+                        <p>搜索并点击标签查看详情</p>
                     </div>
                 </div>
                 <div id="detail-card" class="hidden flex-grow flex flex-col overflow-hidden">
@@ -249,7 +242,7 @@
         // 渲染单条结果项（复用，避免重复 HTML 拼接逻辑）
         function _renderSearchItem(item) {
             const cn = (item.cn_name || '').split(',')[0];
-            return '<div class="px-3 py-2 border-b border-gray-100 hover:bg-primary/5 cursor-pointer transition-colors" onclick="showTagDetail(\'' + escapeAttr(item.name) + '\')">'
+            return '<div class="px-3 py-2 border-b border-gray-100 hover:bg-primary/5 cursor-pointer transition-colors" onclick="showTagDetail(\'' + escapeAttr(item.name) + '\');closeSearchDropdown()">'
                 + '<span class="font-medium text-sm text-gray-800 truncate block">' + escapeHtml(item.name) + '</span>'
                 + (cn ? '<span class="text-xs text-gray-500 truncate block">' + escapeHtml(cn) + '</span>' : '')
                 + '</div>';
@@ -267,12 +260,22 @@
         }
 
         // === 搜索 ===
+        function openSearchDropdown() { document.getElementById('search-dropdown').classList.remove('hidden'); }
+        function closeSearchDropdown() { document.getElementById('search-dropdown').classList.add('hidden'); }
+        // 点击搜索栏外部关闭下拉
+        document.addEventListener('click', function(e) {
+            const dropdown = document.getElementById('search-dropdown');
+            const searchBox = e.target.closest('.relative');
+            if (!dropdown.contains(e.target) && !searchBox) closeSearchDropdown();
+        });
+
         function searchTags() {
             const keyword = document.getElementById('search-input').value.trim();
             if (!keyword) return;
             const seq = ++_searchSeq;
             const resultsEl = document.getElementById('search-results');
-            resultsEl.innerHTML = '<div class="p-8 text-center text-gray-400 text-sm"><i class="fa fa-spinner fa-spin mr-1"></i>搜索中...</div>';
+            resultsEl.innerHTML = '<div class="p-4 text-center text-gray-400 text-sm"><i class="fa fa-spinner fa-spin mr-1"></i>搜索中...</div>';
+            openSearchDropdown();
 
             fetch('/danbooru_search', {
                 method: 'POST',
@@ -283,14 +286,13 @@
             .then(data => {
                 if (seq !== _searchSeq) return;  // 过期响应（用户已发起新搜索），丢弃
                 if (data.error) {
-                    resultsEl.innerHTML = '<div class="p-8 text-center text-red-400 text-sm">' + data.error + '</div>';
+                    resultsEl.innerHTML = '<div class="p-4 text-center text-red-400 text-sm">' + data.error + '</div>';
                     return;
                 }
                 const results = data.results || [];
-                document.getElementById('result-count').textContent = results.length + ' 条';
                 if (results.length === 0) {
                     _searchResults = []; _searchRendered = 0;
-                    resultsEl.innerHTML = '<div class="p-8 text-center text-gray-300 text-sm">无匹配标签</div>';
+                    resultsEl.innerHTML = '<div class="p-4 text-center text-gray-300 text-sm">无匹配标签</div>';
                     return;
                 }
                 // 存完整结果，先渲染首页，剩余滚动时增量加载
@@ -301,14 +303,13 @@
             })
             .catch(() => {
                 if (seq !== _searchSeq) return;
-                resultsEl.innerHTML = '<div class="p-8 text-center text-red-400 text-sm">请求失败</div>';
+                resultsEl.innerHTML = '<div class="p-4 text-center text-red-400 text-sm">请求失败</div>';
             });
         }
 
-        // 滚动加载：结果列表滚到底部时追加下一批
-        document.getElementById('search-results').addEventListener('scroll', function() {
+        // 滚动加载：下拉结果滚到底部时追加下一批
+        document.getElementById('search-dropdown').addEventListener('scroll', function() {
             if (_searchRendered >= _searchResults.length) return;  // 已全部渲染
-            // 距底部 < 80px 时触发加载（提前预取，滚动更顺滑）
             if (this.scrollHeight - this.scrollTop - this.clientHeight < 80) {
                 appendSearchResults();
             }

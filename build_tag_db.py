@@ -390,7 +390,7 @@ def search_tags(conn, keyword, limit=20):
             SELECT name, cn_name, en_wiki, cn_wiki, other_names FROM tags WHERE rowid IN (
                 SELECT rowid FROM tags_fts WHERE tags_fts MATCH ?
             )
-            ORDER BY name
+            ORDER BY length(name), name
             LIMIT ?
             """,
             (match_expr, limit)
@@ -404,7 +404,7 @@ def search_tags(conn, keyword, limit=20):
             WHERE REPLACE(name, '-', '_') LIKE ? ESCAPE '\\'
                OR cn_name LIKE ? ESCAPE '\\'
                OR REPLACE(other_names, '-', '_') LIKE ? ESCAPE '\\'
-            ORDER BY name
+            ORDER BY length(name), name
             LIMIT ?
             """,
             (name_pat, cn_pat, name_pat, limit)
