@@ -94,6 +94,10 @@
                         <div class="flex items-baseline gap-3 flex-wrap">
                             <h2 id="d-name" class="text-2xl font-bold text-dark"></h2>
                             <span id="d-cn-name" class="text-lg text-gray-600"></span>
+                            <!-- 翻译标签名按钮：cn_name 为空时显示 -->
+                            <button id="d-translate-name-btn" class="hidden px-3 py-1 text-xs bg-primary hover:bg-primary/90 text-white rounded-lg transition-colors" onclick="translateTagName()">
+                                <i class="fa fa-language mr-1"></i>翻译标签名
+                            </button>
                         </div>
                         <div id="d-other-names-wrap" class="hidden items-center gap-1.5 mt-2 text-xs text-gray-400 flex-wrap">
                             <i class="fa fa-tags"></i><span>别名：</span><span id="d-other-names" class="font-medium text-gray-600"></span>
@@ -384,7 +388,15 @@
             document.getElementById('detail-card').classList.remove('hidden');
 
             document.getElementById('d-name').textContent = data.tag;
-            document.getElementById('d-cn-name').textContent = (data.cn_name || '').split(',')[0] || '';
+            const cnName = (data.cn_name || '').split(',')[0].trim();
+            document.getElementById('d-cn-name').textContent = cnName;
+            // cn_name 为空时显示「翻译标签名」按钮
+            const translateNameBtn = document.getElementById('d-translate-name-btn');
+            if (!cnName) {
+                translateNameBtn.classList.remove('hidden');
+            } else {
+                translateNameBtn.classList.add('hidden');
+            }
 
             // 别名（other_names 为 JSON 数组字符串）
             const onw = document.getElementById('d-other-names-wrap');
@@ -400,6 +412,42 @@
             }
 
             switchWikiTab('en');
+        }
+
+        // 翻译英文标签名为中文（调 /translate_tags，回写 SQLite cn_name）
+        function translateTagName() {
+            const tag = _detailState.tag;
+            if (!tag) return;
+            const btn = document.getElementById('d-translate-name-btn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-1"></i>翻译中...';
+            fetch('/translate_tags', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({tags: [tag], src: 'en', dst: 'zh'})
+            })
+            .then(r => r.json())
+            .then(data => {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fa fa-language mr-1"></i>翻译标签名';
+                if (data.error) {
+                    showNotification('翻译失败：' + data.error, 'error');
+                    return;
+                }
+                const cn = (data.translations && data.translations[0]) || '';
+                if (cn) {
+                    document.getElementById('d-cn-name').textContent = cn.split(',')[0];
+                    btn.classList.add('hidden');
+                    showNotification('标签名已翻译：' + cn.split(',')[0], 'success');
+                } else {
+                    showNotification('翻译结果为空', 'warning');
+                }
+            })
+            .catch(() => {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fa fa-language mr-1"></i>翻译标签名';
+                showNotification('请求失败', 'error');
+            });
         }
 
         let _wikiEditing = false;  // 是否处于编辑态（跨 tab 切换时强制退出）
