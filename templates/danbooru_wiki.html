@@ -94,6 +94,8 @@
                         <div class="flex items-baseline gap-3 flex-wrap">
                             <h2 id="d-name" class="text-2xl font-bold text-dark"></h2>
                             <span id="d-cn-name" class="text-lg text-gray-600"></span>
+                            <span id="d-category" class="hidden px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-700"></span>
+                            <span id="d-post-count" class="hidden text-xs text-gray-400"></span>
                             <!-- 翻译标签名按钮：cn_name 为空时显示 -->
                             <button id="d-translate-name-btn" class="hidden px-3 py-1 text-xs bg-primary hover:bg-primary/90 text-white rounded-lg transition-colors" onclick="translateTagName()">
                                 <i class="fa fa-language mr-1"></i>翻译标签名
@@ -246,8 +248,12 @@
         // 渲染单条结果项（复用，避免重复 HTML 拼接逻辑）
         function _renderSearchItem(item) {
             const cn = (item.cn_name || '').split(',')[0];
+            const pc = item.post_count > 0 ? '<span class="text-xs text-gray-400 ml-1">' + (item.post_count >= 1000 ? (item.post_count/1000).toFixed(0)+'k' : item.post_count) + '</span>' : '';
             return '<div class="px-3 py-2 border-b border-gray-100 hover:bg-primary/5 cursor-pointer transition-colors" onclick="showTagDetail(\'' + escapeAttr(item.name) + '\');closeSearchDropdown()">'
-                + '<span class="font-medium text-sm text-gray-800 truncate block">' + escapeHtml(item.name) + '</span>'
+                + '<div class="flex items-baseline justify-between">'
+                + '<span class="font-medium text-sm text-gray-800 truncate">' + escapeHtml(item.name) + '</span>'
+                + pc
+                + '</div>'
                 + (cn ? '<span class="text-xs text-gray-500 truncate block">' + escapeHtml(cn) + '</span>' : '')
                 + '</div>';
         }
@@ -396,6 +402,23 @@
                 translateNameBtn.classList.remove('hidden');
             } else {
                 translateNameBtn.classList.add('hidden');
+            }
+            // 分类标签 + 使用次数
+            const catMap = {0: '通用', 1: '艺术家', 3: '版权', 4: '角色', 5: '元数据'};
+            const catBadge = document.getElementById('d-category');
+            const catName = catMap[data.category];
+            if (catName) {
+                catBadge.textContent = catName;
+                catBadge.classList.remove('hidden');
+            } else {
+                catBadge.classList.add('hidden');
+            }
+            const pcEl = document.getElementById('d-post-count');
+            if (data.post_count > 0) {
+                pcEl.textContent = data.post_count.toLocaleString() + ' 张';
+                pcEl.classList.remove('hidden');
+            } else {
+                pcEl.classList.add('hidden');
             }
 
             // 别名（other_names 为 JSON 数组字符串）

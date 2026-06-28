@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS tags (
     en_wiki     TEXT NOT NULL DEFAULT '',
     cn_wiki     TEXT NOT NULL DEFAULT '',
     other_names TEXT NOT NULL DEFAULT '[]',   -- JSON 数组字符串（多语言别名）
+    category    INTEGER NOT NULL DEFAULT -1,  -- Danbooru 标签分类：0=通用/1=艺术家/3=版权/4=角色/5=元数据，-1=未知
+    post_count  INTEGER NOT NULL DEFAULT 0,   -- Danbooru 使用该标签的图片数（热门度，用于搜索排序）
     updated_at  TEXT NOT NULL DEFAULT ''
 );
 """
@@ -99,8 +101,9 @@ def _rebuild_fts_index(conn):
         SELECT rowid, REPLACE(name, '-', '_'), other_names, cn_name FROM tags
     """)
 
-# 已废弃的旧列名（用于迁移检测）。迁移时若 tags 表含任一此列，则重建为精简结构。
-_LEGACY_COLUMNS = ('category', 'post_count', 'nsfw')
+# 已废弃的旧列名（用于迁移检测）。迁移时若 tags 表含任一此列，则重建为目标结构。
+# 注意：category/post_count 曾在早期版本存在后被移除，现在重新加入。nsfw 仍属废弃。
+_LEGACY_COLUMNS = ('nsfw',)
 
 
 def _has_legacy_columns(conn):
@@ -110,20 +113,24 @@ def _has_legacy_columns(conn):
 
 
 def _migrate_to_target_schema(conn):
-    """把任意旧 schema 迁移为当前目标结构（name/cn_name/en_wiki/cn_wiki/other_names/updated_at）。
-    保留这些列里已有的数据，丢弃其他列；缺失的列补默认值。无事务包裹：调用方负责 commit。
+    """把任意旧 schema 迁移为当前目标结构
+    （name/cn_name/en_wiki/cn_wiki/other_names/category/post_count/updated_at）。
+    保留已有数据，丢弃其他列；缺失的列补默认值。无事务包裹：调用方负责 commit。
     若已是目标 schema 则无操作。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(tags)").fetchall()}
-    target = {'name', 'cn_name', 'en_wiki', 'cn_wiki', 'other_names', 'updated_at'}
+    target = {'name', 'cn_name', 'en_wiki', 'cn_wiki', 'other_names', 'category', 'post_count', 'updated_at'}
     if cols == target:
         return False
-    # 重建：仅 SELECT 目标列（缺失列用 NULL→COALESCE 补默认）。旧索引随旧表 DROP。
-    select_cols = []
-    for c in ['name', 'cn_name', 'en_wiki', 'cn_wiki', 'updated_at']:
-        select_cols.append(c if c in cols else "'' AS " + c)
+    # 重建：仅 SELECT 目标列（缺失列用 COALESCE 补默认）。旧索引随旧表 DROP。
+    select_parts = []
+    for c in ['name', 'cn_name', 'en_wiki', 'cn_wiki']:
+        select_parts.append(c if c in cols else "'' AS " + c)
     # other_names 缺失时补 '[]'
-    on_expr = 'other_names' if 'other_names' in cols else "'[]' AS other_names"
-    select_cols.insert(4, on_expr)
+    select_parts.append('other_names' if 'other_names' in cols else "'[]' AS other_names")
+    # category/post_count 缺失时补默认值；旧库可能有这些列（保留原值）
+    select_parts.append('category' if 'category' in cols else '-1 AS category')
+    select_parts.append('post_count' if 'post_count' in cols else '0 AS post_count')
+    select_parts.append('updated_at' if 'updated_at' in cols else "'' AS updated_at")
     conn.executescript(f"""
         CREATE TABLE tags_new (
             name        TEXT PRIMARY KEY,
@@ -131,17 +138,24 @@ def _migrate_to_target_schema(conn):
             en_wiki     TEXT NOT NULL DEFAULT '',
             cn_wiki     TEXT NOT NULL DEFAULT '',
             other_names TEXT NOT NULL DEFAULT '[]',
+            category    INTEGER NOT NULL DEFAULT -1,
+            post_count  INTEGER NOT NULL DEFAULT 0,
             updated_at  TEXT NOT NULL DEFAULT ''
         );
-        INSERT INTO tags_new (name, cn_name, en_wiki, cn_wiki, other_names, updated_at)
-        SELECT {', '.join(select_cols)} FROM tags;
+        INSERT INTO tags_new (name, cn_name, en_wiki, cn_wiki, other_names, category, post_count, updated_at)
+        SELECT {', '.join(select_parts)} FROM tags;
         DROP TABLE tags;
         ALTER TABLE tags_new RENAME TO tags;
     """)
-    # 迁移后 tags 的 rowid 重排，FTS 索引（若存在）的 rowid 已失效，清空待 get_conn 重建。
-    # FTS 表可能尚未创建（首次升级的旧库），用 IF EXISTS 防御。
+    # 迁移后 tags 的 rowid 重排，FTS 索引（若存在）的 rowid 已失效。
+    # contentless FTS5 表不支持 DELETE，直接 DROP 表 + 触发器，由 get_conn → _ensure_fts_index 重建。
     if _table_exists(conn, 'tags_fts'):
-        conn.execute("DELETE FROM tags_fts")
+        conn.executescript("""
+            DROP TABLE IF EXISTS tags_fts;
+            DROP TRIGGER IF EXISTS tags_fts_ai;
+            DROP TRIGGER IF EXISTS tags_fts_ad;
+            DROP TRIGGER IF EXISTS tags_fts_au;
+        """)
     return True
 
 
@@ -251,13 +265,14 @@ def lookup_tags(conn, tags):
         chunk = norm_list[i:i+BATCH]
         placeholders = ','.join('?' * len(chunk))
         rows = conn.execute(
-            f"SELECT name, cn_name, en_wiki, cn_wiki, other_names "
+            f"SELECT name, cn_name, en_wiki, cn_wiki, other_names, category, post_count "
             f"FROM tags WHERE name IN ({placeholders})",
             chunk
         ).fetchall()
         for r in rows:
             result[r[0]] = {
                 'cn_name': r[1], 'en_wiki': r[2], 'cn_wiki': r[3], 'other_names': r[4],
+                'category': r[5], 'post_count': r[6],
             }
     return result
 
@@ -328,6 +343,23 @@ def upsert_wiki_incremental(conn, name, en_wiki, other_names, updated_at):
     """, (name.strip().replace(' ', '_').lower(), en_wiki, other_names, updated_at))
 
 
+def update_tag_meta(conn, name, category, post_count, commit=True):
+    """更新标签的 category 和 post_count（来自 Danbooru /tags.json）。
+    不受 updated_at 守卫限制（与翻译回写同理），category=-1/post_count=0 时不覆盖已有非默认值。
+    用于增量更新时从 tags.json 补充元数据。"""
+    name = name.strip().replace(' ', '_').lower()
+    if not name:
+        return
+    conn.execute("""
+        INSERT INTO tags (name, category, post_count) VALUES (?, ?, ?)
+        ON CONFLICT(name) DO UPDATE SET
+            category = CASE WHEN excluded.category >= 0 THEN excluded.category ELSE tags.category END,
+            post_count = CASE WHEN excluded.post_count > 0 THEN excluded.post_count ELSE tags.post_count END
+    """, (name, category, post_count))
+    if commit:
+        conn.commit()
+
+
 def lookup_tag_by_cn(conn, cn_name):
     """反向查找：中文翻译 → 英文标签名（中译英用）。返回英文 name 或空字符串。
     匹配 cn_name 的第一个逗号分隔项（cn_name 可能是"蓝发,蓝色头发"多词形式）。
@@ -387,10 +419,10 @@ def search_tags(conn, keyword, limit=20):
         match_expr = 'name_norm:"{0}" OR other_names:"{0}" OR cn_name:"{1}"'.format(fts_q_norm, fts_q_kw)
         rows = conn.execute(
             """
-            SELECT name, cn_name, en_wiki, cn_wiki, other_names FROM tags WHERE rowid IN (
+            SELECT name, cn_name, en_wiki, cn_wiki, other_names, category, post_count FROM tags WHERE rowid IN (
                 SELECT rowid FROM tags_fts WHERE tags_fts MATCH ?
             )
-            ORDER BY length(name), name
+            ORDER BY post_count DESC, length(name), name
             LIMIT ?
             """,
             (match_expr, limit)
@@ -399,18 +431,19 @@ def search_tags(conn, keyword, limit=20):
         # 短 keyword（<3 字符，trigram 无效）或 FTS 未建：回退全表 LIKE
         rows = conn.execute(
             """
-            SELECT name, cn_name, en_wiki, cn_wiki, other_names
+            SELECT name, cn_name, en_wiki, cn_wiki, other_names, category, post_count
             FROM tags
             WHERE REPLACE(name, '-', '_') LIKE ? ESCAPE '\\'
                OR cn_name LIKE ? ESCAPE '\\'
                OR REPLACE(other_names, '-', '_') LIKE ? ESCAPE '\\'
-            ORDER BY length(name), name
+            ORDER BY post_count DESC, length(name), name
             LIMIT ?
             """,
             (name_pat, cn_pat, name_pat, limit)
         ).fetchall()
     return [{
         'name': r[0], 'cn_name': r[1], 'en_wiki': r[2], 'cn_wiki': r[3], 'other_names': r[4],
+        'category': r[5], 'post_count': r[6],
     } for r in rows]
 
 
@@ -691,6 +724,58 @@ def update_from_danbooru(db_path, verbose=True, progress_callback=None):
                         f.write(f'{current_upper_bound}\n')
                 print(f'[BuildTagDB] 已抓 {pages_done} 页，检查点已保存，休息 {pause_secs}s')
                 time.sleep(pause_secs)
+
+        # --- 第二阶段：从 tags.json 补充 category/post_count ---
+        # wiki_pages.json 不提供这些字段，需单独抓 tags.json。
+        # 只抓本地已有标签（WHERE name IN (...)），避免抓全部 50 万标签。
+        # 分批查询（每批 100 个标签名，用 search[name] 不支持批量，改用 search[hide_empty]=no + 逐页）。
+        # 实际做法：抓 tags.json 按页翻（与 wiki 同模式），只更新本地已存在的标签。
+        try:
+            tags_api_url = danbooru_cfg['api_url'].rstrip('/') + '/tags.json'
+            tags_updated = 0
+            tags_page = 1
+            tags_done = False
+            print('[BuildTagDB] 开始从 tags.json 补充 category/post_count...')
+            _emit({'type': 'progress', 'page': 1, 'new_count': new_count})  # 通知前端进入第二阶段
+            while not tags_done:
+                tags_params = {'limit': page_limit, 'page': tags_page, 'search[order]': 'count'}
+                try:
+                    tags_resp = session.get(tags_api_url, params=tags_params, timeout=danbooru_cfg['timeout'])
+                except Exception as e:
+                    print(f'[BuildTagDB] tags.json 网络异常: {e}，跳过 post_count 补充')
+                    break
+                if tags_resp.status_code == 429:
+                    consecutive_429 += 1
+                    time.sleep(min(60 * (2 ** (consecutive_429 - 1)), 300))
+                    continue
+                consecutive_429 = 0
+                if tags_resp.status_code != 200:
+                    print(f'[BuildTagDB] tags.json HTTP {tags_resp.status_code}，跳过 post_count 补充')
+                    break
+                tags_data = tags_resp.json()
+                if not tags_data:
+                    break
+                batch_count = 0
+                for entry in tags_data:
+                    tname = (entry.get('name') or '').strip().replace(' ', '_').lower()
+                    if not tname:
+                        continue
+                    cat = int(entry.get('category', -1))
+                    pc = int(entry.get('post_count', 0))
+                    update_tag_meta(conn, tname, cat, pc, commit=False)
+                    batch_count += 1
+                    tags_updated += 1
+                conn.commit()
+                tags_page += 1
+                _emit({'type': 'progress', 'page': tags_page, 'new_count': new_count})
+                time.sleep(delay_base + random.random() * delay_jitter)
+                # tags.json 按 count 降序，热门标签在前；到一定页数后剩余的都是冷门标签（post_count≈0），可提前停止
+                if tags_page > 500:
+                    print(f'[BuildTagDB] tags.json 抓取到 {tags_page} 页，停止（剩余冷门标签 post_count≈0）')
+                    break
+            print(f'[BuildTagDB] category/post_count 补充完成，更新 {tags_updated} 条')
+        except Exception as e:
+            print(f'[BuildTagDB] tags.json 补充失败（不影响 wiki 数据）: {e}')
 
         # 清理断点文件
         if progress_file.exists():
