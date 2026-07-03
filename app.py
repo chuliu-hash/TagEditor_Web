@@ -28,7 +28,13 @@ app.register_blueprint(image_editor_bp)
 
 @app.route('/')
 def index():
-    """主页"""
+    """Danbooru 标签查询页面（wiki 风格，搜索本地标签数据库）"""
+    return render_template('danbooru_wiki.html')
+
+
+@app.route('/tag_editor')
+def tag_editor():
+    """标签编辑主页"""
     images = get_image_files(app.config['UPLOAD_FOLDER'])
     return render_template('tag_editor.html', images=images, image_count=len(images))
 
@@ -38,12 +44,6 @@ def editor():
     """图片编辑器页面"""
     images = get_image_files(app.config['UPLOAD_FOLDER'])
     return render_template('image_editor.html', images=images, image_count=len(images))
-
-
-@app.route('/danbooru')
-def danbooru():
-    """Danbooru 标签查询页面（wiki 风格，搜索本地标签数据库）"""
-    return render_template('danbooru_wiki.html')
 
 
 def _preheat_models():

@@ -5,32 +5,12 @@
 已移除 translation_cache.json 缓存层，所有翻译持久化到 SQLite。
 """
 import os
-import re
 import json
-import requests
 from flask import Blueprint, request, jsonify, current_app, Response
-from config import load_env, get_llm_config
 from sse_utils import sse_event
 
 translation_bp = Blueprint('translation', __name__)
 
-# 进程级 requests.Session：HTTP 连接池复用（keep-alive）。
-# 批量翻译会对同一 LLM 端点连续发多次请求，复用 TCP/TLS 连接省去每次握手的 ~100ms 开销，
-# 翻译数百标签时累积省时显著。单用户本地工具，LLM 请求串行发起（batch_translate 串行循环），
-# 无并发写同一 Session。
-_llm_session = requests.Session()
-
-# 线程局部 Session：并发批处理时每个工作线程用自己的 Session（requests.Session 非线程安全，
-# 多线程共享同一 Session 会损坏连接池）。线程退出时自动释放连接。
-import threading as _threading
-_thread_local = _threading.local()
-def _get_thread_session():
-    """获取当前线程的 requests.Session（线程隔离，并发安全）。"""
-    s = getattr(_thread_local, 'session', None)
-    if s is None:
-        s = requests.Session()
-        _thread_local.session = s
-    return s
 
 # 本地 SQLite 连接（懒加载，进程级单例）。None 表示 DB 暂不可用。
 # 使用 check_same_thread=False 允许 Flask 多请求（不同线程）复用同一连接。
@@ -51,18 +31,21 @@ def _get_tag_db_conn():
         return _tag_db_conn
     try:
         import sqlite3
-        from build_tag_db import SCHEMA, _ensure_fts_index, _rebuild_fts_index, _table_exists
+        from build_tag_db import SCHEMA, _ensure_fts_index, _rebuild_fts_index, _table_exists, _migrate_to_target_schema
         from config import get_tag_db_config
         db_path = get_tag_db_config()['db_path']
-        if not os.path.isfile(db_path):
-            _tag_db_available = False
-            return None
+
+        # sqlite3.connect 会自动创建不存在的文件，所以不需要提前检查 os.path.isfile
         # check_same_thread=False 允许跨线程；busy_timeout 让写锁竞争时等待而非立即报错；
         # journal_mode=WAL 允许「增量更新写」与本连接「读」并发不阻塞
         _tag_db_conn = sqlite3.connect(db_path, check_same_thread=False, timeout=5)
+        _tag_db_conn.row_factory = sqlite3.Row
         _tag_db_conn.execute('PRAGMA busy_timeout = 5000')
         _tag_db_conn.execute('PRAGMA journal_mode = WAL')
         _tag_db_conn.executescript(SCHEMA)
+        # 旧库兼容：列集合与目标不符就迁移
+        if _migrate_to_target_schema(_tag_db_conn):
+            _tag_db_conn.commit()
         # FTS5 全文索引（search_tags 加速）：建表 + 触发器；空则补数据
         _ensure_fts_index(_tag_db_conn)
         fts_count = _tag_db_conn.execute("SELECT count(*) FROM tags_fts").fetchone()[0]
@@ -73,6 +56,8 @@ def _get_tag_db_conn():
         _tag_db_available = True
         return _tag_db_conn
     except Exception:
+        import traceback
+        traceback.print_exc()
         _tag_db_conn = None
         _tag_db_available = False
         return None
@@ -121,101 +106,7 @@ def _lookup_en_from_db(cn_names):
         return {}
 
 
-def _fetch_en_wiki_from_db(tags):
-    """从 SQLite 批量取英文 wiki（en_wiki 列），供 LLM 翻译时作参考上下文。
-    返回 {tag: en_wiki_str}，key 为原始 tag（带空格），与 _lookup_cn_from_db 保持一致。"""
-    conn = _get_tag_db_conn()
-    if conn is None or not tags:
-        return {}
-    try:
-        from build_tag_db import lookup_tags
-        rows = lookup_tags(conn, tags)
-        result = {}
-        for tag in tags:  # 用原始 tag 作 key
-            norm = tag.strip().replace(' ', '_').lower()  # 与 lookup_tags 内部规范化一致
-            info = rows.get(norm)
-            if info:
-                wiki = (info.get('en_wiki') or '').strip()
-                if wiki:
-                    result[tag] = wiki
-        return result
-    except Exception:
-        return {}
-
-
-def _build_prompt_with_bodies(tags, bodies):
-    """构造带英文 wiki 参考的 user message（仅 en→zh 时用）。
-    要求 LLM 只返回翻译后的字符串数组（与 _llm_translate_tags 返回解析兼容）。"""
-    lines = ['请翻译以下标签为中文。部分标签附带英文释义供参考，但只返回翻译后的中文标签名（JSON 字符串数组，与输入顺序一致）。', '']
-    for i, tag in enumerate(tags, start=1):
-        body = bodies.get(tag, '')
-        if body:
-            body_short = body[:300].replace('\n', ' ')
-            lines.append(f'{i}. {tag}')
-            lines.append(f'   释义: {body_short}')
-        else:
-            lines.append(f'{i}. {tag}')
-            lines.append('   释义: (无)')
-    return '\n'.join(lines)
-
-
-def _llm_call_with_retry(session, api_url, headers, payload, max_retries=3):
-    """发送 LLM 请求，429/网络异常时指数退避重试。返回 (response, error)。
-    并发批处理时各工作线程用线程局部 Session 调用，429 退避避免限流整批失败。"""
-    import time as _time
-    s = session if session is not None else _llm_session
-    response = None
-    for attempt in range(max_retries + 1):
-        try:
-            response = s.post(api_url, headers=headers, json=payload, timeout=120)
-        except Exception as e:
-            if attempt < max_retries:
-                _time.sleep(2 ** attempt)  # 2s→4s→8s
-                continue
-            return None, f'网络异常: {e}'
-        if response.status_code == 429 and attempt < max_retries:
-            _time.sleep(2 ** attempt)
-            continue
-        break
-    return response, None
-
-
-def _llm_translate_tags(cfg, tags, src_name, dst_name, session=None, bodies=None):
-    """调用 LLM 翻译一批标签。返回 (translations, error)。
-    成功：translations 为与 tags 等长的列表，error 为 None。
-    失败：translations 为 None，error 为错误消息。
-
-    session：可选 requests.Session。并发批处理时传线程局部 Session（_get_thread_session）。
-    bodies：可选预取的英文 wiki 上下文 {tag: wiki}。并发场景下由主线程预取传入，
-        避免工作线程并发读共享 SQLite 连接（线程不安全）。
-    429 限流：指数退避重试（2s→4s→8s，最多 3 次）。"""
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {cfg["api_key"]}',
-    }
-    if bodies is None:
-        bodies = _fetch_en_wiki_from_db(tags) if (src_name == '英文' and dst_name == '中文') else {}
-    user_content = _build_prompt_with_bodies(tags, bodies) if bodies else json.dumps(tags, ensure_ascii=False)
-    payload = {
-        'model': cfg['model'],
-        'messages': [
-            {'role': 'system', 'content': cfg['prompt'].format(src_name=src_name, dst_name=dst_name)},
-            {'role': 'user', 'content': user_content},
-        ],
-        'temperature': 0.3,
-    }
-    response, err = _llm_call_with_retry(session, cfg['api_url'], headers, payload)
-    if err:
-        return None, err
-    result = response.json()
-    if 'error' in result:
-        return None, result['error'].get('message', '未知错误')
-    content = result['choices'][0]['message']['content'].strip()
-    match = re.search(r'\[.*?\]', content, re.DOTALL)
-    translations = json.loads(match.group()) if match else [content] * len(tags)
-    while len(translations) < len(tags):
-        translations.append('')
-    return translations[:len(tags)], None
+import threading as _threading
 
 
 @translation_bp.route('/lookup_cache', methods=['POST'])
@@ -241,185 +132,426 @@ def lookup_cache():
     return jsonify({'translations': translations})
 
 
-@translation_bp.route('/translate_tags', methods=['POST'])
-def translate_tags():
-    """批量翻译标签。SQLite 未命中的走 LLM，结果回写 SQLite。"""
-    data = request.get_json()
-    tags = data.get('tags', [])
-    src = data.get('src', 'en')
-    dst = data.get('dst', 'zh')
-    if not tags:
-        return jsonify({'translations': []})
-
-    isEn2Zh = (src == 'en' and dst == 'zh')
-    isZh2En = (src == 'zh' and dst == 'en')
-
-    # 层 1：SQLite 查询
-    results = [None] * len(tags)
-    if isEn2Zh:
-        hits = _lookup_cn_from_db(tags)
-    elif isZh2En:
-        hits = _lookup_en_from_db(tags)
-    else:
-        hits = {}
-    uncached = []
-    uncached_indices = []
-    for i, tag in enumerate(tags):
-        if tag in hits:
-            results[i] = hits[tag]
-        else:
-            uncached.append(tag)
-            uncached_indices.append(i)
-
-    if not uncached:
-        return jsonify({'translations': [r or '' for r in results]})
-
-    # 层 2：LLM 翻译
-    cfg = get_llm_config()
-    if not cfg['prompt']:
-        return jsonify({'error': '未配置翻译系统提示（LLM_TAG_TRANSLATE_PROMPT）'}), 400
-    lang_map = {'zh': '中文', 'en': '英文'}
-    src_name = lang_map.get(src, src)
-    dst_name = lang_map.get(dst, dst)
-
-    try:
-        translations, err = _llm_translate_tags(cfg, uncached, src_name, dst_name)
-        if err:
-            return jsonify({'error': err}), 500
-    except requests.exceptions.Timeout:
-        return jsonify({'error': '翻译超时'}), 504
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-    # 回写 SQLite
-    conn = _get_tag_db_conn()
-    if conn is not None:
-        from build_tag_db import update_translation
-        for j, idx in enumerate(uncached_indices):
-            translated = translations[j]
-            results[idx] = translated
-            if isEn2Zh and translated.strip():
-                update_translation(conn, uncached[j], translated, commit=False)
-            elif isZh2En and translated.strip():
-                # 中译英：translated 是英文标签名，写入时把它作为 name，原中文作为 cn_name
-                update_translation(conn, translated, uncached[j], commit=False)
-        conn.commit()  # 统一提交
-
-    return jsonify({'translations': [r or '' for r in results]})
 
 
-@translation_bp.route('/batch_translate', methods=['POST'])
-def batch_translate():
-    """扫描所有标签文件，将未翻译的标签批量翻译并写回 SQLite（SSE 流式）"""
-    import os  # 函数内 import（必须在 os.listdir 之前；放函数顶部避免 UnboundLocalError）
-    data = request.get_json()
-    src = data.get('src', 'en')
-    dst = data.get('dst', 'zh')
-    upload_dir = current_app.config['UPLOAD_FOLDER']
 
-    isEn2Zh = (src == 'en' and dst == 'zh')
-    isZh2En = (src == 'zh' and dst == 'en')
 
-    # 收集所有标签文件中的标签，去重
-    all_tags = set()
-    file_tags = {}
-    for filename in os.listdir(upload_dir):
-        if not filename.endswith('.txt'):
-            continue
-        txt_path = os.path.join(upload_dir, filename)
-        with open(txt_path, 'r', encoding='utf-8') as f:
-            content = f.read().strip()
-        if not content:
-            continue
-        tags = [t.strip() for t in content.split(',') if t.strip()]
-        file_tags[filename] = tags
-        for tag in tags:
-            all_tags.add(tag)
+# ---------------------------------------------------------------------------
+# 批量翻译数据库标签（标签名 / Wiki）
+# ---------------------------------------------------------------------------
 
-    # 过滤已翻译的（SQLite 已命中的跳过）
-    if isEn2Zh:
-        hits = _lookup_cn_from_db(list(all_tags))
-    elif isZh2En:
-        hits = _lookup_en_from_db(list(all_tags))
-    else:
-        hits = {}
-    to_translate = [t for t in all_tags if t not in hits]
+# ---------------------------------------------------------------------------
+# 管线操作：同步标签库 / 爬取标签组 / LLM 深度翻译
+# ---------------------------------------------------------------------------
 
-    if not to_translate:
-        return jsonify({'translated': 0, 'files': len(file_tags), 'message': '所有标签已翻译'})
-
-    cfg = get_llm_config()
-    if not cfg['prompt']:
-        return jsonify({'error': '未配置翻译系统提示（LLM_TAG_TRANSLATE_PROMPT）'}), 400
-
-    lang_map = {'zh': '中文', 'en': '英文'}
-    src_name = lang_map.get(src, src)
-    dst_name = lang_map.get(dst, dst)
-
-    # 批次大小：每批发送给 LLM 的标签数。越大请求数越少（更快），但单次 prompt 更长，
-    # 过大可能触发 LLM 输出截断或标签对齐丢失。默认 100（实测单批 100 个短标签稳定）。
-    # 可经 LLM_BATCH_SIZE 环境变量覆盖。
-    batch_size = max(10, int(os.environ.get('LLM_BATCH_SIZE', '100')))
-    total_batches = (len(to_translate) + batch_size - 1) // batch_size
-    # 并发度：批量翻译时同时进行的 LLM 请求数。默认 2（保守，避免触发 API 限流；
-    # 配合 _llm_call_with_retry 的 429 指数退避）。可经 LLM_CONCURRENCY 调高（如 3~4）。
-    concurrency = max(1, int(os.environ.get('LLM_CONCURRENCY', '2')))
+@translation_bp.route('/sync_tags_db', methods=['POST'])
+def sync_tags_db():
+    """从上游 GitHub 同步新标签到本地数据库（SSE 流式）。
+    下载 tag.sqlite，筛选 post_count≥100 且 category∈{0,3,4} 的新标签写入。"""
+    from config import get_tag_db_config
+    from sync_tags import _download_sqlite
+    from pathlib import Path
+    db_path = get_tag_db_config()['db_path']
 
     def generate():
-        translated_count = 0
-        error_count = 0
+        # 客户端断开时自动取消
         try:
+            yield from _generate()
+        except GeneratorExit:
+            raise
+
+    def _generate():
+        sqlite_path = str(Path(db_path).parent / 'raw' / 'tag.sqlite')
+        cancel_evt = _register_cancel("sync_tags_db")
+        try:
+            yield sse_event('progress', {'current': 0, 'total': 5, 'item': '准备同步...'})
+            if cancel_evt.is_set():
+                yield sse_event('cancelled', {'new_count': 0, 'update_count': 0, 'message': '已取消'})
+                return
+            Path(sqlite_path).parent.mkdir(parents=True, exist_ok=True)
+
+            yield sse_event('progress', {'current': 1, 'total': 5, 'item': '下载最新 tag.sqlite...'})
+            _dl_cancelled = {'flag': False}
+            def _dl_cancel_check():
+                if cancel_evt.is_set():
+                    _dl_cancelled['flag'] = True
+                    return True
+                return False
+            ok = _download_sqlite(sqlite_path, cancel_check=_dl_cancel_check)
+            if _dl_cancelled['flag']:
+                yield sse_event('cancelled', {'new_count': 0, 'update_count': 0, 'message': '已取消'})
+                return
+            if not ok:
+                yield sse_event('fatal', {'error': '下载 tag.sqlite 失败'})
+                return
+
+            yield sse_event('progress', {'current': 2, 'total': 5, 'item': '读取上游数据...'})
+            import sqlite3
+            up_conn = sqlite3.connect(sqlite_path)
+            up_conn.row_factory = sqlite3.Row
+            try:
+                rows = up_conn.execute(
+                    "SELECT name, category, cn_name, post_count FROM tags"
+                ).fetchall()
+            except Exception as e:
+                up_conn.close()
+                yield sse_event('fatal', {'error': f'读取上游数据失败: {e}'})
+                return
+            up_conn.close()
+            if cancel_evt.is_set():
+                yield sse_event('cancelled', {'new_count': 0, 'update_count': 0, 'message': '已取消'})
+                return
+            yield sse_event('progress', {'current': 3, 'total': 5, 'item': f'上游共 {len(rows)} 条标签，同步到本地...'})
+
             conn = _get_tag_db_conn()
-            # 主线程预取每批的英文 wiki 上下文（串行读 SQLite，避免工作线程并发读共享连接）。
-            # bodies_by_batch 按 batch 索引存预取结果，工作线程只做 HTTP，不碰 DB。
-            batches = []
-            for i in range(0, len(to_translate), batch_size):
-                batch = to_translate[i:i+batch_size]
-                batch_desc = f"标签 {i+1}-{min(i+batch_size, len(to_translate))}"
-                # 主线程预取 wiki（仅 en→zh 需要）
-                bodies = (_fetch_en_wiki_from_db(batch)
-                          if (src == 'en' and dst == 'zh') else {})
-                batches.append((batch, batch_desc, bodies))
+            if conn is None:
+                yield sse_event('fatal', {'error': '本地数据库未配置'})
+                return
 
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            # 工作线程任务：纯 HTTP（用线程局部 Session）+ 解析，不碰 DB/共享状态。
-            # 返回 (batch, batch_desc, translations, err)，供生成器线程回写 DB + 上报进度。
-            def worker(batch, batch_desc, bodies):
-                translations, err = _llm_translate_tags(
-                    cfg, batch, src_name, dst_name,
-                    session=_get_thread_session(), bodies=bodies)
-                return (batch, batch_desc, translations, err)
+            if cancel_evt.is_set():
+                yield sse_event('cancelled', {'new_count': 0, 'update_count': 0, 'message': '已取消'})
+                return
+            local_names = {r[0] for r in conn.execute("SELECT name FROM tags").fetchall()}
+            new_tags = []
+            for r in rows:
+                name = r['name']
+                cat = int(r['category']) if r['category'] is not None else -1
+                pc = int(r['post_count']) if r['post_count'] is not None else 0
+                cn = (r['cn_name'] or '').strip()
+                if pc >= 100 and cat in (0, 3, 4) and name not in local_names:
+                    new_tags.append((name, cn, cat, pc))
 
-            done_count = 0
-            with ThreadPoolExecutor(max_workers=concurrency) as ex:
-                futures = [ex.submit(worker, b, desc, bodies) for (b, desc, bodies) in batches]
-                for fut in as_completed(futures):
-                    batch, batch_desc, translations, err = fut.result()
-                    done_count += 1
-                    yield sse_event('progress', {
-                        'current': done_count, 'total': total_batches, 'item': batch_desc
-                    })
-                    if err:
-                        error_count += 1
-                        yield sse_event('error', {'item': batch_desc, 'error': err})
-                        continue
-                    # DB 写入在生成器线程串行执行（SQLite 单连接非线程安全）
-                    if conn is not None and translations:
-                        from build_tag_db import update_translation
-                        for j, tag in enumerate(batch):
-                            tr = translations[j].strip()
-                            if tr:
-                                translated_count += 1
-                                if isEn2Zh:
-                                    update_translation(conn, tag, tr, commit=False)
-                                elif isZh2En:
-                                    update_translation(conn, tr, tag, commit=False)
-                        conn.commit()
+            if cancel_evt.is_set():
+                yield sse_event('cancelled', {'new_count': 0, 'update_count': 0, 'message': '已取消'})
+                return
+            if new_tags:
+                conn.execute("BEGIN")
+                for name, cn, cat, pc in new_tags:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO tags (name, cn_name, category, post_count) VALUES (?, ?, ?, ?)",
+                        (name, cn, cat, pc)
+                    )
+                conn.commit()
+                yield sse_event('progress', {'current': 4, 'total': 5, 'item': f'已写入 {len(new_tags)} 个新标签'})
+            else:
+                yield sse_event('progress', {'current': 4, 'total': 5, 'item': '无新标签需要写入'})
 
-            yield sse_event('complete', {'translated': translated_count, 'files': len(file_tags), 'errors': error_count})
+            if cancel_evt.is_set():
+                yield sse_event('cancelled', {'new_count': len(new_tags), 'update_count': 0, 'message': '已取消'})
+                return
+            up_map = {r['name']: r for r in rows}
+            update_count = 0
+            for name in local_names:
+                if name in up_map:
+                    r = up_map[name]
+                    cat = int(r['category']) if r['category'] is not None else -1
+                    pc = int(r['post_count']) if r['post_count'] is not None else 0
+                    conn.execute(
+                        "UPDATE tags SET category = CASE WHEN ? >= 0 THEN ? ELSE category END, "
+                        "post_count = CASE WHEN ? > 0 THEN ? ELSE post_count END WHERE name = ?",
+                        (cat, cat, pc, pc, name)
+                    )
+                    update_count += 1
+            conn.commit()
+            yield sse_event('progress', {'current': 5, 'total': 5, 'item': f'已更新 {update_count} 条已有标签'})
+            yield sse_event('complete', {'new_count': len(new_tags), 'update_count': update_count})
         except Exception as e:
-            # 生成器级别的未预期异常（如 DB 连接失败、yield 中断）：发 fatal，前端能正常收尾
-            yield sse_event('fatal', {'error': f'批量翻译异常终止: {e}'})
+            print(f'[sync_tags_db] 异常终止: {e}')
+            yield sse_event('fatal', {'error': f'同步异常终止: {e}'})
+        finally:
+            _unregister_cancel("sync_tags_db")
+            if os.path.exists(sqlite_path):
+                os.remove(sqlite_path)
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@translation_bp.route('/crawl_tag_groups', methods=['POST'])
+def crawl_tag_groups():
+    """爬取 Danbooru 标签组体系（SSE 流式）。"""
+    from config import get_tag_db_config
+    from tag_groups import run as groups_run
+    db_path = get_tag_db_config()['db_path']
+
+    def generate():
+        try:
+            yield from _generate()
+        except GeneratorExit:
+            raise
+
+    def _generate():
+        cancel_evt = _register_cancel("crawl_tag_groups")
+        try:
+            yield sse_event('progress', {'current': 0, 'total': '?', 'item': '开始爬取标签组...'})
+            import threading
+            import time as _time
+
+            events = []
+            worker_failed = False
+
+            def cb(event):
+                events.append(event)
+
+            def worker():
+                nonlocal worker_failed
+                try:
+                    groups_run(db_path=db_path, progress_callback=cb,
+                               cancel_check=cancel_evt.is_set)
+                except Exception as e:
+                    worker_failed = True
+                    cb({'type': 'fatal', 'error': str(e)})
+
+            t = threading.Thread(target=worker, daemon=True)
+            t.start()
+
+            last_sent = 0
+            finished = False
+            while t.is_alive() or last_sent < len(events):
+                while last_sent < len(events):
+                    evt = events[last_sent]
+                    last_sent += 1
+                    etype = evt.get('type')
+                    if etype == 'progress':
+                        yield sse_event('progress', {
+                            'current': evt.get('page', last_sent),
+                            'total': evt.get('total', '?'),
+                            'item': evt.get('item', '')
+                        })
+                    elif etype == 'complete':
+                        yield sse_event('complete', {'message': evt.get('item', '标签组爬取完成')})
+                        finished = True
+                        break
+                    elif etype == 'fatal':
+                        yield sse_event('fatal', {'error': evt.get('error', '爬取过程出错')})
+                        finished = True
+                        break
+                    elif etype == 'cancelled':
+                        yield sse_event('cancelled', {
+                            'message': '已取消',
+                            'item': evt.get('item', ''),
+                            'new_count': evt.get('new_count', 0)
+                        })
+                        finished = True
+                        break
+                if finished:
+                    break
+                if t.is_alive():
+                    _time.sleep(0.3)
+
+            # 重新加载缓存
+            global _tag_groups_cache
+            _tag_groups_cache = None
+
+            if not finished:
+                if worker_failed:
+                    yield sse_event('fatal', {'error': '爬取过程出错，详情见日志'})
+                else:
+                    yield sse_event('complete', {'message': '标签组爬取完成'})
+        except GeneratorExit:
+            cancel_evt.set()
+            raise
+        except Exception as e:
+            print(f'[crawl_tag_groups] 异常终止: {e}')
+            yield sse_event('fatal', {'error': f'爬取异常终止: {e}'})
+        finally:
+            _unregister_cancel("crawl_tag_groups")
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@translation_bp.route('/llm_process_db', methods=['POST'])
+def llm_process_db():
+    """LLM 三层深度翻译管线（SSE 流式）。
+    处理数据库中所有标签，生成中文描述/扩展中文名/NSFW 判定。
+    body: {reprocess: bool} — 是否重新处理已处理的标签（默认 false）"""
+    data = request.get_json() or {}
+    reprocess = data.get('reprocess', False)
+
+    from config import get_tag_db_config
+    db_path = get_tag_db_config()['db_path']
+
+    cancel_evt = _register_cancel("llm_process_db")
+
+    def generate():
+        try:
+            yield from _generate()
+        except GeneratorExit:
+            cancel_evt.set()
+            print('[LLM 翻译] 前端中断连接，已设置取消信号')
+            raise
+        except Exception as e:
+            print(f'[LLM 翻译] 致命错误: {e}')
+            import traceback
+            traceback.print_exc()
+            yield sse_event('fatal', {'error': f'翻译管线异常: {str(e)}'})
+        finally:
+            _unregister_cancel("llm_process_db")
+
+    def _generate():
+        import time
+        try:
+            yield sse_event('progress', {'current': 0, 'total': 5, 'item': '准备 LLM 深度翻译...'})
+            print('[LLM 翻译] 准备 LLM 深度翻译...')
+
+            api_key = os.environ.get('LLM_API_KEY', '')
+            base_url = os.environ.get('LLM_API_URL', '')
+            model = os.environ.get('LLM_MODEL', 'default')
+            if not api_key:
+                print('[LLM 翻译] 错误: 未配置 LLM_API_KEY')
+                yield sse_event('fatal', {'error': '未配置 LLM_API_KEY'})
+                return
+
+            if cancel_evt.is_set():
+                print('[LLM 翻译] 已取消')
+                yield sse_event('cancelled', {'translated': 0})
+                return
+
+            from openai import OpenAI
+            client = OpenAI(base_url=base_url, api_key=api_key)
+
+            conn = _get_tag_db_conn()
+            if conn is None:
+                print('[LLM 翻译] 错误: 标签数据库未配置')
+                yield sse_event('fatal', {'error': '标签数据库未配置'})
+                return
+
+            yield sse_event('progress', {'current': 1, 'total': 5, 'item': '加载标签数据...'})
+            import llm_pipeline as lp
+            tags = lp._load_tags(conn)
+            history = lp._load_history(db_path)
+            tag_to_groups, group_cn_names = lp._load_tag_groups(db_path)
+            cooc_data = lp._load_cooc_data(db_path)
+
+            # 分类
+            entity_tags = []
+            general_tags = []
+            fallback_tags = []
+
+            for tag in tags:
+                name = tag['name']
+                if name in history and not reprocess:
+                    continue
+                cat = int(tag.get('category', -1))
+                has_wiki = bool(tag.get('en_wiki', '').strip())
+                if cat in (3, 4):
+                    entity_tags.append(tag)
+                elif has_wiki:
+                    general_tags.append(tag)
+                else:
+                    fallback_tags.append(tag)
+
+            total = len(entity_tags) + len(general_tags) + len(fallback_tags)
+            if total == 0:
+                print('[LLM 翻译] 所有标签已处理，无需深度翻译')
+                yield sse_event('complete', {'message': '所有标签已处理，无需深度翻译', 'translated': 0})
+                return
+
+            print(f'[LLM 翻译] 待处理 {total} 条（实体 {len(entity_tags)} / 常规 {len(general_tags)} / 兜底 {len(fallback_tags)}）')
+            yield sse_event('progress', {'current': 2, 'total': 5,
+                'item': f'待处理 {total} 条（实体 {len(entity_tags)} / 常规 {len(general_tags)} / 兜底 {len(fallback_tags)}）'})
+
+            batch_size = 32
+            current_run = set()
+            done = 0
+
+            banner_msg = None  # 中断时标记，避免 final complete/cancelled 冲突
+
+            # ── Entity ──
+            if entity_tags and not cancel_evt.is_set():
+                print(f'[LLM 翻译] 开始实体层，共 {len(entity_tags)} 条')
+                for i in range(0, len(entity_tags), batch_size):
+                    if cancel_evt.is_set():
+                        banner_msg = 'cancelled'
+                        print('[LLM 翻译] 实体层被中断')
+                        break
+                    batch = entity_tags[i:i + batch_size]
+                    payload = lp._build_entity_payloads_batch(batch, tag_to_groups, group_cn_names,
+                                                             os.environ.get('BANGUMI_ACCESS_TOKEN', ''),
+                                                             cooc_data)
+                    try:
+                        results = lp._call_llm(client, model, lp._SYSTEM_PROMPT_ENTITY, payload, temperature=0.1)
+                    except Exception as e:
+                        print(f'[LLM 翻译] 实体批处理失败: {e}')
+                        yield sse_event('error', {'item': f'实体批 {i}-{i + len(batch)}', 'error': str(e)})
+                        continue
+                    lp._apply_results(conn, results)
+                    current_run.update(item["name"] for item in results if item.get("name"))
+                    done += len(batch)
+                    # 每批保存历史，支持断点续传和中途恢复
+                    lp._save_history(db_path, history | current_run)
+                    print(f'[LLM 翻译] 实体 {i + len(batch)}/{len(entity_tags)}')
+                    yield sse_event('progress', {'current': done, 'total': total, 'item': f'实体 {i + len(batch)}/{len(entity_tags)}'})
+                    time.sleep(0.5)
+
+            # ── General ──
+            if general_tags and not cancel_evt.is_set():
+                print(f'[LLM 翻译] 开始常规层，共 {len(general_tags)} 条')
+                for i in range(0, len(general_tags), batch_size):
+                    if cancel_evt.is_set():
+                        banner_msg = 'cancelled'
+                        print('[LLM 翻译] 常规层被中断')
+                        break
+                    batch = general_tags[i:i + batch_size]
+                    payload = [lp._build_general_payload(t, tag_to_groups, group_cn_names, cooc_data)
+                               for t in batch]
+                    try:
+                        results = lp._call_llm(client, model, lp._SYSTEM_PROMPT_GENERAL, payload, temperature=0.4)
+                    except Exception as e:
+                        print(f'[LLM 翻译] 常规批处理失败: {e}')
+                        yield sse_event('error', {'item': f'常规批 {i}-{i + len(batch)}', 'error': str(e)})
+                        continue
+                    lp._apply_results(conn, results)
+                    current_run.update(item["name"] for item in results if item.get("name"))
+                    done += len(batch)
+                    # 每批保存历史
+                    lp._save_history(db_path, history | current_run)
+                    print(f'[LLM 翻译] 常规 {i + len(batch)}/{len(general_tags)}')
+                    yield sse_event('progress', {'current': done, 'total': total, 'item': f'常规 {i + len(batch)}/{len(general_tags)}'})
+                    time.sleep(0.5)
+
+            # ── Fallback ──
+            if fallback_tags and not cancel_evt.is_set():
+                print(f'[LLM 翻译] 开始兜底层，共 {len(fallback_tags)} 条')
+                for i in range(0, len(fallback_tags), batch_size):
+                    if cancel_evt.is_set():
+                        banner_msg = 'cancelled'
+                        print('[LLM 翻译] 兜底层被中断')
+                        break
+                    batch = fallback_tags[i:i + batch_size]
+                    payload = [lp._build_general_payload(t, tag_to_groups, group_cn_names, cooc_data)
+                               for t in batch]
+                    try:
+                        results = lp._call_llm(client, model, lp._SYSTEM_PROMPT_FALLBACK, payload, temperature=0.5)
+                    except Exception as e:
+                        print(f'[LLM 翻译] 兜底批处理失败: {e}')
+                        yield sse_event('error', {'item': f'兜底批 {i}-{i + len(batch)}', 'error': str(e)})
+                        continue
+                    current_run.update(item["name"] for item in results if item.get("name"))
+                    done += len(batch)
+                    # 每批保存历史
+                    lp._save_history(db_path, history | current_run)
+                    print(f'[LLM 翻译] 兜底 {i + len(batch)}/{len(fallback_tags)}')
+                    yield sse_event('progress', {'current': done, 'total': total, 'item': f'兜底 {i + len(batch)}/{len(fallback_tags)}'})
+                    time.sleep(0.5)
+
+            # ── 保存历史 ──
+            if current_run:
+                history.update(current_run)
+                lp._save_history(db_path, history)
+
+            if banner_msg == 'cancelled':
+                print(f'[LLM 翻译] 已中断，已处理 {len(current_run)} 条')
+                yield sse_event('cancelled', {'translated': len(current_run), 'message': f'已中断，已处理 {len(current_run)} 条'})
+            else:
+                print(f'[LLM 翻译] 完成: 共处理 {len(current_run)}/{total} 条')
+                yield sse_event('complete', {'translated': len(current_run), 'total': total,
+                                             'message': f'LLM 深度翻译完成：{len(current_run)} 条'})
+        except Exception as e:
+            print(f'[LLM 翻译] 异常终止: {e}')
+            yield sse_event('fatal', {'error': f'LLM 深度翻译异常终止: {e}'})
+            return
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
@@ -431,84 +563,94 @@ def batch_translate():
 
 @translation_bp.route('/tag_detail/<path:tag>')
 def tag_detail(tag):
-    """返回单个标签的完整信息（cn_name/en_wiki/cn_wiki/other_names）"""
+    """返回单个标签的完整信息（cn_name/en_wiki/cn_wiki/other_names/nsfw/cn_name_locked/cn_wiki_locked/tag_groups）"""
     conn = _get_tag_db_conn()
     if conn is None:
         return jsonify({'error': '标签数据库未配置'}), 500
     try:
         from build_tag_db import lookup_tags
         rows = lookup_tags(conn, [tag])
-        # lookup_tags 返回的 key 是规范化后的（小写+下划线），不能用原始 tag 直接 in 检查
         norm = tag.strip().replace(' ', '_').lower()
         if norm not in rows:
-            return jsonify({'tag': tag, 'cn_name': '', 'en_wiki': '', 'cn_wiki': '', 'other_names': '[]'})
+            return jsonify({'tag': tag, 'cn_name': '', 'en_wiki': '', 'cn_wiki': '',
+                           'other_names': '[]', 'nsfw': 0, 'cn_name_locked': 0, 'cn_wiki_locked': 0})
         info = rows[norm]
+        # 补充 tag_groups
+        info['tag_groups'] = _get_tag_groups_for(norm)
         return jsonify({'tag': tag, **info})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
-@translation_bp.route('/translate_tag_wiki', methods=['POST'])
-def translate_tag_wiki():
-    """翻译单个标签的英文 wiki 为中文，回写 SQLite 的 cn_wiki 列。
-    body: {tag, en_wiki}"""
-    data = request.get_json()
-    tag = (data.get('tag') or '').strip()
-    en_wiki = (data.get('en_wiki') or '').strip()
-    if not tag or not en_wiki:
-        return jsonify({'error': '缺少 tag 或 en_wiki'}), 400
+# ── 标签组缓存 ─────────────────────────────────────────────────────────────
+_tag_groups_cache = None
 
-    cfg = get_llm_config()
-    if not cfg['prompt']:
-        return jsonify({'error': '未配置翻译系统提示（LLM_TAG_TRANSLATE_PROMPT）'}), 400
 
-    # 用 LLM 翻译整段 wiki（不同于标签名翻译的数组 prompt）
-    wiki_prompt = (
-        '你是一个专业的动漫图库标签词典翻译员。用户会给你一段英文标签释义（Danbooru wiki），'
-        '请翻译为简体中文，保留 DText 链接的语义（[[xxx]] 翻译为 xxx 的中文），'
-        '只输出翻译后的中文文本，不要输出任何解释、标注或引号。'
-    )
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {cfg["api_key"]}',
-    }
-    # wiki 可能很长，截断前 1500 字符控制 token
-    payload = {
-        'model': cfg['model'],
-        'messages': [
-            {'role': 'system', 'content': wiki_prompt},
-            {'role': 'user', 'content': en_wiki[:1500]},
-        ],
-        'temperature': 0.3,
-    }
+def _load_tag_groups_cache():
+    """加载 tag_groups.json 到缓存。"""
+    global _tag_groups_cache
+    if _tag_groups_cache is not None:
+        return _tag_groups_cache
+    import os
+    root = current_app.root_path
+    tg_path = os.path.join(root, 'data', 'tag_groups.json')
     try:
-        response = _llm_session.post(cfg['api_url'], headers=headers, json=payload, timeout=120)
-        result = response.json()
-        if 'error' in result:
-            return jsonify({'error': result['error'].get('message', '未知错误')}), 500
-        cn_wiki = result['choices'][0]['message']['content'].strip()
-    except requests.exceptions.Timeout:
-        return jsonify({'error': '翻译超时'}), 504
+        with open(tg_path, 'r', encoding='utf-8') as f:
+            _tag_groups_cache = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        _tag_groups_cache = {'tag_to_groups': {}, 'group_to_tags': {}, 'group_cn_names': {}}
+    return _tag_groups_cache
+
+
+def _get_tag_groups_for(tag_name: str) -> list[dict]:
+    """返回标签所属的分组列表。"""
+    tg = _load_tag_groups_cache()
+    groups = tg.get('tag_to_groups', {}).get(tag_name, [])
+    cn_names = tg.get('group_cn_names', {})
+    return [{'id': g, 'cn_name': cn_names.get(g, '')} for g in groups]
+
+
+@translation_bp.route('/tag_group_tags/<path:group_id>')
+def tag_group_tags(group_id):
+    """返回指定分组下的所有标签列表。"""
+    tg = _load_tag_groups_cache()
+    tags = tg.get('group_to_tags', {}).get(group_id, [])
+    cn_name = tg.get('group_cn_names', {}).get(group_id, '')
+    # 去重排序
+    tags = sorted(set(tags))
+    display = cn_name or group_id.replace('tag_group:', '')
+    return jsonify({'group_id': group_id, 'cn_name': cn_name,
+                    'display': display, 'tags': tags, 'count': len(tags)})
+
+
+@translation_bp.route('/tag_cooc/<path:tag>')
+def tag_cooc(tag):
+    """返回标签的共现推荐标签列表。"""
+    norm = tag.strip().replace(' ', '_').lower()
+    cooc_dir = os.path.join(current_app.root_path, 'data', 'cooc')
+    cooc_path = os.path.join(cooc_dir, 'cooccurrence_clean.parquet')
+    if not os.path.exists(cooc_path):
+        return jsonify({'cooc': []})
+    try:
+        import pandas as pd
+        df = pd.read_parquet(cooc_path)
+        # tag_a tag_b count
+        related = df[(df['tag_a'] == norm) | (df['tag_b'] == norm)].copy()
+        related['related'] = related.apply(
+            lambda r: r['tag_b'] if r['tag_a'] == norm else r['tag_a'], axis=1)
+        related = related.sort_values('count', ascending=False).head(20)
+        return jsonify({'cooc': related[['related', 'count']].to_dict(orient='records')})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-    # 回写 SQLite
-    conn = _get_tag_db_conn()
-    if conn is not None and cn_wiki:
-        try:
-            from build_tag_db import update_cn_wiki
-            update_cn_wiki(conn, tag, cn_wiki)
-        except Exception as e:
-            print(f"[translate_tag_wiki] 回写 SQLite 失败: {e}")
 
-    return jsonify({'cn_wiki': cn_wiki})
 
 
 @translation_bp.route('/update_tag_wiki', methods=['POST'])
 def update_tag_wiki():
-    """手动编辑并保存单个标签的 wiki（en_wiki 或 cn_wiki）。body: {tag, lang, content}。
-    lang: 'en' → en_wiki；'zh' → cn_wiki。不更新 updated_at（与 update_cn_wiki/update_en_wiki 一致），
-    避免手动编辑影响 Danbooru 增量抓取的时间锚点。"""
+    """手动编辑并保存标签的中文 wiki。body: {tag, lang, content}。
+    lang: 'zh' → cn_wiki。en_wiki 手动编辑已禁用（仅 Danbooru 增量更新可改）。
+    受 cn_wiki_locked 守卫：中文 wiki 锁定后跳过更新。"""
     data = request.get_json() or {}
     tag = (data.get('tag') or '').strip()
     lang = (data.get('lang') or '').strip().lower()
@@ -517,22 +659,168 @@ def update_tag_wiki():
         content = ''
     if not tag:
         return jsonify({'error': '缺少 tag'}), 400
-    if lang not in ('en', 'zh'):
-        return jsonify({'error': 'lang 必须为 en 或 zh'}), 400
+    if lang == 'en':
+        return jsonify({'error': '英文 wiki 不支持手动编辑'}), 400
+    if lang != 'zh':
+        return jsonify({'error': 'lang 必须为 zh'}), 400
 
     conn = _get_tag_db_conn()
     if conn is None:
         return jsonify({'error': '标签数据库未配置'}), 500
     try:
-        from build_tag_db import update_cn_wiki, update_en_wiki
-        if lang == 'en':
-            update_en_wiki(conn, tag, content)
-        else:
-            update_cn_wiki(conn, tag, content)
+        from build_tag_db import update_cn_wiki
+        update_cn_wiki(conn, tag, content)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
     return jsonify({'ok': True, 'lang': lang, 'content': content})
+
+
+# ---------------------------------------------------------------------------
+# 手动编辑标签中文名
+# ---------------------------------------------------------------------------
+
+@translation_bp.route('/update_cn_name', methods=['POST'])
+def update_cn_name():
+    """手动编辑并保存单个标签的中文名（cn_name）。body: {tag, cn_name}。"""
+    data = request.get_json() or {}
+    tag = (data.get('tag') or '').strip()
+    cn_name = data.get('cn_name', '')
+    if cn_name is None:
+        cn_name = ''
+    if not tag:
+        return jsonify({'error': '缺少 tag'}), 400
+
+    conn = _get_tag_db_conn()
+    if conn is None:
+        return jsonify({'error': '标签数据库未配置'}), 500
+    try:
+        from build_tag_db import update_translation
+        update_translation(conn, tag, cn_name)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+    return jsonify({'ok': True, 'cn_name': cn_name})
+
+
+# ---------------------------------------------------------------------------
+# 锁定/解锁标签中文名
+# ---------------------------------------------------------------------------
+
+@translation_bp.route('/toggle_cn_lock', methods=['POST'])
+def toggle_cn_lock():
+    """切换标签中文名或中文 wiki 的锁定状态。body: {tag, field}。
+    field: 'name' → cn_name_locked；'wiki' → cn_wiki_locked。
+    锁定后对应字段不能被深度翻译或手动编辑覆盖。"""
+    data = request.get_json() or {}
+    tag = (data.get('tag') or '').strip()
+    field = (data.get('field') or '').strip()
+    if not tag:
+        return jsonify({'error': '缺少 tag'}), 400
+    if field not in ('name', 'wiki'):
+        return jsonify({'error': 'field 必须为 name 或 wiki'}), 400
+
+    col = 'cn_name_locked' if field == 'name' else 'cn_wiki_locked'
+
+    conn = _get_tag_db_conn()
+    if conn is None:
+        return jsonify({'error': '标签数据库未配置'}), 500
+
+    norm = tag.strip().replace(' ', '_').lower()
+    row = conn.execute(f"SELECT {col} FROM tags WHERE name = ?", (norm,)).fetchone()
+    if not row:
+        return jsonify({'error': f'标签 {tag} 不存在'}), 404
+    new_val = 0 if row[0] else 1
+    conn.execute(f"UPDATE tags SET {col} = ? WHERE name = ?", (new_val, norm))
+    conn.commit()
+    return jsonify({'ok': True, 'cn_locked': new_val, 'field': field})
+
+
+# ---------------------------------------------------------------------------
+# 单标签深度翻译
+# ---------------------------------------------------------------------------
+
+@translation_bp.route('/translate_single_tag', methods=['POST'])
+def translate_single_tag():
+    """深度翻译单个标签（使用 llm_pipeline 逻辑）。
+    body: {tag}
+    返回 {cn_name, cn_wiki, nsfw}"""
+    data = request.get_json() or {}
+    tag = (data.get('tag') or '').strip()
+    if not tag:
+        return jsonify({'error': '缺少 tag'}), 400
+
+    conn = _get_tag_db_conn()
+    if conn is None:
+        return jsonify({'error': '标签数据库未配置'}), 500
+
+    from build_tag_db import lookup_tags
+    norm = tag.strip().replace(' ', '_').lower()
+    info = lookup_tags(conn, [tag]).get(norm)
+    if not info:
+        return jsonify({'error': f'标签 {tag} 不在数据库中'}), 404
+
+    # 加载 tag_groups 和共现数据
+    from llm_pipeline import (
+        _build_entity_payload, _build_general_payload,
+        _SYSTEM_PROMPT_ENTITY, _SYSTEM_PROMPT_GENERAL, _SYSTEM_PROMPT_FALLBACK,
+        _call_llm, _apply_results, _load_tag_groups, _load_cooc_data,
+    )
+    from config import get_tag_db_config
+    db_path = get_tag_db_config()['db_path']
+    tag_to_groups, group_cn_names = _load_tag_groups(db_path)
+    cooc_data = _load_cooc_data(db_path)
+
+    # 构造 tag_data（与 _load_tags 返回结构一致）
+    tag_data = {
+        'name': norm,
+        'cn_name': info.get('cn_name', ''),
+        'en_wiki': info.get('en_wiki', ''),
+        'category': int(info.get('category', -1)),
+        'other_names': info.get('other_names', '[]'),
+    }
+
+    # 确定层级
+    cat = int(info.get('category', -1))
+    has_wiki = bool(info.get('en_wiki', '').strip())
+    if cat in (3, 4):
+        payload = [_build_entity_payload(
+            tag_data, tag_to_groups, group_cn_names,
+            os.environ.get('BANGUMI_ACCESS_TOKEN', ''),
+            cooc_data
+        )]
+        system_prompt = _SYSTEM_PROMPT_ENTITY
+        temperature = 0.1
+    elif has_wiki:
+        payload = [_build_general_payload(tag_data, tag_to_groups, group_cn_names, cooc_data)]
+        system_prompt = _SYSTEM_PROMPT_GENERAL
+        temperature = 0.4
+    else:
+        payload = [_build_general_payload(tag_data, tag_to_groups, group_cn_names, cooc_data)]
+        system_prompt = _SYSTEM_PROMPT_FALLBACK
+        temperature = 0.5
+
+    # LLM 调用
+    from openai import OpenAI
+    api_key = os.environ.get('LLM_API_KEY', '')
+    base_url = os.environ.get('LLM_API_URL', '')
+    model = os.environ.get('LLM_MODEL', 'default')
+    if not api_key:
+        return jsonify({'error': '未配置 LLM_API_KEY'}), 400
+    client = OpenAI(base_url=base_url, api_key=api_key)
+
+    results = _call_llm(client, model, system_prompt, payload, temperature=temperature)
+    _apply_results(conn, results)
+
+    # 重新查最新结果
+    conn.commit()
+    from build_tag_db import lookup_tags
+    updated = lookup_tags(conn, [tag]).get(norm, {})
+    return jsonify({
+        'cn_name': updated.get('cn_name', ''),
+        'cn_wiki': updated.get('cn_wiki', ''),
+        'nsfw': updated.get('nsfw', 0),
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -559,6 +847,21 @@ def danbooru_search():
         return jsonify({'error': str(e)}), 500
 
 
+@translation_bp.route('/danbooru_random', methods=['GET'])
+def danbooru_random():
+    """返回随机 N 条标签（含 cn_name），用于首页推荐展示。"""
+    n = request.args.get('n', 50, type=int)
+    n = min(max(n, 1), 200)
+    conn = _get_tag_db_conn()
+    if conn is None:
+        return jsonify({'tags': []})
+    rows = conn.execute(
+        "SELECT name, cn_name, category, post_count FROM tags WHERE cn_name != '' AND cn_name IS NOT NULL "
+        "ORDER BY RANDOM() LIMIT ?", (n,)
+    ).fetchall()
+    return jsonify({'tags': [dict(r) for r in rows]})
+
+
 @translation_bp.route('/danbooru_update', methods=['POST'])
 def danbooru_update():
     """触发增量更新（SSE 流式）。包装 update_from_danbooru 的 progress_callback 为 SSE 事件。"""
@@ -571,6 +874,7 @@ def danbooru_update():
         # 主线程（SSE generator）轮询 events 顺序 yield 为 SSE。
         import threading
         import time as _time
+        cancel_evt = _register_cancel("danbooru_update")
         events = []
 
         def cb(event):
@@ -578,7 +882,10 @@ def danbooru_update():
 
         def worker():
             try:
-                update_from_danbooru(db_path, verbose=False, progress_callback=cb)
+                update_from_danbooru(
+                    db_path, verbose=False, progress_callback=cb,
+                    cancel_check=cancel_evt.is_set
+                )
             except Exception as e:
                 cb({'type': 'error', 'message': str(e)})
 
@@ -586,7 +893,7 @@ def danbooru_update():
         t.start()
 
         last_sent = 0
-        finished = False  # 是否已发送结束事件（complete/fatal），避免 worker 异常后再补发 complete
+        finished = False  # 是否已发送结束事件（complete/fatal/cancelled），避免 worker 异常后再补发 complete
         while t.is_alive() or last_sent < len(events):
             while last_sent < len(events):
                 evt = events[last_sent]
@@ -602,6 +909,11 @@ def danbooru_update():
                     yield sse_event('fatal', {'error': evt['message']})
                     finished = True
                     break
+                elif etype == 'cancelled':
+                    # 用户中断：已爬数据已落库，断点已保存。前端据此停止读取流。
+                    yield sse_event('cancelled', {'new_count': evt['new_count']})
+                    finished = True
+                    break
                 elif etype == 'complete':
                     yield sse_event('complete', {'new_count': evt['new_count']})
                     finished = True
@@ -612,9 +924,233 @@ def danbooru_update():
                 # 等待新事件，用短 sleep 避免忙等
                 _time.sleep(0.5)
 
-        # 线程结束但没收到 complete/error 事件（worker 未捕获异常退出兜底）
+        # 线程结束但没收到 complete/error/cancelled 事件（worker 未捕获异常退出兜底）
         if not finished:
             yield sse_event('fatal', {'error': '增量更新异常终止（未收到完成事件）'})
 
+        _unregister_cancel("danbooru_update")
+
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+# 取消事件注册表：各 SSE 路线创建各自的 Event，/danbooru_cancel 统一取消所有活跃操作。
+import threading as _threading
+_active_cancel_events: dict[str, _threading.Event] = {}
+_cancel_events_lock = _threading.Lock()
+
+def _register_cancel(name: str) -> _threading.Event:
+    """注册一个操作名到取消事件，返回新建的 Event。每个 SSE 路线各自注册。"""
+    evt = _threading.Event()
+    with _cancel_events_lock:
+        _active_cancel_events[name] = evt
+    return evt
+
+def _unregister_cancel(name: str):
+    """操作完成/取消后注销。"""
+    with _cancel_events_lock:
+        _active_cancel_events.pop(name, None)
+
+def _cancel_all():
+    """设置所有活跃的取消事件（前端一键取消）。"""
+    with _cancel_events_lock:
+        events = list(_active_cancel_events.values())
+    for e in events:
+        e.set()
+
+
+# ---------------------------------------------------------------------------
+# 共现数据更新
+# ---------------------------------------------------------------------------
+
+@translation_bp.route('/fetch_cooc', methods=['POST'])
+def fetch_cooc():
+    """增量抓取标签共现数据（SSE 流式）。只抓新标签的共现。"""
+    from config import get_tag_db_config
+    db_path = get_tag_db_config()['db_path']
+
+    def generate():
+        try:
+            yield from _generate()
+        except GeneratorExit:
+            raise
+
+    def _generate():
+        cancel_evt = _register_cancel("fetch_cooc")
+        try:
+            yield sse_event('progress', {'current': 0, 'total': '?', 'item': '开始增量抓取共现...'})
+            from cooc_pipeline import run_fetch_cooc
+            import threading
+            import time as _time
+
+            events = []
+            worker_failed = False
+
+            def cb(event):
+                events.append(event)
+
+            def worker():
+                nonlocal worker_failed
+                try:
+                    run_fetch_cooc(db_path=db_path, progress_callback=cb,
+                                   cancel_check=cancel_evt.is_set)
+                except Exception as e:
+                    worker_failed = True
+                    cb({'type': 'fatal', 'error': str(e)})
+
+            t = threading.Thread(target=worker, daemon=True)
+            t.start()
+
+            last_sent = 0
+            finished = False
+            while t.is_alive() or last_sent < len(events):
+                while last_sent < len(events):
+                    evt = events[last_sent]
+                    last_sent += 1
+                    etype = evt.get('type')
+                    if etype == 'progress':
+                        yield sse_event('progress', {
+                            'current': evt.get('page', last_sent),
+                            'total': evt.get('total', '?'),
+                            'item': evt.get('item', '')
+                        })
+                    elif etype == 'complete':
+                        yield sse_event('complete', {'message': f"共现抓取完成（{evt.get('new_count', 0)} 个标签）"})
+                        finished = True
+                        break
+                    elif etype == 'fatal':
+                        yield sse_event('fatal', {'error': evt.get('error', '抓取过程出错')})
+                        finished = True
+                        break
+                    elif etype == 'cancelled':
+                        yield sse_event('cancelled', {
+                            'message': '已取消',
+                            'new_count': evt.get('new_count', 0)
+                        })
+                        finished = True
+                        break
+                if finished:
+                    break
+                if t.is_alive():
+                    _time.sleep(0.3)
+
+            if not finished:
+                if worker_failed:
+                    yield sse_event('fatal', {'error': '抓取共现失败，详情见日志'})
+        except GeneratorExit:
+            cancel_evt.set()
+            raise
+        except Exception as e:
+            print(f'[fetch_cooc] 异常: {e}')
+            yield sse_event('fatal', {'error': f'异常终止: {e}'})
+        finally:
+            _unregister_cancel("fetch_cooc")
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@translation_bp.route('/trim_cooc', methods=['POST'])
+def trim_cooc():
+    """PMI 降维裁剪共现数据（SSE 流式），支持中断。"""
+    from config import get_tag_db_config
+    db_path = get_tag_db_config()['db_path']
+
+    def generate():
+        try:
+            yield from _generate()
+        except GeneratorExit:
+            raise
+
+    def _generate():
+        cancel_evt = _register_cancel("trim_cooc")
+        try:
+            yield sse_event('progress', {'current': 0, 'total': '?', 'item': '开始 PMI 裁剪...'})
+            from cooc_pipeline import run_trim_cooc
+            import threading
+            import time as _time
+
+            events = []
+            worker_failed = False
+
+            def cb(event):
+                events.append(event)
+
+            def worker():
+                nonlocal worker_failed
+                try:
+                    run_trim_cooc(db_path=db_path, progress_callback=cb,
+                                  cancel_check=cancel_evt.is_set)
+                except Exception as e:
+                    worker_failed = True
+                    cb({'type': 'fatal', 'error': str(e)})
+
+            t = threading.Thread(target=worker, daemon=True)
+            t.start()
+
+            last_sent = 0
+            finished = False
+            while t.is_alive() or last_sent < len(events):
+                while last_sent < len(events):
+                    evt = events[last_sent]
+                    last_sent += 1
+                    etype = evt.get('type')
+                    if etype == 'progress':
+                        yield sse_event('progress', {
+                            'current': 0,
+                            'total': '?',
+                            'item': evt.get('item', '')
+                        })
+                    elif etype == 'complete':
+                        yield sse_event('complete', {'message': '共现 PMI 裁剪完成'})
+                        finished = True
+                        break
+                    elif etype == 'fatal':
+                        yield sse_event('fatal', {'error': evt.get('error', '裁剪过程出错')})
+                        finished = True
+                        break
+                    elif etype == 'cancelled':
+                        yield sse_event('cancelled', {'new_count': 0, 'message': '已取消 PMI 裁剪'})
+                        finished = True
+                        break
+                    elif etype == 'error':
+                        yield sse_event('progress', {'current': 0, 'total': '?',
+                                                      'item': evt.get('message', '')})
+                if finished:
+                    break
+                if t.is_alive():
+                    _time.sleep(0.3)
+
+            if not finished:
+                if worker_failed:
+                    yield sse_event('fatal', {'error': 'PMI 裁剪失败，详情见日志'})
+
+            # 清除共现缓存，下次加载新数据
+            if not worker_failed:
+                import llm_pipeline as lp
+                lp._cooc_cache = None
+        except GeneratorExit:
+            cancel_evt.set()
+            raise
+        except Exception as e:
+            print(f'[trim_cooc] 异常: {e}')
+            yield sse_event('fatal', {'error': f'异常终止: {e}'})
+        finally:
+            _unregister_cancel("trim_cooc")
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+# ---------------------------------------------------------------------------
+# Danbooru 取消
+# ---------------------------------------------------------------------------
+
+@translation_bp.route('/danbooru_cancel', methods=['POST'])
+def danbooru_cancel():
+    """请求取消正在进行的同步/爬取/更新等操作。
+    设置取消标志，worker 在下个检查点退出。
+    已处理的数据已落库（每批 commit），下次操作可继续。
+    无任务运行时不报错（幂等）。"""
+    _cancel_all()
+    return jsonify({'message': '正在取消，已保存进度...'})

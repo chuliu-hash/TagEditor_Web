@@ -44,35 +44,35 @@
             </div>
             <div class="flex items-center gap-2">
                 <span id="img-info" class="text-sm text-gray-400 mr-3"></span>
-                <button id="btn-crop" class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed" onclick="toggleCropMode()" disabled>
-                    <i class="fa fa-crop mr-2"></i> 裁剪
+                <button id="btn-crop" class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs disabled:opacity-40 disabled:cursor-not-allowed" onclick="toggleCropMode()" disabled>
+                    <i class="fa fa-crop mr-1.5"></i> 裁剪
                 </button>
-                <button id="btn-rotate" class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed" onclick="rotateImage(90)" title="顺时针旋转90°">
-                    <i class="fa fa-repeat mr-2"></i> 旋转
+                <button id="btn-rotate" class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs disabled:opacity-40 disabled:cursor-not-allowed" onclick="rotateImage(90)" title="顺时针旋转90°">
+                    <i class="fa fa-repeat mr-1.5"></i> 旋转
                 </button>
-                <button class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm" onclick="openScaleModal()" title="保持比例缩放整图">
-                    <i class="fa fa-expand mr-2"></i> 缩放
+                <button class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs" onclick="openScaleModal()" title="保持比例缩放整图">
+                    <i class="fa fa-expand mr-1.5"></i> 缩放
                 </button>
-                <button id="btn-upscale" class="flex items-center justify-center bg-accent hover:bg-accent/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed" onclick="openUpscaleModal()" title="Real-ESRGAN 超清放大">
-                    <i class="fa fa-diamond mr-2"></i> 超清放大
+                <button id="btn-upscale" class="flex items-center justify-center bg-accent hover:bg-accent/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs disabled:opacity-40 disabled:cursor-not-allowed" onclick="openUpscaleModal()" title="Real-ESRGAN 超清放大">
+                    <i class="fa fa-diamond mr-1.5"></i> 超清放大
                 </button>
-                <button id="btn-remove-bg" class="flex items-center justify-center bg-accent hover:bg-accent/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed" onclick="openRemoveBgModal()" title="ToonOut 背景移除">
-                    <i class="fa fa-eraser mr-2"></i> 背景移除
+                <button id="btn-remove-bg" class="flex items-center justify-center bg-accent hover:bg-accent/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs disabled:opacity-40 disabled:cursor-not-allowed" onclick="openRemoveBgModal()" title="ToonOut 背景移除">
+                    <i class="fa fa-eraser mr-1.5"></i> 背景移除
                 </button>
-                <button id="btn-alpha" class="flex items-center justify-center bg-accent hover:bg-accent/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed" onclick="openAlphaModal()" title="透明转色底">
-                    <i class="fa fa-adjust mr-2"></i> 透明转色底
+                <button id="btn-alpha" class="flex items-center justify-center bg-accent hover:bg-accent/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs disabled:opacity-40 disabled:cursor-not-allowed" onclick="openAlphaModal()" title="透明转色底">
+                    <i class="fa fa-adjust mr-1.5"></i> 透明转色底
                 </button>
-                <button id="btn-reset" class="flex items-center justify-center bg-gray-500 hover:bg-gray-600 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed" onclick="resetEditor()" disabled>
-                    <i class="fa fa-undo mr-2"></i> 重置
+                <button id="btn-reset" class="flex items-center justify-center bg-secondary hover:bg-secondary/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs disabled:opacity-40 disabled:cursor-not-allowed" onclick="resetEditor()" disabled>
+                    <i class="fa fa-undo mr-1.5"></i> 重置
                 </button>
-                <button id="btn-save" class="flex items-center justify-center bg-secondary hover:bg-secondary/90 text-white font-medium py-2 px-4 rounded-lg cursor-pointer transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed" onclick="saveImage()" disabled>
-                    <i class="fa fa-save mr-2"></i> 保存
+                <button id="btn-save" class="flex items-center justify-center bg-secondary hover:bg-secondary/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs disabled:opacity-40 disabled:cursor-not-allowed" onclick="saveImage()" disabled>
+                    <i class="fa fa-save mr-1.5"></i> 保存
                 </button>
-                <a href="/danbooru" class="flex items-center justify-center bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium py-2 px-4 rounded-lg transition-all text-sm" onclick="navigateAway('/danbooru'); return false;">
+                <a href="/" class="flex items-center justify-center bg-white hover:bg-gray-50 text-gray-600 font-medium py-1.5 px-3 rounded-lg transition-all text-xs border border-gray-300" onclick="navigateAway('/'); return false;">
                     <i class="fa fa-book mr-1.5"></i> Danbooru 查询
                 </a>
-                <a id="link-to-tags" href="/" class="flex items-center justify-center bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium py-2 px-4 rounded-lg transition-all text-sm" onclick="return navigateToTags()">
-                    <i class="fa fa-tags mr-2"></i> 标签编辑
+                <a id="link-to-tags" href="/tag_editor" class="flex items-center justify-center bg-white hover:bg-gray-50 text-gray-600 font-medium py-1.5 px-3 rounded-lg transition-all text-xs border border-gray-300" onclick="return navigateToTags()">
+                    <i class="fa fa-tags mr-1.5"></i> 标签编辑
                 </a>
             </div>
         </div>
@@ -132,8 +132,8 @@
             <i class="fa fa-picture-o text-gray-200 text-7xl mb-6"></i>
             <h3 class="text-lg font-medium text-gray-400 mb-2">暂无图片</h3>
             <p class="text-gray-300 mb-4 text-sm">请先在标签编辑页面上传图片</p>
-            <a href="/" class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-2.5 px-6 rounded-lg transition-all text-sm">
-                <i class="fa fa-tags mr-2"></i> 前往标签编辑
+            <a href="/tag_editor" class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-2.5 px-6 rounded-lg transition-all text-sm">
+                <i class="fa fa-tags mr-1.5"></i> 前往标签编辑
             </a>
         </div>
         {% endif %}
@@ -478,6 +478,7 @@
             currentIndex = index;
             editorDirty = false;
             cropRect = null;
+            dragMode = null;
             updateNavUI();
             loadImageIntoEditor(allImages[index]);
             // 预取下一张图片字节到浏览器缓存（不带 ?t= 缓存破坏，因为下一张是独立文件未编辑过），
@@ -736,8 +737,8 @@
         function updateCropButton() {
             const btn = document.getElementById('btn-crop');
             btn.innerHTML = cropMode
-                ? '<i class="fa fa-times mr-2"></i> 退出裁剪'
-                : '<i class="fa fa-crop mr-2"></i> 裁剪';
+                ? '<i class="fa fa-times mr-1.5"></i> 退出裁剪'
+                : '<i class="fa fa-crop mr-1.5"></i> 裁剪';
             const ok = document.getElementById('btn-crop-ok');
             if (ok) ok.disabled = !cropMode;
         }
@@ -1365,12 +1366,12 @@
             const alphaIndex = currentIndex;
             const filename = allImages[alphaIndex];
             btn.disabled = true;
-            btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-2"></i> 处理中...';
+            btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-1.5"></i> 处理中...';
             fetch('/batch_alpha_to_white?color=' + encodeURIComponent(color) + '&target=' + encodeURIComponent(filename), {method: 'POST'})
                 .then(r => r.json())
                 .then(data => {
                     btn.disabled = false;
-                    btn.innerHTML = '<i class="fa fa-adjust mr-2"></i> 透明转色底';
+                    btn.innerHTML = '<i class="fa fa-adjust mr-1.5"></i> 透明转色底';
                     if (data.success && data.message === 'no_alpha') {
                         showNotification('当前图片没有透明通道', 'info');
                     } else if (data.success) {
@@ -1385,7 +1386,7 @@
                 })
                 .catch(() => {
                     btn.disabled = false;
-                    btn.innerHTML = '<i class="fa fa-adjust mr-2"></i> 透明转色底';
+                    btn.innerHTML = '<i class="fa fa-adjust mr-1.5"></i> 透明转色底';
                     showNotification('请求失败', 'error');
                 });
         }
@@ -1394,7 +1395,7 @@
         function runAlphaBatch(color) {
             const btn = document.getElementById('btn-alpha');
             btn.disabled = true;
-            btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-2"></i> 处理中...';
+            btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-1.5"></i> 处理中...';
 
             fetch('/batch_alpha_to_white?color=' + encodeURIComponent(color), {method: 'POST'})
             .then(r => {
@@ -1402,7 +1403,7 @@
                 if (ct.includes('application/json')) {
                     return r.json().then(data => {
                         btn.disabled = false;
-                        btn.innerHTML = '<i class="fa fa-adjust mr-2"></i> 透明转色底';
+                        btn.innerHTML = '<i class="fa fa-adjust mr-1.5"></i> 透明转色底';
                         if (data.message === 'no_alpha') {
                             showNotification('没有需要转换的透明图片', 'info');
                         } else {
@@ -1425,7 +1426,7 @@
                 function finishStream() {
                     if (streamCompleted) return;  // 已由 complete 事件正常收尾，无需兜底
                     btn.disabled = false;
-                    btn.innerHTML = '<i class="fa fa-adjust mr-2"></i> 透明转色底';
+                    btn.innerHTML = '<i class="fa fa-adjust mr-1.5"></i> 透明转色底';
                     // 流提前结束（后端崩溃/代理超时/网络中断）且未收到 complete
                     const el = document.getElementById('progress-errors');
                     el.classList.remove('hidden');
@@ -1454,7 +1455,7 @@
                     }).catch(err => {
                         // 读取异常（网络中断/代理断开）：恢复按钮，提示错误
                         btn.disabled = false;
-                        btn.innerHTML = '<i class="fa fa-adjust mr-2"></i> 透明转色底';
+                        btn.innerHTML = '<i class="fa fa-adjust mr-1.5"></i> 透明转色底';
                         const el = document.getElementById('progress-errors');
                         el.classList.remove('hidden');
                         el.innerHTML += '<div>读取流失败：' + escapeHtml(err.message || '网络中断') + '</div>';
@@ -1466,7 +1467,7 @@
             })
             .catch(() => {
                 btn.disabled = false;
-                btn.innerHTML = '<i class="fa fa-adjust mr-2"></i> 透明转色底';
+                btn.innerHTML = '<i class="fa fa-adjust mr-1.5"></i> 透明转色底';
                 showNotification('请求失败', 'error');
             });
 
@@ -1503,7 +1504,7 @@
                     document.getElementById('progress-item').textContent = '';
                     document.getElementById('progress-close').classList.remove('hidden');
                     btn.disabled = false;
-                    btn.innerHTML = '<i class="fa fa-adjust mr-2"></i> 透明转色底';
+                    btn.innerHTML = '<i class="fa fa-adjust mr-1.5"></i> 透明转色底';
                     // 刷新当前预览
                     if (currentIndex >= 0) loadImageIntoEditor(allImages[currentIndex], true);
                 }
@@ -1542,7 +1543,7 @@
 
             const btn = document.getElementById('btn-save');
             btn.disabled = true;
-            btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-2"></i> 保存中...';
+            btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-1.5"></i> 保存中...';
 
             // 导出为 PNG 并以 multipart 直传二进制（避免 base64 膨胀 + JSON 编码开销）
             const tempCanvas = document.createElement('canvas');
@@ -1555,7 +1556,7 @@
                 if (!blob) {
                     showNotification('图片导出失败', 'error');
                     btn.disabled = !editorDirty;  // blob 失败时恢复按钮（此 return 不经过下方 finally）
-                    btn.innerHTML = '<i class="fa fa-save mr-2"></i> 保存';
+                    btn.innerHTML = '<i class="fa fa-save mr-1.5"></i> 保存';
                     return;
                 }
                 const fd = new FormData();
@@ -1589,7 +1590,7 @@
                 .catch(() => showNotification('保存失败', 'error'))
                 .finally(() => {
                     btn.disabled = !editorDirty;
-                    btn.innerHTML = '<i class="fa fa-save mr-2"></i> 保存';
+                    btn.innerHTML = '<i class="fa fa-save mr-1.5"></i> 保存';
                 });
             }, 'image/png');
         }
@@ -1599,6 +1600,7 @@
             if (currentIndex < 0) return;
             editorDirty = false;
             cropRect = null;
+            dragMode = null;
             // 退出裁剪模式
             if (cropMode) {
                 cropMode = false;
@@ -1625,14 +1627,14 @@
             const upscaleBtn = document.getElementById('btn-upscale');
             upscaleBtn.disabled = _upscaleBusy || currentIndex < 0;
             upscaleBtn.innerHTML = _upscaleBusy
-                ? '<i class="fa fa-spinner fa-spin mr-2"></i> 放大中...'
-                : '<i class="fa fa-diamond mr-2"></i> 超清放大';
+                ? '<i class="fa fa-spinner fa-spin mr-1.5"></i> 放大中...'
+                : '<i class="fa fa-diamond mr-1.5"></i> 超清放大';
             // 背景移除按钮：进行中显示 spinner；暂存态禁用（与旋转/转色底同组）
             const removeBgBtn = document.getElementById('btn-remove-bg');
             removeBgBtn.disabled = _removebgBusy || currentIndex < 0 || blockedByDirty;
             removeBgBtn.innerHTML = _removebgBusy
-                ? '<i class="fa fa-spinner fa-spin mr-2"></i> 移除中...'
-                : '<i class="fa fa-eraser mr-2"></i> 背景移除';
+                ? '<i class="fa fa-spinner fa-spin mr-1.5"></i> 移除中...'
+                : '<i class="fa fa-eraser mr-1.5"></i> 背景移除';
         }
 
         // === 通知 ===
@@ -1650,8 +1652,8 @@
         // === 工具 ===
         function navigateToTags() {
             const target = (currentIndex >= 0 && allImages[currentIndex])
-                ? '/#' + encodeURIComponent(allImages[currentIndex])
-                : '/';
+                ? '/tag_editor#' + encodeURIComponent(allImages[currentIndex])
+                : '/tag_editor';
             navigateAway(target);
             return false;  // 阻止 a 标签默认跳转（由 navigateAway 处理）
         }

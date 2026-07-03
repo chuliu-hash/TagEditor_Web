@@ -3,16 +3,11 @@ import os
 import json
 import base64
 import numpy as np
-import requests
 from flask import Blueprint, request, jsonify, current_app, Response
 from config import get_vision_config, get_wd14_config, get_image_files
 from sse_utils import sse_event
 
 tagger_bp = Blueprint('tagger', __name__)
-
-# 进程级 requests.Session：视觉模型 API 连接池复用（keep-alive）。
-# auto_tag 对每张图发一次请求，复用 TCP/TLS 连接省去每次握手开销。
-_vision_session = requests.Session()
 
 # WD14 模型缓存（首次加载后常驻内存）。只读缓存，无并发一致性问题；
 # 但多进程部署时每个 worker 会各自加载一份模型到显存，建议单 worker 运行。
@@ -117,10 +112,10 @@ def auto_tag():
         return jsonify({'tagged': 0, 'skipped': skipped, 'errors': [], 'message': '所有图片已有标签'})
 
     total = len(to_tag)
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {vcfg["api_key"]}',
-    }
+
+    # 与 LLM 翻译统一使用 OpenAI SDK
+    from openai import OpenAI
+    client = OpenAI(base_url=vcfg['api_url'], api_key=vcfg['api_key'])
 
     def generate():
         tagged = 0
@@ -138,27 +133,19 @@ def auto_tag():
                     with open(file_path, 'rb') as f:
                         img_b64 = base64.b64encode(f.read()).decode('utf-8')
 
-                    payload = {
-                        'model': vcfg['model'],
-                        'messages': [
+                    response = client.chat.completions.create(
+                        model=vcfg['model'],
+                        messages=[
                             {'role': 'system', 'content': vcfg['prompt']},
                             {'role': 'user', 'content': [
                                 {'type': 'image_url', 'image_url': {'url': f'data:{mime};base64,{img_b64}'}},
                                 {'type': 'text', 'text': '开始分析并输出标签：'}
                             ]}
                         ],
-                        'temperature': 0.3,
-                    }
+                        temperature=0.3,
+                    )
 
-                    response = _vision_session.post(vcfg['api_url'], headers=headers, json=payload, timeout=120)
-                    result = response.json()
-
-                    if 'error' in result:
-                        error_count += 1
-                        yield sse_event('error', {'item': filename, 'error': result['error'].get('message', '未知错误')})
-                        continue
-
-                    tags = result['choices'][0]['message']['content'].strip()
+                    tags = response.choices[0].message.content.strip()
                     txt_path = os.path.join(upload_dir, f"{os.path.splitext(filename)[0]}.txt")
                     with open(txt_path, 'w', encoding='utf-8') as f:
                         f.write(tags)

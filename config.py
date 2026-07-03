@@ -34,10 +34,9 @@ def get_llm_config():
     """每次调用时重新读取 .env 配置"""
     load_env()
     return {
-        'api_url': os.environ.get('LLM_API_URL', 'http://localhost:8080/v1/chat/completions'),
+        'api_url': os.environ.get('LLM_API_URL', 'http://localhost:8080/v1'),
         'api_key': os.environ.get('LLM_API_KEY', 'ollama'),
         'model': os.environ.get('LLM_MODEL', 'qwen2.5:7b'),
-        'prompt': os.environ.get('LLM_TAG_TRANSLATE_PROMPT', '').replace('\\n', '\n'),
     }
 
 

@@ -1,18 +1,18 @@
 # TagEditor Web
 
-标签批量编辑工具 — 基于 Flask 的 Web 应用，用于批量上传图片及对应文本标签，支持中英文双向翻译、自动打标、在线编辑保存，并内置图片编辑器（裁剪、旋转、缩放、透明转色底、Real-ESRGAN 超清放大、ToonOut 背景移除）。
+标签批量编辑工具 — 基于 Flask 的 Web 应用，用于批量上传图片及对应文本标签，支持中英文双向翻译（OpenAI 兼容大模型 API）、自动打标、在线编辑保存，并内置图片编辑器（裁剪、旋转、缩放、透明转色底、Real-ESRGAN 超清放大、ToonOut 背景移除）。
 
 ## 功能
 
-### 标签编辑（主页 `/`）
+### 标签编辑（`/tag_editor`）
 
 - **批量上传**：支持上传图片（PNG/JPG/JPEG/GIF/WEBP）及同名 txt 标签文件，总上传上限 256MB
 - **在线编辑**：三栏布局（文件列表 / 图片预览 / 标签编辑器），支持键盘左右键导航、标签上下移动排序
-- **双向翻译**：通过 OpenAI 兼容 API 进行中英标签翻译，结果持久化到 SQLite，避免重复翻译
+- **在线翻译**：通过 OpenAI 兼容 API 进行英文→中文标签翻译，结果持久化到 SQLite 显示为只读
 - **自动打标**：
   - API 打标：调用视觉模型为图片生成 Danbooru 格式标签
   - WD14 本地打标：使用 ONNX 模型离线推理
-- **批量操作**：全局查找替换、触发词添加（开头/末尾）、批量翻译所有未缓存标签、批量重命名（`{名称}-{宽}x{高}-{编号}`）、标签统计
+- **批量操作**：全局查找替换、触发词添加（开头/末尾）、批量重命名（`{名称}-{宽}x{高}-{编号}`）、标签统计
 
 ### 图片编辑器（`/img_editor`）
 
@@ -23,7 +23,15 @@
 - **超清放大**：基于 Real-ESRGAN（anime_6B 模型）4x 超分，支持 1~4x 自定义尺寸，前端暂存→保存覆盖
 - **背景移除**：基于 ToonOut（BiRefNet 动漫微调）移除背景，输出透明 PNG 或合成纯色底，前端暂存→保存覆盖
 
-> 编辑器状态机制：裁剪/缩放/超清放大/背景移除会把结果暂存在前端（需点「保存」才覆盖原图）；旋转为自动保存；暂存态下会禁用旋转与透明转色底（避免冲突），需先保存或重置。
+### Danbooru 标签查询（`/danbooru`）
+
+- **标签搜索**：FTS5 全文索引，支持空格/下划线/连字符兼容搜索
+- **标签详情**：中文名/英文名/别名/分组/使用次数、英文 wiki（只读）、中文 wiki（内联编辑）
+- **深度翻译**：单条标签的 LLM 三层深度翻译（中文名 + 中文 wiki + NSFW 标记）
+- **锁定保护**：中文名和中文 wiki 可独立锁定，锁定后深度翻译和手动编辑均无法覆盖
+- **共现推荐**：显示与当前标签关联度高的其他标签
+- **增量同步**：从 Danbooru 上游同步新标签和 wiki 更新
+- **随机推荐**：首页显示约 60 条随机热门标签，可点击查看详情
 
 ## 快速开始
 
@@ -53,7 +61,7 @@ pip install -r requirements.txt
 |------|------|----------|
 | WD14 打标 | `model.onnx` + `selected_tags.csv` | https://huggingface.co/SmilingWolf/wd-eva02-large-tagger-v3 |
 | Real-ESRGAN 超清放大 | `RealESRGAN_x4plus_anime_6B.pth` | https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth |
-| BiRefNet 背景移除 base | `birefnet.py` + `config.json` + 权重 | https://huggingface.co/ZhengPeng7/birefnet |
+| BiRefNet 背景移除 base | `birefnet.py` + `config.json` + 权重 | https://huggingface.co/ZhengPeng7/BiRefNet |
 | ToonOut 微调权重 | `.pth` | https://huggingface.co/joelseytre/toonout |
 
 下载后放到 `.env` 对应变量指定的路径（默认在 `models/` 下）。
@@ -74,9 +82,9 @@ python app.py
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `LLM_API_URL` | API 地址 | `http://localhost:8080/v1/chat/completions` |
-| `LLM_API_KEY` | API 密钥 | `ollama` |
-| `LLM_MODEL` | 模型名称 | `qwen2.5:7b` |
+| `LLM_API_URL` | API 地址 | `http://localhost:8080/v1` |
+| `LLM_API_KEY` | API 密钥 | `123` |
+| `LLM_MODEL` | 模型名称 | `default` |
 | `LLM_TAG_TRANSLATE_PROMPT` | 翻译系统提示词，支持 `{src_name}`/`{dst_name}` 占位符 | — |
 
 ### 视觉模型（API 打标）
@@ -101,10 +109,8 @@ python app.py
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `REALESRGAN_MODEL_PATH` | 模型权重 `.pth` 路径（相对路径基于项目根目录） | `models/RealESRGAN_x4plus_anime_6B.pth` |
-| `REALESRGAN_TILE` | 瓦片大小（显存不足时分块推理，`0`=整图） | `0` |
-| `REALESRGAN_TILE_PAD` | 瓦片边界 padding（消除拼接伪影） | `10` |
 
-> 显存不足时（CUDA OOM），将 `REALESRGAN_TILE` 设为 `200`/`400`/`512` 启用分块推理。
+> 显存不足时（CUDA OOM），可通过环境变量 `REALESRGAN_TILE=400` 启用分块推理。
 
 ### BiRefNet 背景移除（ToonOut）
 
@@ -112,6 +118,8 @@ python app.py
 |------|------|--------|
 | `BIREFNET_BASE_MODEL_DIR` | base 模型目录（含 `birefnet.py` + `config.json` + 权重） | `models/birefnet-base` |
 | `BIREFNET_TOONOUT_WEIGHTS` | ToonOut 微调权重 `.pth` | `models/toonout.pth` |
+
+> ToonOut 权重下载：https://huggingface.co/joelseytre/toonout
 
 ## 数据存储
 
@@ -123,16 +131,21 @@ python app.py
 
 ### 标签数据库（SQLite）
 
-翻译数据统一存储在 `data/danbooru_tags.db`，schema 为 6 列：
+翻译数据统一存储在 `data/danbooru_tags.db`，schema 为 11 列：
 
 | 列 | 含义 | 来源 |
 |----|------|------|
-| `name` | 英文标签名（主键，如 `blue_hair`） | CSV + parquet + Danbooru 增量 |
-| `cn_name` | 中文翻译（逗号分隔多词，如 `蓝发,蓝色头发`） | CSV（LLM 翻译产物）+ 手动编辑 |
-| `en_wiki` | 英文 wiki 正文（Danbooru DText 格式） | parquet + Danbooru 增量 + 手动编辑 |
-| `cn_wiki` | 中文 wiki（LLM 翻译或手写） | LLM 翻译 + 手动编辑 |
-| `other_names` | 多语言别名（JSON 数组，如 `["蓝发","蓝毛","青髪"]`） | parquet + Danbooru 增量 |
-| `updated_at` | 最后更新时间（**增量抓取的时间锚点**，不展示） | parquet + Danbooru 增量 |
+| `name` | 英文标签名（主键，如 `blue_hair`） | 上游 SQLite + Danbooru 增量 |
+| `cn_name` | 中文翻译（逗号分隔多词，如 `蓝发,蓝色头发`） | 上游 SQLite + LLM 深度翻译 + 手动编辑 |
+| `en_wiki` | 英文 wiki 正文（Danbooru DText 格式，只读） | Danbooru 增量抓取 |
+| `cn_wiki` | 中文 wiki（LLM 翻译或手写） | LLM 深度翻译 / wiki 翻译 + 手动编辑 |
+| `other_names` | 多语言别名（JSON 数组，如 `["蓝发","蓝毛","青髪"]`） | Danbooru 增量抓取 |
+| `category` | 标签分类（0=通用/1=艺术家/3=版权/4=角色/5=元数据） | 上游 SQLite |
+| `post_count` | 热门度（Danbooru 使用该标签的图片数） | 上游 SQLite |
+| `updated_at` | 最后更新时间（增量抓取的时间锚点） | Danbooru 增量抓取 |
+| `nsfw` | NSFW 标记（0=安全 1=不安全） | LLM 深度翻译 |
+| `cn_name_locked` | 中文名锁定（0=未锁定 1=锁定） | 手动设置 |
+| `cn_wiki_locked` | 中文 wiki 锁定（0=未锁定 1=锁定） | 手动设置 |
 
 由 `build_tag_db.py` 管理：
 
@@ -147,7 +160,7 @@ python build_tag_db.py update
 python build_tag_db.py stats
 ```
 
-翻译查询优先级：**SQLite（cn_name）→ LLM（未命中时）→ 回写 SQLite**。用户手动编辑翻译也会回写 SQLite。每个标签行右侧有「详情」按钮，可查看英文/中文 wiki：英文 wiki 和中文 wiki 均支持内联编辑保存，中文 wiki 不存在时还可一键翻译并保存。
+翻译查询优先级：**SQLite（cn_name）→ LLM（未命中时）→ 回写 SQLite**。
 
 ## 项目结构
 
@@ -156,19 +169,23 @@ python build_tag_db.py stats
 ├── app.py                  # 入口，注册 Blueprint + 页面路由
 ├── config.py               # .env 加载、各模型配置读取、文件工具函数
 ├── translation.py          # 翻译 + 标签数据库读写 + 标签详情/wiki 编辑路由
-├── build_tag_db.py         # 标签数据库构建与查询（init 全量 / update 增量 / stats 统计）
-├── tagger.py               # WD14 预处理/加载/过滤 + API/WD14 打标路由
-├── file_ops.py             # 上传/删除/清空/标签读写/静态文件/标签统计路由
+├── build_tag_db.py         # 标签数据库构建与查询（init/update/stats/FTS5）
+├── sync_tags.py            # 从上游 GitHub SQLite 同步新标签
+├── cooc_pipeline.py        # 从 Danbooru 拉取共现频率数据
+├── llm_pipeline.py         # LLM 三层深度翻译管线
+├── tag_groups.py           # 爬取 Danbooru 标签组
+├── tagger.py               # WD14 预处理/加载/过滤 + API/WD14 打标
+├── file_ops.py             # 上传/删除/清空/标签读写/静态文件/标签统计
 ├── tag_operations.py       # 触发词/查找替换路由
-├── image_editor.py         # 图片编辑路由（保存/透明转色底/超清放大/背景移除）
-├── realesrgan_utils.py     # RealESRGANer 推理类（从 Real-ESRGAN 提取）
+├── image_editor.py         # 图片编辑路由
+├── realesrgan_utils.py     # RealESRGANer 推理类
 ├── birefnet_utils.py       # BiRefNet/ToonOut 背景移除推理
 ├── sse_utils.py            # SSE 事件格式化工具
 ├── templates/
 │   ├── tag_editor.html     # 标签编辑主页（三栏布局）
 │   ├── image_editor.html   # 图片编辑器
-│   └── danbooru_wiki.html  # Danbooru 标签查询页（搜索/详情/wiki 内联编辑）
-├── data/                   # 标签数据库 danbooru_tags.db（运行时生成）
+│   └── danbooru_wiki.html  # Danbooru 标签查询页
+├── data/                   # 标签数据库（运行时生成）
 ├── uploads/                # 图片 + 标签（运行时生成）
 ├── models/                 # 模型权重（需自行下载）
 └── .env                    # 配置文件（不入库）
@@ -190,5 +207,5 @@ CPU 推理会慢得多（背景移除可达数十秒），建议有 GPU 时启�
 - 所有 API 均为 OpenAI 兼容格式，支持 Ollama、DeepSeek 等本地或远程服务
 - 自动打标仅处理**无标签或空标签**的图片，已有标签的跳过
 - 透明转色底仅处理含 alpha 通道的图片，并跳过 GIF
-- WD14、Real-ESRGAN、BiRefNet 的重依赖按需懒加载，未安装相关库时仅禁用对应功能，不影响其余功能
-- 两个页面通过 URL hash 互相跳转并保持当前图片位置
+- WD14、Real-ESRGAN、BiRefNet 的重依赖按需懒加载，未安装时仅禁用对应功能，不影响其余功能
+- 三页面通过 URL hash 互相跳转并保持当前图片位置

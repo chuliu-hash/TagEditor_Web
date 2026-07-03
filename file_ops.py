@@ -97,6 +97,7 @@ def _sanitize_rename_name(name):
 
     移除路径分隔符、控制字符，把 Windows/Linux 文件名非法字符替换为下划线。
     保留中文等任意 Unicode 文本，与 safe_filename 风格一致。
+    限制最长 128 字符，避免超出文件系统限制。
     """
     if name is None:
         return ''
@@ -104,7 +105,7 @@ def _sanitize_rename_name(name):
     # 替换文件系统非法字符（Windows: \ / : * ? " < > |，Linux/macOS: /）
     for ch in '\\/:*?"<>|':
         name = name.replace(ch, '_')
-    return name.strip()
+    return name.strip()[:128]
 
 
 @file_ops_bp.route('/upload', methods=['POST'])
@@ -125,16 +126,21 @@ def upload_files():
             print(f"[上传] {filename} -> {save_path}")
             file.save(save_path)
 
-    return redirect(url_for('index'))
+    return redirect(url_for('tag_editor'))
 
 
 @file_ops_bp.route('/get_caption/<image_name>')
 def get_caption(image_name):
     """获取图片对应的标签，同时从 SQLite 查翻译返回"""
     from translation import _lookup_cn_from_db
-    base_name = os.path.splitext(image_name)[0]
+    filename = safe_filename(image_name)
+    upload_dir = os.path.abspath(current_app.config['UPLOAD_FOLDER'])
+    file_path = os.path.abspath(os.path.join(upload_dir, filename))
+    if not is_within_directory(file_path, upload_dir):
+        return jsonify({'caption': '', 'translations': []})
+    base_name = os.path.splitext(filename)[0]
     caption_file = f"{base_name}.txt"
-    caption_path = os.path.join(current_app.config['UPLOAD_FOLDER'], caption_file)
+    caption_path = os.path.join(upload_dir, caption_file)
 
     caption = ""
     if os.path.exists(caption_path):
@@ -154,10 +160,15 @@ def get_caption(image_name):
 
 @file_ops_bp.route('/save_caption/<image_name>', methods=['POST'])
 def save_caption(image_name):
-    """保存标签到文件。用户编辑的翻译回写到 SQLite cn_name 列"""
+    """保存标签到文件。统一小写 + 去重后写入 txt。"""
+    filename = safe_filename(image_name)
+    upload_dir = os.path.abspath(current_app.config['UPLOAD_FOLDER'])
+    file_path = os.path.abspath(os.path.join(upload_dir, filename))
+    if not is_within_directory(file_path, upload_dir):
+        return jsonify({'success': False, 'error': '非法路径'}), 400
+
     data = request.get_json()
     content = data.get('content', '')
-    translations = data.get('translations', {})
 
     # 保存时统一转小写 + 去重（与前端逻辑一致）。
     # 统一小写保证 DB name 列与查询 key 一致，避免翻译查不到；
@@ -173,9 +184,9 @@ def save_caption(image_name):
                 deduped.append(t)
     content = ', '.join(deduped)
 
-    base_name = os.path.splitext(image_name)[0]
+    base_name = os.path.splitext(filename)[0]
     caption_file = f"{base_name}.txt"
-    caption_path = os.path.join(current_app.config['UPLOAD_FOLDER'], caption_file)
+    caption_path = os.path.join(upload_dir, caption_file)
 
     try:
         with open(caption_path, 'w', encoding='utf-8') as f:
@@ -183,21 +194,6 @@ def save_caption(image_name):
     except Exception as e:
         print(f"保存标签文件失败: {str(e)}")
         return jsonify({'success': False, 'error': str(e)})
-
-    # 用户手动编辑的翻译回写 SQLite（覆盖 LLM/Danbooru 的结果）
-    if translations:
-        try:
-            from translation import _get_tag_db_conn
-            from build_tag_db import update_translation
-            conn = _get_tag_db_conn()
-            if conn is not None:
-                for tag, tr in translations.items():
-                    tag = tag.strip()
-                    tr = tr.strip()
-                    if tag and tr:
-                        update_translation(conn, tag, tr)
-        except Exception as e:
-            print(f"翻译回写 SQLite 失败: {e}")
 
     return jsonify({'success': True})
 
@@ -247,7 +243,7 @@ def clear_all():
         except Exception as e:
             print(f"删除文件失败: {str(e)}")
 
-    return redirect(url_for('index'))
+    return redirect(url_for('tag_editor'))
 
 
 @file_ops_bp.route('/delete/<image_name>', methods=['POST'])
@@ -343,37 +339,55 @@ def rename_files():
     # 阶段2：__tageditor_rename_tmp_{i}.<后缀> → new_base.<后缀>
     # 图片用原图扩展名（保留格式），标签固定 .txt。
     tmp_prefix = '__tageditor_rename_tmp_'
+
+    # 清理上次中断残留的 tmp 文件
+    for f in os.listdir(upload_dir):
+        if f.startswith(tmp_prefix):
+            try:
+                os.remove(os.path.join(upload_dir, f))
+            except Exception:
+                pass
+
     renamed = 0
     errors = 0
-    for i, (old_base, new_base, ext, _, _) in enumerate(plan):
-        # 该图的两个待重命名后缀：图片原后缀 + 标签 .txt
-        exts = (ext, '.txt')
-        # 阶段1：old → tmp
-        for e in exts:
-            old_path = os.path.join(upload_dir, old_base + e)
-            tmp_path = os.path.join(upload_dir, f"{tmp_prefix}{i}{e}")
-            if os.path.exists(old_path):
+    try:
+        for i, (old_base, new_base, ext, _, _) in enumerate(plan):
+            # 该图的两个待重命名后缀：图片原后缀 + 标签 .txt
+            exts = (ext, '.txt')
+            # 阶段1：old → tmp
+            for e in exts:
+                old_path = os.path.join(upload_dir, old_base + e)
+                tmp_path = os.path.join(upload_dir, f"{tmp_prefix}{i}{e}")
+                if os.path.exists(old_path):
+                    try:
+                        os.rename(old_path, tmp_path)
+                    except Exception as ex:
+                        print(f"[重命名] 阶段1失败 {old_path} -> {tmp_path}: {ex}")
+                        errors += 1
+            # 阶段2：tmp → new
+            moved_any = False
+            for e in exts:
+                tmp_path = os.path.join(upload_dir, f"{tmp_prefix}{i}{e}")
+                new_path = os.path.join(upload_dir, new_base + e)
+                if os.path.exists(tmp_path):
+                    try:
+                        # 防御：若 new_path 已被别的源占用（不该发生），先清理
+                        if os.path.abspath(tmp_path) != os.path.abspath(new_path) and os.path.exists(new_path):
+                            os.unlink(new_path)
+                        os.rename(tmp_path, new_path)
+                        moved_any = True
+                    except Exception as ex:
+                        print(f"[重命名] 阶段2失败 {tmp_path} -> {new_path}: {ex}")
+                        errors += 1
+            if moved_any:
+                renamed += 1
+    finally:
+        # 清理本轮残留的 tmp 文件（阶段1成功但阶段2失败时遗留）
+        for f in os.listdir(upload_dir):
+            if f.startswith(tmp_prefix):
                 try:
-                    os.rename(old_path, tmp_path)
-                except Exception as ex:
-                    print(f"[重命名] 阶段1失败 {old_path} -> {tmp_path}: {ex}")
-                    errors += 1
-        # 阶段2：tmp → new
-        moved_any = False
-        for e in exts:
-            tmp_path = os.path.join(upload_dir, f"{tmp_prefix}{i}{e}")
-            new_path = os.path.join(upload_dir, new_base + e)
-            if os.path.exists(tmp_path):
-                try:
-                    # 防御：若 new_path 已被别的源占用（不该发生），先清理
-                    if os.path.abspath(tmp_path) != os.path.abspath(new_path) and os.path.exists(new_path):
-                        os.unlink(new_path)
-                    os.rename(tmp_path, new_path)
-                    moved_any = True
-                except Exception as ex:
-                    print(f"[重命名] 阶段2失败 {tmp_path} -> {new_path}: {ex}")
-                    errors += 1
-        if moved_any:
-            renamed += 1
+                    os.remove(os.path.join(upload_dir, f))
+                except Exception:
+                    pass
 
     return jsonify({'renamed': renamed, 'total': len(plan), 'errors': errors})
