@@ -414,6 +414,7 @@ def _call_llm(client, model: str, system_prompt: str,
     last_error = None
     for attempt in range(max_attempts):
         try:
+            current_timeout = 60 + 30 * attempt
             response = client.chat.completions.create(
                 model=model,
                 messages=[
@@ -422,9 +423,16 @@ def _call_llm(client, model: str, system_prompt: str,
                 ],
                 temperature=temperature,
                 response_format={"type": "json_object"},
-                timeout=60,
+                timeout=current_timeout,
             )
             raw = response.choices[0].message.content
+            # 去除 markdown 代码块包裹
+            if raw:
+                stripped = raw.strip()
+                if stripped.startswith("```"):
+                    stripped = re.sub(r'^```[a-zA-Z]*\n?', '', stripped)
+                    stripped = re.sub(r'\n?```$', '', stripped)
+                    raw = stripped.strip()
             _dbg("LLM 响应", raw[:300] if raw else "(空)")
             try:
                 parsed = json.loads(raw) if raw else {}
@@ -440,9 +448,31 @@ def _call_llm(client, model: str, system_prompt: str,
                     else:
                         preview = (raw or '')[:200]
                         raise ValueError(f"LLM 返回内容无法解析为 JSON: {preview}")
-            if not isinstance(parsed, dict):
+            if isinstance(parsed, list):
+                results = parsed
+            elif not isinstance(parsed, dict):
                 raise ValueError(f"非 dict 类型: {type(parsed).__name__}")
-            return parsed.get("items", [])
+            else:
+                # 优先取 items 键，否则取第一个列表值
+                items = parsed.get("items")
+                if isinstance(items, list):
+                    results = items
+                else:
+                    results = None
+                    for v in parsed.values():
+                        if isinstance(v, list):
+                            results = v
+                            break
+                    # 平铺对象兜底：可能是单条返回省略了 items 包装
+                    if results is None and ("name" in parsed or "cn_name" in parsed):
+                        results = [parsed]
+                    if results is None:
+                        results = []
+            # 用原始输入名称覆盖 LLM 可能写错的 name
+            for i, item in enumerate(results):
+                if i < len(batch_data) and isinstance(batch_data[i], dict) and "name" in batch_data[i]:
+                    item["name"] = batch_data[i]["name"]
+            return results
         except Exception as e:
             err_msg = str(e).lower()
             is_overflow = any(kw in err_msg for kw in _CONTEXT_OVERFLOW_KEYWORDS)
