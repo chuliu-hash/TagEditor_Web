@@ -308,7 +308,13 @@ def run_trim_cooc(db_path: str = None, top_k: int = 50,
     tag_pc = {t['name']: int(t['post_count']) for t in tags}
     D = float(max(tag_pc.values())) if tag_pc else 1.0
 
-    _emit({'type': 'progress', 'item': '正在加载共现数据...'})
+    _trim_step = [0]  # 用 list 包裹便于闭包修改
+
+    def _trim_emit(item: str):
+        _trim_step[0] += 1
+        _emit({'type': 'progress', 'current': _trim_step[0], 'total': 5, 'item': item})
+
+    _trim_emit('正在加载共现数据...')
     df = pd.read_parquet(raw_parquet)
     if 'source' not in df.columns:
         msg = "[TrimCooc] 格式错误"
@@ -323,7 +329,7 @@ def run_trim_cooc(db_path: str = None, top_k: int = 50,
     df["frequency"] = pd.to_numeric(df["frequency"], errors="coerce").fillna(0.0)
     orig_len = len(df)
     print(f"[TrimCooc] 原始有向边: {orig_len:,}, D={D:,.0f}")
-    _emit({'type': 'progress', 'item': f'原始有向边: {orig_len:,}'})
+    _trim_emit(f'原始有向边: {orig_len:,}')
 
     # 过滤有效行
     count_target = df["target"].map(tag_pc)
@@ -335,7 +341,7 @@ def run_trim_cooc(db_path: str = None, top_k: int = 50,
     count_target = df["target"].map(tag_pc).to_numpy()
     count_source = df["source"].map(tag_pc).to_numpy()
     print(f"[TrimCooc] 过滤后: {len(df):,}")
-    _emit({'type': 'progress', 'item': f'过滤后: {len(df):,} 条边'})
+    _trim_emit(f'过滤后: {len(df):,} 条边')
 
     if _cancelled():
         _emit({'type': 'cancelled'})
@@ -375,7 +381,7 @@ def run_trim_cooc(db_path: str = None, top_k: int = 50,
         _emit({'type': 'cancelled'})
         return
 
-    _emit({'type': 'progress', 'item': f'PMI ≥ {min_pmi}: {len(df):,} 条边，取 Top-{top_k}...'})
+    _trim_emit(f'PMI ≥ {min_pmi}: {len(df):,} 条边，取 Top-{top_k}...')
     df.sort_values(["source", "pmi", "count"], ascending=[True, False, False], inplace=True)
     top_df = df.groupby("source", sort=False).head(top_k).copy()
 
@@ -394,6 +400,7 @@ def run_trim_cooc(db_path: str = None, top_k: int = 50,
               .agg({"count": "max", "pmi": "max"})
               .reset_index(drop=True))
     result.sort_values("pmi", ascending=False, inplace=True)
+    _trim_emit(f'折叠为无向边: {len(result):,} 条')
     result[["tag_a", "tag_b", "count"]].to_parquet(out_path, index=False, compression="snappy")
     msg = f"完成: {len(result):,} 条无向边"
     print(f"[TrimCooc] {msg} → {out_path}")

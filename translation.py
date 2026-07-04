@@ -1024,7 +1024,7 @@ def fetch_cooc():
                     etype = evt.get('type')
                     if etype == 'progress':
                         yield sse_event('progress', {
-                            'current': evt.get('page', last_sent),
+                            'current': evt.get('current', evt.get('page', 0)),
                             'total': evt.get('total', '?'),
                             'item': evt.get('item', '')
                         })
@@ -1111,8 +1111,8 @@ def trim_cooc():
                     etype = evt.get('type')
                     if etype == 'progress':
                         yield sse_event('progress', {
-                            'current': 0,
-                            'total': '?',
+                            'current': evt.get('current', 0),
+                            'total': evt.get('total', '?'),
                             'item': evt.get('item', '')
                         })
                     elif etype == 'complete':

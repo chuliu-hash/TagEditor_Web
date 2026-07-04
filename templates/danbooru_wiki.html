@@ -493,37 +493,17 @@
         }
         var debouncedLiveSearch = debounce(liveSearch, 200);
 
-        // 回车/搜索按钮：打开第一条结果的详情
+        // 回车/搜索按钮：按搜索框内容打开标签详情
         function openFirstResult() {
-            if (_searchResults.length > 0) {
-                showTagDetail(_searchResults[0].name);
-                closeSearchDropdown();
-                return;
-            }
-            // 无缓存结果时先搜索再打开
-            const keyword = document.getElementById('search-input').value.trim();
-            if (!keyword) {
-                // 搜索栏为空时回到随机标签首页
+            const tag = document.getElementById('search-input').value.trim();
+            if (!tag) {
                 document.getElementById('detail-card').classList.add('hidden');
                 document.getElementById('detail-empty').classList.remove('hidden');
                 document.getElementById('search-dropdown').classList.add('hidden');
                 return;
             }
-            const seq = _searchSeq;
-            fetch('/danbooru_search', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({keyword: keyword, limit: 1})
-            })
-            .then(r => r.json())
-            .then(data => {
-                if (seq !== _searchSeq) return;
-                const results = data.results || [];
-                if (results.length > 0) {
-                    showTagDetail(results[0].name);
-                    closeSearchDropdown();
-                }
-            });
+            showTagDetail(tag);
+            closeSearchDropdown();
         }
 
         // ── 随机标签（首页推荐） ──
@@ -621,7 +601,7 @@
             }
             // 退出 cn_name 编辑态
             if (_cnNameEditing) cancelCnNameEdit();
-            _detailState = {tag: data.tag, enWiki: data.en_wiki || '', cnWiki: data.cn_wiki || '', tab: 'en'};
+            _detailState = {tag: data.tag, enWiki: data.en_wiki || '', cnWiki: data.cn_wiki || '', tab: 'en', tagFound: data.post_count !== undefined};
             document.getElementById('detail-empty').classList.add('hidden');
             document.getElementById('detail-card').classList.remove('hidden');
 
@@ -700,6 +680,14 @@
             switchWikiTab('en');
             // 加载共现标题栏（列表折叠，点击才加载数据）
             loadCooc(data.tag);
+
+            // 标签未收录到数据库（无 post_count）时隐藏深度翻译/编辑/锁按钮
+            if (data.post_count === undefined) {
+                document.getElementById('wiki-translate-btn').classList.add('hidden');
+                document.getElementById('wiki-edit-btn').classList.add('hidden');
+                document.getElementById('d-wiki-lock-btn').classList.add('hidden');
+                document.getElementById('d-cn-lock-btn').classList.add('hidden');
+            }
         }
 
         function _updateLockIcons() {
@@ -708,8 +696,14 @@
             const nameIcon = document.getElementById('d-cn-lock-icon');
             const cnEditBtn = document.getElementById('d-cn-edit-btn');
             if (_detailState.cnNameLocked !== undefined) {
-                nameLockBtn.classList.remove('hidden');
-                nameLockBtn.classList.add('inline-block');
+                // 标签未收录时不显示锁图标
+                if (_detailState.tagFound === false) {
+                    nameLockBtn.classList.add('hidden');
+                    nameLockBtn.classList.remove('inline-block');
+                } else {
+                    nameLockBtn.classList.remove('hidden');
+                    nameLockBtn.classList.add('inline-block');
+                }
                 const locked = _detailState.cnNameLocked;
                 nameIcon.className = 'fa ' + (locked ? 'fa-lock text-amber-500' : 'fa-unlock text-gray-300');
                 nameLockBtn.title = locked ? '已锁定，点击解锁' : '已解锁，点击锁定';
@@ -722,8 +716,14 @@
             const wikiLockBtn = document.getElementById('d-wiki-lock-btn');
             const wikiIcon = document.getElementById('d-wiki-lock-icon');
             if (_detailState.cnWikiLocked !== undefined) {
-                wikiLockBtn.classList.remove('hidden');
-                wikiLockBtn.classList.add('inline-block');
+                // 标签未收录时不显示锁图标
+                if (_detailState.tagFound === false) {
+                    wikiLockBtn.classList.add('hidden');
+                    wikiLockBtn.classList.remove('inline-block');
+                } else {
+                    wikiLockBtn.classList.remove('hidden');
+                    wikiLockBtn.classList.add('inline-block');
+                }
                 const locked = _detailState.cnWikiLocked;
                 wikiIcon.className = 'fa ' + (locked ? 'fa-lock text-amber-500' : 'fa-unlock text-gray-300');
                 wikiLockBtn.title = locked ? '已锁定，点击解锁' : '已解锁，点击锁定';
@@ -865,6 +865,14 @@
             }
             saveBtn.classList.add('hidden');
             cancelBtn.classList.add('hidden');
+
+            // 标签未收录到数据库时，始终隐藏深度翻译和编辑按钮
+            if (_detailState.tagFound === false) {
+                editBtn.classList.add('hidden');
+                trBtn.classList.add('hidden');
+                return;
+            }
+
             // 编辑按钮：仅中文 tab + 未锁定时可编辑（英文 wiki 只读）
             editBtn.classList.toggle('hidden', _detailState.tab !== 'zh' || _detailState.cnWikiLocked);
             // 翻译并保存按钮：始终显示
