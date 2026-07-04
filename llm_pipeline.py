@@ -390,7 +390,7 @@ _SYSTEM_PROMPT_ENTITY = f"""
 3. **扩展中文名 (extended_cn_name)**: 生成分类锚点词 + 所属作品名/阵营/常见别名（1~2 个），半角逗号分隔。
 4. **NSFW 判定 (nsfw)**: 包含裸露、性暗示等则为 1，否则为 0。
 
-输出格式：
+输出格式（合法 JSON）：
 {{"items": [{{"name": "原始英文名", "cn_name": "确定的基础中文名", "extended_cn_name": "扩展词", "chinese_wiki": "中文简介", "nsfw": 0}}]}}
 """
 

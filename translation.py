@@ -232,8 +232,10 @@ def sync_tags_db():
                         (name, cn, cat, pc)
                     )
                 conn.commit()
+                print(f'[sync_tags_db] 新增 {len(new_tags)} 个标签')
                 yield sse_event('progress', {'current': 4, 'total': 5, 'item': f'已写入 {len(new_tags)} 个新标签'})
             else:
+                print('[sync_tags_db] 无新标签')
                 yield sse_event('progress', {'current': 4, 'total': 5, 'item': '无新标签需要写入'})
 
             if cancel_evt.is_set():
@@ -253,6 +255,7 @@ def sync_tags_db():
                     )
                     update_count += 1
             conn.commit()
+            print(f'[sync_tags_db] 完成: 新增 {len(new_tags)} 条, 更新 {update_count} 条')
             yield sse_event('progress', {'current': 5, 'total': 5, 'item': f'已更新 {update_count} 条已有标签'})
             yield sse_event('complete', {'new_count': len(new_tags), 'update_count': update_count})
         except Exception as e:
@@ -989,11 +992,22 @@ def fetch_cooc():
             def cb(event):
                 events.append(event)
 
+            def cb_fetch(event):
+                # 过滤 fetch 自身的 complete 事件（由后续 trim 统一发）
+                if event.get('type') == 'complete':
+                    events.append({'type': 'progress', 'item': '抓取完成，开始 PMI 裁剪...'})
+                else:
+                    events.append(event)
+
             def worker():
                 nonlocal worker_failed
                 try:
-                    run_fetch_cooc(db_path=db_path, progress_callback=cb,
+                    run_fetch_cooc(db_path=db_path, progress_callback=cb_fetch,
                                    cancel_check=cancel_evt.is_set)
+                    if not cancel_evt.is_set() and not worker_failed:
+                        from cooc_pipeline import run_trim_cooc
+                        run_trim_cooc(db_path=db_path, progress_callback=cb,
+                                      cancel_check=cancel_evt.is_set)
                 except Exception as e:
                     worker_failed = True
                     cb({'type': 'fatal', 'error': str(e)})
