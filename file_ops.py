@@ -267,8 +267,9 @@ def delete_image(image_name):
 def uploaded_file(filename):
     """提供上传文件的访问（带浏览器缓存，减少切换图片时的重复请求）"""
     resp = send_from_directory(current_app.config['UPLOAD_FOLDER'], filename)
-    # ETag/Last-Modified 默认存在，文件变更时浏览器会重新拉取；max-age 省去 304 往返
-    resp.headers['Cache-Control'] = 'public, max-age=3600'
+    # no-cache + ETag：浏览器每次向服务器校验，文件未变时返回 304（无内容），
+    # 文件变化后（如缩放保存）自动返回新内容，无需 ?t= 参数或手动刷新。
+    resp.headers['Cache-Control'] = 'no-cache'
     return resp
 
 

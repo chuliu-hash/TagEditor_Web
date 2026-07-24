@@ -1532,7 +1532,12 @@
         // === 保存 ===
         // silent=true 时静默保存（不显示"保存成功"通知），用于旋转等自动保存场景
         function saveImage(silent) {
-            if (!originalImage || !editorDirty) return;
+            if (!editorDirty) return;
+
+            // 使用当前显示的图片（editor-img）导出，确保保存的是用户实际看到的内容。
+            // 不依赖 originalImage 变量，因为缩放/裁剪后 originalImage 可能已被后续操作覆盖。
+            const displayImg = document.getElementById('editor-img');
+            if (!displayImg || !displayImg.src) return;
 
             // 在异步操作（toBlob → fetch）开始前捕获当前文件名与索引。
             // 旋转的自动保存会在 onload 内静默触发，若保存进行中用户已导航到其他图片，
@@ -1545,17 +1550,17 @@
             btn.disabled = true;
             btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-1.5"></i> 保存中...';
 
-            // 导出为 PNG 并以 multipart 直传二进制（避免 base64 膨胀 + JSON 编码开销）
+            // 直接用当前显示的 img 元素导出，drawImage 使用其原生尺寸（naturalWidth/naturalHeight）
             const tempCanvas = document.createElement('canvas');
-            tempCanvas.width = originalImage.naturalWidth;
-            tempCanvas.height = originalImage.naturalHeight;
+            tempCanvas.width = displayImg.naturalWidth;
+            tempCanvas.height = displayImg.naturalHeight;
             const tempCtx = tempCanvas.getContext('2d');
-            tempCtx.drawImage(originalImage, 0, 0);
+            tempCtx.drawImage(displayImg, 0, 0);
 
             tempCanvas.toBlob(function(blob) {
                 if (!blob) {
                     showNotification('图片导出失败', 'error');
-                    btn.disabled = !editorDirty;  // blob 失败时恢复按钮（此 return 不经过下方 finally）
+                    btn.disabled = !editorDirty;
                     btn.innerHTML = '<i class="fa fa-save mr-1.5"></i> 保存';
                     return;
                 }
@@ -1564,23 +1569,19 @@
                 fd.append('image', blob, saveFilename);
                 fetch('/process_image', {
                     method: 'POST',
-                    body: fd  // 不设 Content-Type，浏览器自动加 multipart boundary
+                    body: fd
                 })
                 .then(r => r.json())
                 .then(data => {
                     if (data.success) {
-                        // 仅当用户仍停留在发起保存的那张图时，才重置脏状态 + 刷新预览。
-                        // 若已导航离开，该图的保存仍会落盘（正确），但不干扰当前查看的新图。
                         if (currentIndex === saveIndex) {
                             editorDirty = false;
                             if (!silent) showNotification('保存成功 (' + data.width + 'x' + data.height + ')', 'success');
-                            // 如果文件名变了（如 jpg→png），更新列表
                             if (data.filename !== allImages[saveIndex]) {
                                 allImages[saveIndex] = data.filename;
                                 rebuildFileList();
                                 updateNavUI();
                             }
-                            // 刷新预览（文件已覆盖保存，强制刷新）
                             loadImageIntoEditor(allImages[saveIndex], true);
                         }
                     } else {
