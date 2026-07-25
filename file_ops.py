@@ -461,12 +461,34 @@ def export_zip():
             zf.write(img_path, filename)
 
             base = os.path.splitext(filename)[0]
-            txt_path = os.path.join(upload_dir, f"{base}{txt_suffix}")
-            # 优先用指定后缀，不存在时回退常规 .txt
-            if txt_ext != 'txt' and not os.path.exists(txt_path):
+
+            if txt_ext == 'nl':
+                # nl 模式：合并标签(.txt) + 自然语言描述(.nl.txt) 为一个文件
+                tags_content = ''
                 txt_path = os.path.join(upload_dir, f"{base}.txt")
-            if os.path.exists(txt_path):
-                zf.write(txt_path, f"{base}.txt")
+                if os.path.exists(txt_path):
+                    try:
+                        with open(txt_path, 'r', encoding='utf-8') as f:
+                            tags_content = f.read().strip()
+                    except Exception:
+                        pass
+
+                nl_path = os.path.join(upload_dir, f"{base}.nl.txt")
+                nl_content = ''
+                if os.path.exists(nl_path):
+                    try:
+                        with open(nl_path, 'r', encoding='utf-8') as f:
+                            nl_content = f.read().strip()
+                    except Exception:
+                        pass
+
+                if tags_content or nl_content:
+                    merged = tags_content + (', ' + nl_content if tags_content and nl_content else nl_content)
+                    zf.writestr(f"{base}.txt", merged.encode('utf-8'))
+            else:
+                txt_path = os.path.join(upload_dir, f"{base}.txt")
+                if os.path.exists(txt_path):
+                    zf.write(txt_path, f"{base}.txt")
 
     buf.seek(0)
     return (

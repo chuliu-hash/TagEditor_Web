@@ -107,6 +107,7 @@ def auto_tag_wd14():
         return jsonify({'tagged': 0, 'skipped': skipped, 'errors': [], 'message': '所有图片已有标签'})
 
     total = len(to_tag)
+    print(f"\n[WD14] 开始自动打标: 共 {total} 张待处理, {skipped} 张已有标签跳过")
 
     def generate():
         tagged = 0
@@ -128,6 +129,9 @@ def auto_tag_wd14():
 
             for batch_start in range(0, total, WD14_BATCH_SIZE):
                 batch_files = to_tag[batch_start:batch_start + WD14_BATCH_SIZE]
+                batch_idx = batch_start // WD14_BATCH_SIZE + 1
+                total_batches = (total + WD14_BATCH_SIZE - 1) // WD14_BATCH_SIZE
+                print(f"[WD14] 批次 {batch_idx}/{total_batches} ({len(batch_files)} 张)")
 
                 # 预处理阶段：逐张解码+缩放，失败的单独记错并跳过（不进 batch）
                 imgs = []
@@ -139,18 +143,22 @@ def auto_tag_wd14():
                     except Exception as e:
                         done += 1
                         error_count += 1
+                        print(f"[WD14] ✗ {filename}: 预处理失败 — {e}")
                         yield sse_event('progress', {'current': done, 'total': total, 'item': filename})
                         yield sse_event('error', {'item': filename, 'error': str(e)})
 
                 if not imgs:
+                    print(f"[WD14] 批次 {batch_idx}: 全部预处理失败，跳过")
                     continue
 
                 # 批量推理：(N,448,448,3) -> (N, num_tags)
                 try:
                     batch_input = np.concatenate(imgs, axis=0)
                     probs_batch = session.run(None, {input_name: batch_input})[0]
+                    print(f"[WD14] 批次 {batch_idx}: 推理完成 ({len(ok_files)} 张)")
                 except Exception as e:
                     # 整批推理失败，逐张报错
+                    print(f"[WD14] 批次 {batch_idx}: 批量推理失败 — {e}")
                     for filename in ok_files:
                         done += 1
                         error_count += 1
@@ -171,14 +179,19 @@ def auto_tag_wd14():
                             txt_path = os.path.join(upload_dir, f"{os.path.splitext(filename)[0]}.txt")
                             with open(txt_path, 'w', encoding='utf-8') as f:
                                 f.write(tags)
+                            tag_count = len([t for t in tags.split(',') if t.strip()])
+                            print(f"[WD14] ✓ {filename} → {tag_count} 个标签")
                             tagged += 1
                         else:
                             error_count += 1
+                            print(f"[WD14] ✗ {filename}: 未产生有效标签")
                             yield sse_event('error', {'item': filename, 'error': '未产生有效标签'})
                     except Exception as e:
                         error_count += 1
+                        print(f"[WD14] ✗ {filename}: {e}")
                         yield sse_event('error', {'item': filename, 'error': str(e)})
 
+            print(f"[WD14] 完成: {tagged} 张成功, {skipped} 张跳过, {errors} 张失败")
             yield sse_event('complete', {'tagged': tagged, 'skipped': skipped, 'errors': error_count})
         except Exception as e:
             # 生成器级别的未预期异常：发 fatal，前端能正常收尾
@@ -230,6 +243,7 @@ def auto_caption_vlm():
                         'message': '所有图片已有自然语言描述'})
 
     total = len(to_process)
+    print(f"\n[VLM] 开始生成自然语言描述: 共 {total} 张待处理, {skipped} 张已有描述跳过")
 
     from openai import OpenAI
     client = OpenAI(base_url=vcfg['api_url'], api_key=vcfg['api_key'])
@@ -299,18 +313,22 @@ def auto_caption_vlm():
                     description = response.choices[0].message.content.strip()
                     if not description:
                         skipped += 1
+                        print(f"[VLM] △ {filename}: 描述为空，跳过")
                         continue
 
                     # 保存到新的 .nl.txt，不覆盖原标签
                     out_path = os.path.join(upload_dir, f"{base}.nl.txt")
                     with open(out_path, 'w', encoding='utf-8') as f:
                         f.write(description)
+                    print(f"[VLM] ✓ {filename} → {len(description)} 字符")
                     tagged += 1
 
                 except Exception as e:
                     error_count += 1
+                    print(f"[VLM] ✗ {filename}: {e}")
                     yield sse_event('error', {'item': filename, 'error': str(e)})
 
+            print(f"[VLM] 完成: {tagged} 张成功, {skipped} 张跳过, {errors} 张失败")
             yield sse_event('complete', {'tagged': tagged, 'skipped': skipped,
                             'errors': error_count})
         except Exception as e:
