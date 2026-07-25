@@ -169,26 +169,6 @@
                         </div>
                     </div>
                 </div>
-                <!-- 自然语言描述区域（可折叠） -->
-                <div id="nl-section" class="flex-shrink-0 border-t border-gray-200 hidden">
-                    <div class="flex items-center justify-between px-3 py-1.5 bg-amber-50/50 cursor-pointer select-none" onclick="toggleNlSection()">
-                        <div class="flex items-center gap-1.5 text-xs font-medium text-amber-700">
-                            <i class="fa fa-pencil"></i>
-                            <span>自然语言描述（.nl.txt）</span>
-                        </div>
-                        <i id="nl-toggle-icon" class="fa fa-chevron-down text-amber-400 text-xs transition-transform"></i>
-                    </div>
-                    <div id="nl-body" class="px-3 py-2">
-                        <textarea id="nl-textarea" rows="3"
-                            class="w-full border border-amber-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-amber-400 resize-none transition-colors"
-                            placeholder="暂无自然语言描述，可点击「自动打标」→「VLM 自然语言描述」生成"></textarea>
-                        <div class="flex justify-end mt-1.5">
-                            <button id="btn-save-nl" class="bg-amber-500 hover:bg-amber-600 text-white text-xs font-medium py-1 px-3 rounded-md transition-colors flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed" onclick="saveNlCaption()">
-                                <i class="fa fa-save"></i> 保存描述
-                            </button>
-                        </div>
-                    </div>
-                </div>
                 <!-- 底部按钮栏 -->
                 <div class="flex gap-2 px-3 py-2.5 border-t border-gray-200 bg-gray-50">
                     <button class="flex-1 bg-secondary hover:bg-secondary/90 text-white font-medium py-1.5 px-3 rounded-md transition-all flex items-center justify-center text-sm" onclick="addTag()">
@@ -202,6 +182,9 @@
                     </button>
                     <button id="btn-save" class="flex-1 bg-primary hover:bg-primary/90 text-white font-medium py-1.5 px-3 rounded-md transition-all flex items-center justify-center text-sm" onclick="saveCaption()">
                         <i class="fa fa-save mr-1"></i> 保存当前标签
+                    </button>
+                    <button id="btn-nl" class="flex-1 bg-amber-600 hover:bg-amber-700 text-white font-medium py-1.5 px-3 rounded-md transition-all flex items-center justify-center text-sm hidden" onclick="openNlModal()" title="编辑自然语言描述">
+                        <i class="fa fa-file-text-o mr-1"></i> 自然语言描述
                     </button>
                 </div>
             </div>
@@ -478,6 +461,29 @@
                     <i class="fa fa-language mr-1"></i>翻译并保存
                 </button>
                 <button class="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" onclick="closeTagDetail()">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 自然语言描述编辑弹窗 -->
+    <div id="nl-modal" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center hidden" onclick="if(event.target===this)closeNlModal()">
+        <div class="bg-white rounded-xl shadow-xl w-[600px] max-h-[85vh] flex flex-col">
+            <div class="px-5 py-4 border-b border-gray-200 flex justify-between items-center">
+                <h3 class="text-base font-semibold text-gray-800">
+                    <i class="fa fa-file-text-o text-amber-500 mr-1.5"></i>自然语言描述（.nl.txt）
+                </h3>
+                <button class="text-gray-400 hover:text-gray-600 transition-colors" onclick="closeNlModal()"><i class="fa fa-times"></i></button>
+            </div>
+            <div class="flex-grow min-h-0 p-5">
+                <textarea id="nl-textarea" rows="8"
+                    class="w-full h-full border border-amber-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-amber-400 resize-none transition-colors"
+                    placeholder="暂无自然语言描述，可点击「自动打标」→「VLM 自然语言描述」生成"></textarea>
+            </div>
+            <div class="flex justify-end gap-2 px-5 py-3 border-t border-gray-200 bg-gray-50">
+                <button class="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" onclick="closeNlModal()">取消</button>
+                <button id="btn-save-nl" class="px-4 py-2 text-sm bg-amber-500 hover:bg-amber-600 text-white rounded-lg transition-colors flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed" onclick="saveNlCaption()">
+                    <i class="fa fa-save"></i> 保存
+                </button>
             </div>
         </div>
     </div>
@@ -1363,29 +1369,45 @@
                         renderTags();
                     }
 
-                    // 处理自然语言描述
+                    // 处理自然语言描述（显示/隐藏 NL 按钮）
                     const nlText = (data.nl_caption || '').trim();
                     savedNlCaption = nlText;
-                    const nlSection = document.getElementById('nl-section');
                     const nlTextarea = document.getElementById('nl-textarea');
-                    if (nlText) {
-                        nlTextarea.value = nlText;
-                        nlSection.classList.remove('hidden');
-                    } else {
-                        nlTextarea.value = '';
-                        // 没有内容时，保持折叠隐藏状态
-                        nlSection.classList.add('hidden');
-                    }
+                    const nlBtn = document.getElementById('btn-nl');
+                    nlTextarea.value = nlText;
+                    nlBtn.classList.toggle('hidden', !nlText);
                 })
                 .catch(() => { if (seq === loadSeq) showNotification('加载标签文件失败', 'error'); });
         }
 
-        // === 自然语言描述折叠/展开 ===
-        function toggleNlSection() {
-            const body = document.getElementById('nl-body');
-            const icon = document.getElementById('nl-toggle-icon');
-            const isHidden = body.classList.toggle('hidden');
-            icon.style.transform = isHidden ? 'rotate(-90deg)' : 'rotate(0deg)';
+        // === 自然语言描述弹窗 ===
+        function openNlModal() {
+            document.getElementById('nl-modal').classList.remove('hidden');
+        }
+        function closeNlModal() {
+            // 如果 NL 有未保存修改，提示保存
+            if (isNlDirty()) {
+                showConfirm({
+                    title: '未保存的修改',
+                    message: '自然语言描述有未保存的修改，是否保存？',
+                    okText: '保存',
+                    cancelText: '丢弃',
+                    onOk: function() { saveNlCaption().then(function() {
+                        document.getElementById('nl-modal').classList.add('hidden');
+                    }).catch(function(){}); },
+                    onCancel: function() {
+                        document.getElementById('nl-textarea').value = savedNlCaption;
+                        document.getElementById('nl-modal').classList.add('hidden');
+                    }
+                });
+                return;
+            }
+            document.getElementById('nl-modal').classList.add('hidden');
+        }
+        // 保存后更新 NL 按钮显示状态
+        function _updateNlBar() {
+            const nlText = document.getElementById('nl-textarea').value.trim();
+            document.getElementById('btn-nl').classList.toggle('hidden', !nlText);
         }
 
         // === 保存自然语言描述 ===
@@ -1406,9 +1428,10 @@
                 .then(r => r.json())
                 .then(data => {
                     btn.disabled = false;
-                    btn.innerHTML = '<i class="fa fa-save"></i> 保存描述';
+                    btn.innerHTML = '<i class="fa fa-save"></i> 保存';
                     if (data.success) {
                         savedNlCaption = content;
+                        _updateNlBar();
                         showNotification('自然语言描述已保存', 'success');
                         return data;
                     } else {

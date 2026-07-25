@@ -3,7 +3,7 @@ import os
 import base64
 import numpy as np
 from flask import Blueprint, jsonify, current_app, Response
-from config import get_vision_config, get_caption_config, get_wd14_config, get_image_files
+from config import get_vision_config, get_wd14_config, get_image_files
 from sse_utils import sse_event
 
 tagger_bp = Blueprint('tagger', __name__)
@@ -191,7 +191,7 @@ def auto_tag_wd14():
                         print(f"[WD14] ✗ {filename}: {e}")
                         yield sse_event('error', {'item': filename, 'error': str(e)})
 
-            print(f"[WD14] 完成: {tagged} 张成功, {skipped} 张跳过, {errors} 张失败")
+            print(f"[WD14] 完成: {tagged} 张成功, {skipped} 张跳过, {error_count} 张失败")
             yield sse_event('complete', {'tagged': tagged, 'skipped': skipped, 'errors': error_count})
         except Exception as e:
             # 生成器级别的未预期异常：发 fatal，前端能正常收尾
@@ -210,19 +210,23 @@ def auto_caption_vlm():
     无 txt 标签的图片仅靠 VLM 看图直接描述。
     """
     vcfg = get_vision_config()
-    ccfg = get_caption_config()
     if not vcfg['api_url'] or not vcfg['model']:
         return jsonify({'error': '未配置视觉模型（VISION_API_URL / VISION_MODEL）'}), 400
 
     # 描述提示词：允许用户自定义，否则使用默认提示词
     caption_prompt = vcfg['caption_prompt'] or (
-        '你是一个专业的图像描述生成器。你的任务是基于提供的Danbooru风格标签和图片内容，'
-        '生成一段准确、连贯、详细的自然语言描述。\n'
-        '要求：\n'
-        '1. 描述必须基于图片和提供的标签，不要添加图片中不存在或标签未暗示的细节。\n'
-        '2. 用一段连贯的英文句子描述。\n'
-        '3. 输出只包含描述本身，无需其他解释。\n'
-        '4. 不要使用Markdown格式。'
+        'You are an image caption generator. Based on the provided Danbooru-style tags '
+        'and image content, generate a natural language description in Anima style for '
+        'AI image generation.\n'
+        'Anima style: one or two clear, factual English sentences describing only what is '
+        'visible — no emotions, backstory, atmosphere, or interpretations.\n'
+        'Rules:\n'
+        '1. Describe only observable elements — no emotions, mood, or narrative.\n'
+        '2. Use simple factual sentences. Keep it brief (1-2 sentences).\n'
+        '3. Output only the description — no prefixes, quotes, or Markdown.\n'
+        'Example: "A young woman with long blonde hair and blue eyes wearing a school '
+        'uniform stands outdoors under cherry blossom trees, looking directly at the '
+        'viewer with a slight smile."'
     )
 
     upload_dir = current_app.config['UPLOAD_FOLDER']
@@ -284,19 +288,7 @@ def auto_caption_vlm():
                         user_content.append({
                             'type': 'text',
                             'text': (
-                                '请分析这张图片，并基于以下Danbooru参考标签，'
-                                '生成一段自然语言描述。\n\n'
-                                f'参考标签：{ref_tags}\n\n'
-                                '要求：基于图片和参考标签生成描述，不添加额外细节，'
-                                '用一段连贯的英文句子。'
-                            )
-                        })
-                    else:
-                        user_content.append({
-                            'type': 'text',
-                            'text': (
-                                '请分析这张图片，生成一段自然语言描述。'
-                                '用一段连贯的英文句子，仅描述你看到的内容，不添加额外细节。'
+                                'Reference tags: ' + ref_tags
                             )
                         })
 
@@ -306,14 +298,21 @@ def auto_caption_vlm():
                             {'role': 'system', 'content': caption_prompt},
                             {'role': 'user', 'content': user_content}
                         ],
-                        temperature=0.3,
+                        temperature=0.7,
                         max_tokens=512,
+                        extra_body={"repeat_penalty": 1.15},
                     )
 
-                    description = response.choices[0].message.content.strip()
+                    description = (response.choices[0].message.content or '').strip()
                     if not description:
+                        finish = response.choices[0].finish_reason
+                        # 推理模型（如 Qwen3.5 Vision）可能把 token 全花在思考上，未输出正式回答
+                        has_reasoning = hasattr(response.choices[0].message, 'reasoning_content') and response.choices[0].message.reasoning_content
+                        if has_reasoning:
+                            print(f"[VLM] △ {filename}: 模型在思考中，未生成正式描述, finish={finish}")
+                        else:
+                            print(f"[VLM] △ {filename}: 描述为空, finish={finish}")
                         skipped += 1
-                        print(f"[VLM] △ {filename}: 描述为空，跳过")
                         continue
 
                     # 保存到新的 .nl.txt，不覆盖原标签
@@ -328,7 +327,7 @@ def auto_caption_vlm():
                     print(f"[VLM] ✗ {filename}: {e}")
                     yield sse_event('error', {'item': filename, 'error': str(e)})
 
-            print(f"[VLM] 完成: {tagged} 张成功, {skipped} 张跳过, {errors} 张失败")
+            print(f"[VLM] 完成: {tagged} 张成功, {skipped} 张跳过, {error_count} 张失败")
             yield sse_event('complete', {'tagged': tagged, 'skipped': skipped,
                             'errors': error_count})
         except Exception as e:
