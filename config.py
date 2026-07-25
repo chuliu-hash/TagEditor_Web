@@ -41,13 +41,22 @@ def get_llm_config():
 
 
 def get_vision_config():
-    """每次调用时重新读取视觉模型配置"""
+    """每次调用时重新读取视觉模型配置（用于 VLM 自然语言描述生成）"""
     load_env()
     return {
         'api_url': os.environ.get('VISION_API_URL', ''),
         'api_key': os.environ.get('VISION_API_KEY', ''),
         'model': os.environ.get('VISION_MODEL', ''),
-        'prompt': os.environ.get('VISION_SYSTEM_PROMPT', '').replace('\\n', '\n'),
+        'caption_prompt': os.environ.get('VISION_CAPTION_PROMPT', '').replace('\\n', '\n'),
+    }
+
+
+def get_caption_config():
+    """每次调用时重新读取 VLM 自然语言描述生成配置"""
+    load_env()
+    return {
+        'reference_tags': os.environ.get('CAPTION_REFERENCE_TAGS', 'true').strip().lower() in ('true', '1', 'yes'),
+        'save_format': os.environ.get('CAPTION_SAVE_FORMAT', 'txt'),  # txt 覆盖标签 / separate 另存 .caption.txt
     }
 
 

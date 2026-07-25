@@ -150,12 +150,22 @@ def get_caption(image_name):
         except Exception as e:
             print(f"读取标签文件失败: {str(e)}")
 
+    # 读取自然语言描述（.nl.txt）
+    nl_path = os.path.join(upload_dir, f"{base_name}.nl.txt")
+    nl_caption = ""
+    if os.path.exists(nl_path):
+        try:
+            with open(nl_path, 'r', encoding='utf-8') as f:
+                nl_caption = f.read().strip()
+        except Exception as e:
+            print(f"读取自然语言描述文件失败: {str(e)}")
+
     # 一次性返回标签 + 翻译（从 SQLite cn_name 查）
     tags = [t.strip() for t in caption.split(',') if t.strip()] if caption else []
     hits = _lookup_cn_from_db(tags)
     translations = [hits.get(tag, '') for tag in tags]
 
-    return jsonify({'caption': caption, 'translations': translations})
+    return jsonify({'caption': caption, 'translations': translations, 'nl_caption': nl_caption})
 
 
 @file_ops_bp.route('/save_caption/<image_name>', methods=['POST'])
@@ -193,6 +203,31 @@ def save_caption(image_name):
             f.write(content)
     except Exception as e:
         print(f"保存标签文件失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)})
+
+    return jsonify({'success': True})
+
+
+@file_ops_bp.route('/save_nl_caption/<image_name>', methods=['POST'])
+def save_nl_caption(image_name):
+    """保存自然语言描述到 .nl.txt"""
+    filename = safe_filename(image_name)
+    upload_dir = os.path.abspath(current_app.config['UPLOAD_FOLDER'])
+    file_path = os.path.abspath(os.path.join(upload_dir, filename))
+    if not is_within_directory(file_path, upload_dir):
+        return jsonify({'success': False, 'error': '非法路径'}), 400
+
+    data = request.get_json()
+    content = data.get('content', '').strip()
+
+    base_name = os.path.splitext(filename)[0]
+    nl_path = os.path.join(upload_dir, f"{base_name}.nl.txt")
+
+    try:
+        with open(nl_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+    except Exception as e:
+        print(f"保存自然语言描述失败: {str(e)}")
         return jsonify({'success': False, 'error': str(e)})
 
     return jsonify({'success': True})
@@ -260,6 +295,9 @@ def delete_image(image_name):
     txt_path = os.path.join(upload_dir, f"{base_name}.txt")
     if os.path.exists(txt_path):
         os.unlink(txt_path)
+    nl_path = os.path.join(upload_dir, f"{base_name}.nl.txt")
+    if os.path.exists(nl_path):
+        os.unlink(nl_path)
     return jsonify({'success': True})
 
 
@@ -392,3 +430,50 @@ def rename_files():
                     pass
 
     return jsonify({'renamed': renamed, 'total': len(plan), 'errors': errors})
+
+
+@file_ops_bp.route('/export_zip', methods=['POST'])
+def export_zip():
+    """将所有图片及对应的标签文件导出为 ZIP。
+    请求体 JSON：
+        txt_ext: str   标签后缀，如 'txt'（常规标签）或 'nl'（自然语言描述）
+    返回 ZIP 文件下载，标签文件名重置为与图片同名。
+    """
+    import io
+    import zipfile
+    from config import get_image_files
+
+    data = request.get_json() or {}
+    txt_ext = data.get('txt_ext', 'txt')
+    txt_suffix = f".{txt_ext}.txt" if txt_ext != 'txt' else '.txt'
+
+    upload_dir = os.path.abspath(current_app.config['UPLOAD_FOLDER'])
+    images = get_image_files(upload_dir)
+    if not images:
+        return jsonify({'error': '没有可导出的文件'}), 400
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for filename in images:
+            img_path = os.path.join(upload_dir, filename)
+            if not os.path.exists(img_path):
+                continue
+            zf.write(img_path, filename)
+
+            base = os.path.splitext(filename)[0]
+            txt_path = os.path.join(upload_dir, f"{base}{txt_suffix}")
+            # 优先用指定后缀，不存在时回退常规 .txt
+            if txt_ext != 'txt' and not os.path.exists(txt_path):
+                txt_path = os.path.join(upload_dir, f"{base}.txt")
+            if os.path.exists(txt_path):
+                zf.write(txt_path, f"{base}.txt")
+
+    buf.seek(0)
+    return (
+        buf.getvalue(),
+        200,
+        {
+            'Content-Type': 'application/zip',
+            'Content-Disposition': f'attachment; filename="tags_export_{txt_ext}.zip"',
+        }
+    )

@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 import os
-import json
 import base64
 import numpy as np
-from flask import Blueprint, request, jsonify, current_app, Response
-from config import get_vision_config, get_wd14_config, get_image_files
+from flask import Blueprint, jsonify, current_app, Response
+from config import get_vision_config, get_caption_config, get_wd14_config, get_image_files
 from sse_utils import sse_event
 
 tagger_bp = Blueprint('tagger', __name__)
@@ -93,75 +92,6 @@ def _collect_untagged(upload_dir):
         if not os.path.exists(txt_path) or os.path.getsize(txt_path) == 0:
             to_tag.append(filename)
     return all_images, to_tag
-
-
-@tagger_bp.route('/auto_tag', methods=['POST'])
-def auto_tag():
-    """批量自动打标（SSE 流式）：对无标签的图片调用视觉模型生成标签"""
-    vcfg = get_vision_config()
-    if not vcfg['api_url'] or not vcfg['model']:
-        return jsonify({'error': '未配置视觉模型（VISION_API_URL / VISION_MODEL）'}), 400
-    if not vcfg['prompt']:
-        return jsonify({'error': '未配置视觉模型系统提示（VISION_SYSTEM_PROMPT）'}), 400
-
-    upload_dir = current_app.config['UPLOAD_FOLDER']
-    all_images, to_tag = _collect_untagged(upload_dir)
-    skipped = len(all_images) - len(to_tag)
-
-    if not to_tag:
-        return jsonify({'tagged': 0, 'skipped': skipped, 'errors': [], 'message': '所有图片已有标签'})
-
-    total = len(to_tag)
-
-    # 与 LLM 翻译统一使用 OpenAI SDK
-    from openai import OpenAI
-    client = OpenAI(base_url=vcfg['api_url'], api_key=vcfg['api_key'])
-
-    def generate():
-        tagged = 0
-        error_count = 0
-        try:
-            for idx, filename in enumerate(to_tag, start=1):
-                yield sse_event('progress', {'current': idx, 'total': total, 'item': filename})
-
-                file_path = os.path.join(upload_dir, filename)
-                ext = os.path.splitext(filename)[1].lstrip('.')
-                mime_map = {'jpg': 'jpeg', 'jpeg': 'jpeg', 'png': 'png', 'gif': 'gif', 'webp': 'webp'}
-                mime = f"image/{mime_map.get(ext, 'jpeg')}"
-
-                try:
-                    with open(file_path, 'rb') as f:
-                        img_b64 = base64.b64encode(f.read()).decode('utf-8')
-
-                    response = client.chat.completions.create(
-                        model=vcfg['model'],
-                        messages=[
-                            {'role': 'system', 'content': vcfg['prompt']},
-                            {'role': 'user', 'content': [
-                                {'type': 'image_url', 'image_url': {'url': f'data:{mime};base64,{img_b64}'}},
-                                {'type': 'text', 'text': '开始分析并输出标签：'}
-                            ]}
-                        ],
-                        temperature=0.3,
-                    )
-
-                    tags = response.choices[0].message.content.strip()
-                    txt_path = os.path.join(upload_dir, f"{os.path.splitext(filename)[0]}.txt")
-                    with open(txt_path, 'w', encoding='utf-8') as f:
-                        f.write(tags)
-                    tagged += 1
-
-                except Exception as e:
-                    error_count += 1
-                    yield sse_event('error', {'item': filename, 'error': str(e)})
-
-            yield sse_event('complete', {'tagged': tagged, 'skipped': skipped, 'errors': error_count})
-        except Exception as e:
-            # 生成器级别的未预期异常：发 fatal，前端能正常收尾
-            yield sse_event('fatal', {'error': f'自动打标异常终止: {e}'})
-
-    return Response(generate(), mimetype='text/event-stream',
-                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
 @tagger_bp.route('/auto_tag_wd14', methods=['POST'])
@@ -256,3 +186,136 @@ def auto_tag_wd14():
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@tagger_bp.route('/auto_caption_vlm', methods=['POST'])
+def auto_caption_vlm():
+    """批量生成自然语言描述（SSE 流式）：先读取已有 txt 标签作为参考，
+    送入 VLM 将结构化标签"翻译"为连贯的自然语言描述。
+
+    核心思路：让 VLM 扮演"翻译官"而非"创作者"——把已有的结构化标签翻译成自然语言。
+    无 txt 标签的图片仅靠 VLM 看图直接描述。
+    """
+    vcfg = get_vision_config()
+    ccfg = get_caption_config()
+    if not vcfg['api_url'] or not vcfg['model']:
+        return jsonify({'error': '未配置视觉模型（VISION_API_URL / VISION_MODEL）'}), 400
+
+    # 描述提示词：允许用户自定义，否则使用默认提示词
+    caption_prompt = vcfg['caption_prompt'] or (
+        '你是一个专业的图像描述生成器。你的任务是基于提供的Danbooru风格标签和图片内容，'
+        '生成一段准确、连贯、详细的自然语言描述。\n'
+        '要求：\n'
+        '1. 描述必须基于图片和提供的标签，不要添加图片中不存在或标签未暗示的细节。\n'
+        '2. 用一段连贯的英文句子描述。\n'
+        '3. 输出只包含描述本身，无需其他解释。\n'
+        '4. 不要使用Markdown格式。'
+    )
+
+    upload_dir = current_app.config['UPLOAD_FOLDER']
+    all_images = get_image_files(upload_dir)
+
+    # 过滤：只处理没有 .nl.txt 的图片（已有描述的跳过）
+    to_process = []
+    for filename in all_images:
+        base = os.path.splitext(filename)[0]
+        nl_path = os.path.join(upload_dir, f"{base}.nl.txt")
+        if not os.path.exists(nl_path):
+            to_process.append(filename)
+
+    skipped = len(all_images) - len(to_process)
+
+    if not to_process:
+        return jsonify({'tagged': 0, 'skipped': skipped, 'errors': [],
+                        'message': '所有图片已有自然语言描述'})
+
+    total = len(to_process)
+
+    from openai import OpenAI
+    client = OpenAI(base_url=vcfg['api_url'], api_key=vcfg['api_key'])
+
+    def generate():
+        tagged = 0
+        skipped = 0
+        error_count = 0
+        try:
+            yield sse_event('progress', {'current': 0, 'total': total,
+                            'item': '正在准备处理...'})
+
+            for idx, filename in enumerate(to_process, start=1):
+                yield sse_event('progress', {'current': idx, 'total': total, 'item': filename})
+                file_path = os.path.join(upload_dir, filename)
+
+                try:
+                    # Step 1: 读取已有 txt 标签作为参考（有则用，无则跳过）
+                    ref_tags = ''
+                    base = os.path.splitext(filename)[0]
+                    txt_path = os.path.join(upload_dir, f"{base}.txt")
+                    if os.path.exists(txt_path) and os.path.getsize(txt_path) > 0:
+                        with open(txt_path, 'r', encoding='utf-8') as f:
+                            content = f.read().strip()
+                        if content:
+                            ref_tags = content
+
+                    # Step 2: VLM 生成自然语言描述
+                    with open(file_path, 'rb') as f:
+                        img_b64 = base64.b64encode(f.read()).decode('utf-8')
+
+                    user_content = [
+                        {'type': 'image_url',
+                         'image_url': {'url': f'data:image/{os.path.splitext(filename)[1].lstrip(".")};base64,{img_b64}'}},
+                    ]
+
+                    if ref_tags:
+                        user_content.append({
+                            'type': 'text',
+                            'text': (
+                                '请分析这张图片，并基于以下Danbooru参考标签，'
+                                '生成一段自然语言描述。\n\n'
+                                f'参考标签：{ref_tags}\n\n'
+                                '要求：基于图片和参考标签生成描述，不添加额外细节，'
+                                '用一段连贯的英文句子。'
+                            )
+                        })
+                    else:
+                        user_content.append({
+                            'type': 'text',
+                            'text': (
+                                '请分析这张图片，生成一段自然语言描述。'
+                                '用一段连贯的英文句子，仅描述你看到的内容，不添加额外细节。'
+                            )
+                        })
+
+                    response = client.chat.completions.create(
+                        model=vcfg['model'],
+                        messages=[
+                            {'role': 'system', 'content': caption_prompt},
+                            {'role': 'user', 'content': user_content}
+                        ],
+                        temperature=0.3,
+                        max_tokens=512,
+                    )
+
+                    description = response.choices[0].message.content.strip()
+                    if not description:
+                        skipped += 1
+                        continue
+
+                    # 保存到新的 .nl.txt，不覆盖原标签
+                    out_path = os.path.join(upload_dir, f"{base}.nl.txt")
+                    with open(out_path, 'w', encoding='utf-8') as f:
+                        f.write(description)
+                    tagged += 1
+
+                except Exception as e:
+                    error_count += 1
+                    yield sse_event('error', {'item': filename, 'error': str(e)})
+
+            yield sse_event('complete', {'tagged': tagged, 'skipped': skipped,
+                            'errors': error_count})
+        except Exception as e:
+            yield sse_event('fatal', {'error': f'描述生成异常终止: {e}'})
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+

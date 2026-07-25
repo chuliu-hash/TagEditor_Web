@@ -104,6 +104,9 @@
                 <button class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs" onclick="openRenameModal()">
                     <i class="fa fa-i-cursor mr-1.5"></i> 批量重命名
                 </button>
+                <button class="flex items-center justify-center bg-green-600 hover:bg-green-700 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs" onclick="openExportModal()">
+                    <i class="fa fa-download mr-1.5"></i> 导出 ZIP
+                </button>
                 <div class="w-px h-5 bg-gray-200 mx-1"></div>
                 <!-- 清理组 -->
                 <button id="clear-all" class="flex items-center justify-center bg-danger hover:bg-danger/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs">
@@ -166,6 +169,26 @@
                         </div>
                     </div>
                 </div>
+                <!-- 自然语言描述区域（可折叠） -->
+                <div id="nl-section" class="flex-shrink-0 border-t border-gray-200 hidden">
+                    <div class="flex items-center justify-between px-3 py-1.5 bg-amber-50/50 cursor-pointer select-none" onclick="toggleNlSection()">
+                        <div class="flex items-center gap-1.5 text-xs font-medium text-amber-700">
+                            <i class="fa fa-pencil"></i>
+                            <span>自然语言描述（.nl.txt）</span>
+                        </div>
+                        <i id="nl-toggle-icon" class="fa fa-chevron-down text-amber-400 text-xs transition-transform"></i>
+                    </div>
+                    <div id="nl-body" class="px-3 py-2">
+                        <textarea id="nl-textarea" rows="3"
+                            class="w-full border border-amber-200 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-amber-400 resize-none transition-colors"
+                            placeholder="暂无自然语言描述，可点击「自动打标」→「VLM 自然语言描述」生成"></textarea>
+                        <div class="flex justify-end mt-1.5">
+                            <button id="btn-save-nl" class="bg-amber-500 hover:bg-amber-600 text-white text-xs font-medium py-1 px-3 rounded-md transition-colors flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed" onclick="saveNlCaption()">
+                                <i class="fa fa-save"></i> 保存描述
+                            </button>
+                        </div>
+                    </div>
+                </div>
                 <!-- 底部按钮栏 -->
                 <div class="flex gap-2 px-3 py-2.5 border-t border-gray-200 bg-gray-50">
                     <button class="flex-1 bg-secondary hover:bg-secondary/90 text-white font-medium py-1.5 px-3 rounded-md transition-all flex items-center justify-center text-sm" onclick="addTag()">
@@ -202,22 +225,22 @@
             <h3 class="text-lg font-semibold text-gray-800 mb-2">选择打标方式</h3>
             <p class="text-sm text-gray-400 mb-4">将对所有无标签的图片进行自动打标</p>
             <div class="space-y-3">
-                <button class="w-full flex items-center gap-3 p-4 rounded-lg border-2 border-gray-200 hover:border-primary hover:bg-primary/5 transition-all text-left group" onclick="executeAutoTag('api')">
-                    <div class="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
-                        <i class="fa fa-cloud text-primary"></i>
-                    </div>
-                    <div>
-                        <div class="font-medium text-gray-800 group-hover:text-primary">API 视觉模型打标</div>
-                        <div class="text-xs text-gray-400">通过 OpenAI 兼容 API 调用视觉模型</div>
-                    </div>
-                </button>
                 <button class="w-full flex items-center gap-3 p-4 rounded-lg border-2 border-gray-200 hover:border-secondary hover:bg-secondary/5 transition-all text-left group" onclick="executeAutoTag('wd14')">
                     <div class="w-10 h-10 rounded-full bg-secondary/10 flex items-center justify-center flex-shrink-0">
                         <i class="fa fa-desktop text-secondary"></i>
                     </div>
                     <div>
                         <div class="font-medium text-gray-800 group-hover:text-secondary">WD14 本地打标</div>
-                        <div class="text-xs text-gray-400">使用本地 ONNX 模型，无需 API</div>
+                        <div class="text-xs text-gray-400">使用本地 ONNX 模型为图片打标</div>
+                    </div>
+                </button>
+                <button class="w-full flex items-center gap-3 p-4 rounded-lg border-2 border-amber-300 hover:border-amber-500 hover:bg-amber-50 transition-all text-left group" onclick="executeAutoTag('caption')">
+                    <div class="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center flex-shrink-0">
+                        <i class="fa fa-pencil text-amber-600"></i>
+                    </div>
+                    <div>
+                        <div class="font-medium text-gray-800 group-hover:text-amber-600">VLM API 自然语言描述</div>
+                        <div class="text-xs text-gray-400"> 调用 VLM API 为图片追加自然语言描述</div>
                     </div>
                 </button>
             </div>
@@ -320,6 +343,37 @@
             <div class="flex justify-end gap-2 mt-5">
                 <button class="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" onclick="closePrepend()">取消</button>
                 <button id="prepend-execute-btn" class="px-4 py-2 text-sm bg-primary hover:bg-primary/90 text-white rounded-lg transition-colors" onclick="executePrepend()">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 导出 ZIP 弹窗 -->
+    <div id="export-modal" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center hidden" onclick="if(event.target===this)closeExportModal()">
+        <div class="bg-white rounded-xl shadow-xl w-80 p-6">
+            <h3 class="text-lg font-semibold text-gray-800 mb-2">导出 ZIP</h3>
+            <p class="text-sm text-gray-400 mb-4">选择要导出的标签版本</p>
+            <div class="space-y-3">
+                <button class="w-full flex items-center gap-3 p-4 rounded-lg border-2 border-gray-200 hover:border-secondary hover:bg-secondary/5 transition-all text-left group" onclick="executeExport('txt')">
+                    <div class="w-10 h-10 rounded-full bg-secondary/10 flex items-center justify-center flex-shrink-0">
+                        <i class="fa fa-tags text-secondary"></i>
+                    </div>
+                    <div>
+                        <div class="font-medium text-gray-800 group-hover:text-secondary">常规标签（.txt）</div>
+                        <div class="text-xs text-gray-400">导出 WD14 打标结果</div>
+                    </div>
+                </button>
+                <button class="w-full flex items-center gap-3 p-4 rounded-lg border-2 border-amber-300 hover:border-amber-500 hover:bg-amber-50 transition-all text-left group" onclick="executeExport('nl')">
+                    <div class="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center flex-shrink-0">
+                        <i class="fa fa-pencil text-amber-600"></i>
+                    </div>
+                    <div>
+                        <div class="font-medium text-gray-800 group-hover:text-amber-600">自然语言描述（.nl.txt）</div>
+                        <div class="text-xs text-gray-400">导出 VLM 生成的描述</div>
+                    </div>
+                </button>
+            </div>
+            <div class="flex justify-end mt-5">
+                <button class="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" onclick="closeExportModal()">取消</button>
             </div>
         </div>
     </div>
@@ -436,6 +490,7 @@
         let currentIndex = 0;
         let currentTags = [];
         let savedTags = '';  // 记录上次保存/加载时的标签文本
+        let savedNlCaption = '';  // 记录上次保存/加载时的自然语言描述
 
         // 通用防抖：连续触发时只执行最后一次。用于 oninput 实时筛选（filterTagStats），
         // 避免大标签集下每次按键都全量 filter+排序+渲染 DOM 造成输入卡顿。
@@ -573,15 +628,25 @@
         // === 导航 ===
         function isDirty() {
             const current = currentTags.map(t => t.tag).filter(t => t.trim()).join(', ');
-            return current !== savedTags && (current || savedTags);
+            return (current !== savedTags && (current || savedTags));
+        }
+        function isNlDirty() {
+            const current = document.getElementById('nl-textarea').value.trim();
+            return current !== savedNlCaption && (current || savedNlCaption);
         }
 
         function navigateTo(index) {
             if (index < 0 || index >= allImages.length) return;
-            if (isDirty()) {
-                // 自定义弹窗：「保存」按钮(onOk) / 「不保存」按钮(onCancel) / 遮罩或 X = 取消导航
+            const tagDirty = isDirty();
+            const nlDirty = isNlDirty();
+            if (tagDirty || nlDirty) {
+                // 构建提示消息
+                let msgParts = [];
+                if (tagDirty) msgParts.push('标签');
+                if (nlDirty) msgParts.push('自然语言描述');
                 document.getElementById('confirm-title').textContent = '未保存的修改';
-                document.getElementById('confirm-message').textContent = '当前标签有未保存的修改，是否保存后再切换？';
+                document.getElementById('confirm-message').textContent =
+                    '当前' + msgParts.join('和') + '有未保存的修改，是否保存后再切换？';
                 const okBtn = document.getElementById('confirm-ok-btn');
                 const cancelBtn = document.getElementById('confirm-cancel-btn');
                 okBtn.textContent = '保存';
@@ -591,10 +656,17 @@
                 const iconWrap = document.getElementById('confirm-icon-wrap');
                 icon.className = 'fa fa-question-circle text-primary';
                 iconWrap.className = 'w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0';
-                _confirmOnOk = function() { saveCaption().then(() => doNavigate(index)).catch(() => {}); };
+                _confirmOnOk = function() {
+                    // 依次保存标签和 NL 描述（均返回 Promise）
+                    const ps = [];
+                    if (tagDirty) ps.push(saveCaption());
+                    if (nlDirty) ps.push(saveNlCaption());
+                    Promise.all(ps).then(() => doNavigate(index)).catch(() => {});
+                };
                 // 不保存：直接导航（用户主动放弃修改）
                 _confirmOnCancel = function() {
                     savedTags = currentTags.map(t => t.tag).filter(t => t.trim()).join(', ');
+                    savedNlCaption = document.getElementById('nl-textarea').value.trim();
                     document.getElementById('confirm-modal').classList.add('hidden');
                     _confirmOnOk = null; _confirmOnCancel = null;
                     doNavigate(index);
@@ -610,6 +682,7 @@
             // 立即重置脏状态，防止快速切换时误判
             currentTags = [];
             savedTags = '';
+            savedNlCaption = '';
             focusedRowIndex = -1;
             const name = allImages[index];
 
@@ -1289,8 +1362,66 @@
                         savedTags = '';
                         renderTags();
                     }
+
+                    // 处理自然语言描述
+                    const nlText = (data.nl_caption || '').trim();
+                    savedNlCaption = nlText;
+                    const nlSection = document.getElementById('nl-section');
+                    const nlTextarea = document.getElementById('nl-textarea');
+                    if (nlText) {
+                        nlTextarea.value = nlText;
+                        nlSection.classList.remove('hidden');
+                    } else {
+                        nlTextarea.value = '';
+                        // 没有内容时，保持折叠隐藏状态
+                        nlSection.classList.add('hidden');
+                    }
                 })
                 .catch(() => { if (seq === loadSeq) showNotification('加载标签文件失败', 'error'); });
+        }
+
+        // === 自然语言描述折叠/展开 ===
+        function toggleNlSection() {
+            const body = document.getElementById('nl-body');
+            const icon = document.getElementById('nl-toggle-icon');
+            const isHidden = body.classList.toggle('hidden');
+            icon.style.transform = isHidden ? 'rotate(-90deg)' : 'rotate(0deg)';
+        }
+
+        // === 保存自然语言描述 ===
+        function saveNlCaption() {
+            const textarea = document.getElementById('nl-textarea');
+            const btn = document.getElementById('btn-save-nl');
+            const content = textarea.value.trim();
+            if (!currentImgName) { showNotification('没有选中图片', 'warning'); return Promise.reject(); }
+
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> 保存中...';
+
+            return fetch('/save_nl_caption/' + encodeURIComponent(currentImgName), {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({content: content})
+            })
+                .then(r => r.json())
+                .then(data => {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fa fa-save"></i> 保存描述';
+                    if (data.success) {
+                        savedNlCaption = content;
+                        showNotification('自然语言描述已保存', 'success');
+                        return data;
+                    } else {
+                        showNotification('保存失败：' + (data.error || '未知错误'), 'error');
+                        throw new Error(data.error || '保存失败');
+                    }
+                })
+                .catch(err => {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fa fa-save"></i> 保存描述';
+                    if (err.message !== '保存失败') showNotification('保存请求失败', 'error');
+                    throw err;
+                });
         }
 
         // === 标签上下移动 ===
@@ -1370,18 +1501,32 @@
         function executeAutoTag(method) {
             closeAutoTagModal();
             const btn = document.getElementById('btn-auto-tag');
-            btn.disabled = true; btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-2"></i> <span>打标中...</span>';
-            const url = (method === 'wd14') ? '/auto_tag_wd14' : '/auto_tag';
-            const label = (method === 'wd14') ? 'WD14 本地打标' : 'API 视觉模型打标';
-            executeWithProgress(url, {}, label, '正在为无标签图片自动生成标签...',
-                function(data) {
-                    btn.disabled = false; btn.innerHTML = '<i class="fa fa-magic mr-2"></i> <span>自动打标</span>';
-                },
-                function(data) {
-                    return '打标完成：新增 ' + data.tagged + ' 张，跳过 ' + data.skipped + ' 张'
-                        + (data.errors ? '，失败 ' + data.errors + ' 张' : '');
-                }
-            );
+            btn.disabled = true;
+            if (method === 'caption') {
+                btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-2"></i> <span>生成描述中...</span>';
+                executeWithProgress('/auto_caption_vlm', {}, 'VLM 自然语言描述生成',
+                    '正在为无 .nl.txt 的图片生成自然语言描述...',
+                    function(data) {
+                        btn.disabled = false; btn.innerHTML = '<i class="fa fa-magic mr-2"></i> <span>自动打标</span>';
+                    },
+                    function(data) {
+                        return '描述生成完成：新增 ' + data.tagged + ' 张，跳过 ' + data.skipped + ' 张'
+                            + (data.errors ? '，失败 ' + data.errors + ' 张' : '');
+                    }
+                );
+            } else {
+                btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-2"></i> <span>打标中...</span>';
+                executeWithProgress('/auto_tag_wd14', {}, 'WD14 本地打标',
+                    '正在为无标签图片自动生成标签...',
+                    function(data) {
+                        btn.disabled = false; btn.innerHTML = '<i class="fa fa-magic mr-2"></i> <span>自动打标</span>';
+                    },
+                    function(data) {
+                        return '打标完成：新增 ' + data.tagged + ' 张，跳过 ' + data.skipped + ' 张'
+                            + (data.errors ? '，失败 ' + data.errors + ' 张' : '');
+                    }
+                );
+            }
         }
 
         // === 添加触发词 ===
@@ -1422,15 +1567,26 @@
         let debouncedPreviewRename = debounce(previewRename, 250);
 
         function openRenameModal() {
+            const tagDirty = isDirty();
+            const nlDirty = isNlDirty();
             // 未保存提示，避免重命名落盘与编辑态冲突
-            if (isDirty()) {
+            if (tagDirty || nlDirty) {
+                const msgParts = [];
+                if (tagDirty) msgParts.push('标签');
+                if (nlDirty) msgParts.push('自然语言描述');
+                // 注意：批量重命名只联动 .txt，不联动 .nl.txt，但此处提示仍包含未保存的 NL 描述
                 showConfirm({
                     title: '未保存的修改',
-                    message: '当前标签有未保存的修改，重命名前建议先保存。是否保存后继续？',
+                    message: '当前' + msgParts.join('和') + '有未保存的修改，重命名前建议先保存。是否保存后继续？',
                     danger: false,
                     okText: '保存',
                     cancelText: '不保存',
-                    onOk: function() { saveCaption().then(openRenameModalImpl).catch(function(){}); },
+                    onOk: function() {
+                        const ps = [];
+                        if (tagDirty) ps.push(saveCaption());
+                        if (nlDirty) ps.push(saveNlCaption());
+                        Promise.all(ps).then(openRenameModalImpl).catch(function(){});
+                    },
                     onCancel: openRenameModalImpl
                 });
                 return;
@@ -1451,6 +1607,49 @@
 
         function closeRename() {
             document.getElementById('rename-modal').classList.add('hidden');
+        }
+
+        // === 导出 ZIP ===
+        function openExportModal() {
+            document.getElementById('export-modal').classList.remove('hidden');
+        }
+        function closeExportModal() {
+            document.getElementById('export-modal').classList.add('hidden');
+        }
+        document.getElementById('export-modal')?.addEventListener('click', function(e) {
+            if (e.target === this) closeExportModal();
+        });
+        function executeExport(txtExt) {
+            closeExportModal();
+            const btn = document.querySelector('button[onclick*="export"]');
+            if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-1.5"></i> 导出中...'; }
+            fetch('/export_zip', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({txt_ext: txtExt})
+            })
+            .then(function(response) {
+                if (!response.ok) return response.json().then(function(d) { throw new Error(d.error || '导出失败'); });
+                var filename = 'tags_export_' + txtExt + '.zip';
+                var disposition = response.headers.get('Content-Disposition') || '';
+                var match = disposition.match(/filename="?(.+?)"?$/);
+                if (match) filename = match[1];
+                return response.blob().then(function(blob) {
+                    var url = URL.createObjectURL(blob);
+                    var a = document.createElement('a');
+                    a.href = url; a.download = filename;
+                    document.body.appendChild(a); a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                    showNotification('导出成功：' + filename, 'success');
+                });
+            })
+            .catch(function(err) {
+                showNotification(err.message || '导出失败', 'error');
+            })
+            .finally(function() {
+                if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa fa-download mr-1.5"></i> 导出 ZIP'; }
+            });
         }
 
         // 预览：向后端发 preview=true 请求，渲染新旧名对照表
@@ -1560,7 +1759,7 @@
 
         // === 防止刷新/关闭丢失未保存标签 ===
         window.addEventListener('beforeunload', function(e) {
-            if (isDirty()) {
+            if (isDirty() || isNlDirty()) {
                 e.preventDefault();
                 e.returnValue = '';
             }
@@ -1732,7 +1931,7 @@
             // 局部刷新当前图（标签 + 预览），替代整页 reload，保留滚动位置与编辑焦点
             if (currentIndex >= 0 && allImages[currentIndex]) {
                 var name = allImages[currentIndex];
-                currentTags = []; savedTags = '';  // 同步清空，避免 loadCaption 异步返回前 isDirty 误报
+                currentTags = []; savedTags = ''; savedNlCaption = '';  // 同步清空，避免 loadCaption 异步返回前 isDirty 误报
                 document.getElementById('preview-img').src = '/uploads/' + encodeURIComponent(name) + '?t=' + Date.now();
                 loadCaption(name);
             }
@@ -1815,12 +2014,17 @@
         // 统一的离开当前页导航（替代 a 标签直接跳转）。
         // 未保存时弹自定义确认窗（保存/不保存/取消），已保存则直接跳转。
         function navigateAway(url) {
-            if (!isDirty()) {
+            const tagDirty = isDirty();
+            const nlDirty = isNlDirty();
+            if (!tagDirty && !nlDirty) {
                 window.location.href = url;
                 return;
             }
+            const msgParts = [];
+            if (tagDirty) msgParts.push('标签');
+            if (nlDirty) msgParts.push('自然语言描述');
             document.getElementById('confirm-title').textContent = '未保存的修改';
-            document.getElementById('confirm-message').textContent = '当前标签有未保存的修改，是否保存后再离开？';
+            document.getElementById('confirm-message').textContent = '当前' + msgParts.join('和') + '有未保存的修改，是否保存后再离开？';
             const okBtn = document.getElementById('confirm-ok-btn');
             const cancelBtn = document.getElementById('confirm-cancel-btn');
             okBtn.textContent = '保存';
@@ -1830,9 +2034,15 @@
             const iconWrap = document.getElementById('confirm-icon-wrap');
             icon.className = 'fa fa-question-circle text-primary';
             iconWrap.className = 'w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0';
-            _confirmOnOk = function() { saveCaption().then(() => { window.location.href = url; }).catch(() => {}); };
+            _confirmOnOk = function() {
+                const ps = [];
+                if (tagDirty) ps.push(saveCaption());
+                if (nlDirty) ps.push(saveNlCaption());
+                Promise.all(ps).then(() => { window.location.href = url; }).catch(() => {});
+            };
             _confirmOnCancel = function() {
                 savedTags = currentTags.map(t => t.tag).filter(t => t.trim()).join(', ');
+                savedNlCaption = document.getElementById('nl-textarea').value.trim();
                 document.getElementById('confirm-modal').classList.add('hidden');
                 _confirmOnOk = null; _confirmOnCancel = null;
                 window.location.href = url;

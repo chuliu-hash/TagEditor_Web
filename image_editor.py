@@ -78,14 +78,7 @@ def process_image():
             os.unlink(old_path)
 
     try:
-        # 检查写入前文件大小，判断是否真正覆盖成功
-        import os as _os
-        old_size = _os.path.getsize(save_path) if _os.path.exists(save_path) else -1
         ret = cv2.imwrite(save_path, img, [cv2.IMWRITE_PNG_COMPRESSION, 3])
-        new_size = _os.path.getsize(save_path) if _os.path.exists(save_path) else -1
-        print(f"[process_image] 保存: {save_path}, 尺寸: {img.shape[1]}x{img.shape[0]}, "
-              f"通道: {img.shape[2] if img.ndim > 2 else 1}, 字节: {len(img_bytes)}, "
-              f"cv2.imwrite返回: {ret}, 文件大小: {old_size}→{new_size}")
         if not ret:
             return jsonify({'success': False, 'error': '图片写入失败（cv2.imwrite 返回 False）'}), 500
     except Exception as e:
