@@ -17,7 +17,7 @@ def prepend_tags():
     upload_dir = current_app.config['UPLOAD_FOLDER']
     updated = 0
     for filename in os.listdir(upload_dir):
-        if not filename.endswith('.txt'):
+        if not (filename.endswith('.txt') and not filename.endswith('.nl.txt')):
             continue
         txt_path = os.path.join(upload_dir, filename)
         with open(txt_path, 'r', encoding='utf-8') as f:
@@ -34,7 +34,7 @@ def prepend_tags():
 
 @tag_ops_bp.route('/find_replace', methods=['POST'])
 def find_replace():
-    """在所有标签文件中查找并替换标签"""
+    """在所有标签文件中查找并替换标签（排除 .nl.txt 描述文件）"""
     data = request.get_json()
     find_text = data.get('find', '').strip()
     replace_text = data.get('replace', '').strip()
@@ -46,7 +46,7 @@ def find_replace():
     updated_files = 0
     replaced_count = 0
     for filename in os.listdir(upload_dir):
-        if not filename.endswith('.txt'):
+        if not (filename.endswith('.txt') and not filename.endswith('.nl.txt')):
             continue
         txt_path = os.path.join(upload_dir, filename)
         with open(txt_path, 'r', encoding='utf-8') as f:

@@ -38,7 +38,7 @@ python app.py
 | 层 | 文件 | 职责 |
 |----|------|------|
 | 入口 | `app.py` | 注册 Blueprint + 页面路由 |
-| 配置 | `config.py` | `.env` 热加载、模型配置、文件工具函数 |
+| 配置 | `config.py` | `.env` 热加载、prompts/ 提示词文件读取（`get_prompt`）、模型配置、文件工具函数 |
 | 翻译 | `translation.py` | 标签翻译查询/回写、标签详情/wiki 编辑路由、深度翻译单条 |
 | 翻译管线 | `llm_pipeline.py` | 三层深度翻译（entity/general/fallback），回写 cn_name/cn_wiki/nsfw |
 | 数据库 | `build_tag_db.py` | 标签库构建/增量更新/FTS5 搜索 |
@@ -96,6 +96,16 @@ WD14（onnxruntime/cv2/pandas）、Real-ESRGAN（torch/basicsr）、BiRefNet（t
 
 所有配置通过 `.env` 文件管理。每次 API 调用触发 `config.load_env()`，通过 mtime 检测按需重读。
 
+### 提示词管理（prompts/）
+
+所有 LLM/VLM 提示词统一存放在 `prompts/` 目录，每个提示词一个 `.txt` 文件（代码和 `.env` 中不存提示词，缺失即报错，无内置默认）：
+
+- `vlm_caption.txt` — VLM 自然语言描述提示词（必填，缺失时 `/auto_caption_vlm` 返回 400）
+- `llm_entity.txt` / `llm_general.txt` / `llm_fallback.txt` — LLM 深度翻译三层系统提示词
+- `rules_tag_groups.txt` / `rules_cooc.txt` — 占位符 `{TAG_GROUPS_RULE}` / `{COOC_RULE}` 注入的规则片段
+
+读取：`config.get_prompt(key)`（文件名去 `.txt` 为 key），目录 mtime + 各文件 (name, mtime, size) 签名检测热更新，修改保存即生效。LLM 提示词经 `llm_pipeline.get_system_prompt(key)` 读取并注入规则占位符，文件缺失抛 `ValueError`。文件内容整读（含 `#` 开头行，无注释语法）。
+
 ### 路径安全
 
 `safe_filename()` 保留中文字符但移除危险字符；路径验证用 `config.is_within_directory()`（基于 `os.path.commonpath()` 逐段比较，非 `startswith`）。
@@ -106,7 +116,7 @@ WD14（onnxruntime/cv2/pandas）、Real-ESRGAN（torch/basicsr）、BiRefNet（t
 - 无标签的图片纯靠 VLM 看图描述
 - **仅处理无 `.nl.txt` 的图片**，已有描述的自动跳过（`skipped`）
 - 保存到 `.nl.txt`，不覆盖原 `.txt` 标签
-- 提示词：VLM 扮演"翻译官"而非"创作者"
+- 提示词：从 `prompts/vlm_caption.txt` 读取（必填），提示词引导 VLM 扮演"翻译官"而非"创作者"
 - VLM 配置（`.env`）：`VISION_API_URL` / `VISION_API_KEY` / `VISION_MODEL`
 
 ### 前端脏状态追踪（tag_editor.html）

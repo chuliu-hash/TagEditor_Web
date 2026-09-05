@@ -6,6 +6,51 @@ from pathlib import Path
 
 _env_mtime = None
 
+_prompts_cache = None  # (签名, prompts dict)；签名变化时重新读取
+
+
+def load_prompts(prompts_dir='prompts'):
+    """按需读取提示词目录：每个 .txt 文件对应一个提示词，文件名（去 .txt）为 key。
+
+    通过「目录 mtime + 各文件 (名称, mtime, size)」签名检测变化：
+    - 新增/删除文件或修改文件内容都会改变签名，触发重新读取（热更新）
+    - 文件内容整读（含 # 开头行，不设注释语法），.strip() 后作为提示词
+    目录不存在时返回空 dict，由调用方回退内置默认提示词。
+    """
+    global _prompts_cache
+    pdir = Path(__file__).parent / prompts_dir
+    try:
+        dir_mtime = pdir.stat().st_mtime
+    except OSError:
+        dir_mtime = None
+    files = []
+    sig_entries = []
+    if pdir.is_dir():
+        for f in sorted(pdir.glob('*.txt')):
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            files.append(f)
+            sig_entries.append((f.name, st.st_mtime, st.st_size))
+    signature = (dir_mtime, tuple(sig_entries))
+    # 签名未变化则跳过磁盘读取
+    if _prompts_cache is not None and _prompts_cache[0] == signature:
+        return _prompts_cache[1]
+    prompts = {}
+    for f in files:
+        prompts[f.stem] = f.read_text(encoding='utf-8').strip()
+    _prompts_cache = (signature, prompts)
+    return prompts
+
+
+def get_prompt(key, default=''):
+    """获取提示词目录中 key（文件名去 .txt）对应的提示词；缺失时返回 default"""
+    prompts = load_prompts()
+    if key in prompts and prompts[key]:
+        return prompts[key]
+    return default
+
 
 def load_env(env_path='.env'):
     """读取 .env 到 os.environ。通过 mtime 检测避免每次调用都读磁盘（API 热更新仍生效）。"""
@@ -47,7 +92,6 @@ def get_vision_config():
         'api_url': os.environ.get('VISION_API_URL', ''),
         'api_key': os.environ.get('VISION_API_KEY', ''),
         'model': os.environ.get('VISION_MODEL', ''),
-        'caption_prompt': os.environ.get('VISION_CAPTION_PROMPT', '').replace('\\n', '\n'),
     }
 
 

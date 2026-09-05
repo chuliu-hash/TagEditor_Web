@@ -11,6 +11,7 @@
 import json
 import os
 import re
+from config import get_prompt
 import sys
 import time
 import random
@@ -298,101 +299,26 @@ def _load_cooc_data(db_path: str, top_k: int = 10) -> dict:
 
 
 # ── LLM Prompt ─────────────────────────────────────────────────────────────
+# 系统提示词统一从 prompts/ 目录读取（llm_entity / llm_general / llm_fallback.txt），
+# 支持占位符 {TAG_GROUPS_RULE} / {COOC_RULE}（内容取自 prompts/rules_*.txt）。
 
-_TAG_GROUPS_RULE = """
-        - `tag_groups`：该标签所属的 Danbooru 分类组列表（已翻译为中文，可能为空）。
-          若非空，这些分类词即为搜索锚点，**必须**全部纳入扩展中文名。
-          若为空，则根据标签语义自由生成上位概念或同义词。"""
 
-_COOC_RULE = """
-        - `cooc_tags`：该标签的常见共现标签列表（常与其一同出现的标签），用于辅助理解标签的语义上下文。
-          若非空，可作为翻译和描述时的参考语境。
-          若为空，则忽略此项。"""
+def get_system_prompt(key: str) -> str:
+    """从 prompts/ 目录读取 LLM 系统提示词并注入规则片段。
 
-_SYSTEM_PROMPT_GENERAL = f"""
-# Role
-你是一个 Danbooru 标签数据库的专家。
+    支持两个占位符（读取后自动注入）：
+    - {TAG_GROUPS_RULE} → prompts/rules_tag_groups.txt（tag_groups 处理规则）
+    - {COOC_RULE}       → prompts/rules_cooc.txt（cooc_tags 共现规则）
+    每次调用重新读取（prompts/ 修改后热更新生效）。
+    提示词文件缺失或为空时抛 ValueError —— 提示词必须由文件提供。
+    """
+    text = get_prompt(key)
+    if not text:
+        raise ValueError(f'提示词文件缺失或为空: prompts/{key}.txt')
+    text = text.replace('{TAG_GROUPS_RULE}', get_prompt('rules_tag_groups'))
+    text = text.replace('{COOC_RULE}', get_prompt('rules_cooc'))
+    return text
 
-# Task
-用户会提供一批标签数据，每条包含以下字段：
-- `wiki_data`：官方英文描述，可能缺失
-- `cn_name`：数据库中已有的中文名，可能为空或机翻错误
-- `other_names`：Danbooru Wiki 记录的别名列表（含各语言）
-- `cn_hint`：从 other_names 中自动提取的中文别名（若非空，可优先作为中文名参考）
-{_TAG_GROUPS_RULE}
-{_COOC_RULE}
-
-请完成以下四个动作：
-
-1. **生成中文描述 (chinese_wiki)**:
-   - 将 `wiki_data` 里的核心信息完整翻译为中文。
-   - 如果 `wiki_data` 为空，请根据知识库写一句该标签的中文视觉描述。
-   - 如果知识库中没有相关信息且 `wiki_data` 也无效，返回空字符串。
-   - 不要在输出里包含任何字数统计或备注信息，只输出描述本身。
-
-2. **修正中文名 (cn_name)**:
-   - 若 `cn_hint` 非空，优先将其作为基础中文名。
-   - 否则检查 `cn_name` 是否准确，若存在机翻错误则修正为二次元语境下最准确的基础中文标签名。
-
-3. **扩展中文名 (extended_cn_name)**:
-   - 按照上方 `tag_groups` 处理规则生成分类锚点词，再补充 1~2 个同义词或近义词。
-   - 只写扩展词，不要包含基础中文名，用半角逗号分隔。
-   - 扩展中文名的总数为 2~4 个。
-
-4. **NSFW 判定 (nsfw)**:
-   - 包含裸露、性行为、生殖器、恋物癖(Fetish)、血腥暴力则为 1，否则为 0。
-
-必须以合法 JSON 格式输出，结构如下，不要输出任何其他内容：
-{{"items": [{{"name": "原始英文名", "cn_name": "修正后的准确基础中文名", "extended_cn_name": "扩展词（逗号分隔）", "chinese_wiki": "中文视觉描述", "nsfw": 0}}]}}
-"""
-
-_SYSTEM_PROMPT_FALLBACK = f"""
-# Role
-你是一个 Danbooru 标签数据库的资深专家。
-
-# Task
-用户会提供一批缺失 Wiki 描述的普通标签，每条包含：
-- `cn_name`：数据库中已有的中文名，可能为空或机翻错误
-- `other_names`：Danbooru Wiki 记录的别名列表
-- `cn_hint`：从 other_names 中自动提取的中文别名
-{_TAG_GROUPS_RULE}
-{_COOC_RULE}
-
-请根据标签英文名、`cn_name`、`other_names` 及你的内部知识库完成：
-
-1. **生成中文描述 (chinese_wiki)**: 解释这个标签的视觉定义或含义，一句简练的中文描述（30字左右）。如果完全无法识别该标签，返回空字符串。
-2. **修正中文名 (cn_name)**: 若 `cn_hint` 非空，优先采用。否则检查 `cn_name` 是否准确，修正机翻错误。
-3. **扩展中文名 (extended_cn_name)**: 生成分类锚点词 + 1~2 个同义词，半角逗号分隔。总数 2~4 个。
-4. **NSFW 判定 (nsfw)**: 包含裸露、性行为等则为 1，否则为 0。
-
-必须以合法 JSON 格式输出：
-{{"items": [{{"name": "...", "cn_name": "...", "extended_cn_name": "...", "chinese_wiki": "...", "nsfw": 0}}]}}
-"""
-
-_SYSTEM_PROMPT_ENTITY = f"""
-# Role
-你是一个严谨的 ACG 领域防幻觉整理专家。
-
-# Task
-用户会提供角色名/作品名的标签数据，每条包含：
-- `ref_cn`：外部数据源（Bangumi）给出的官方中文名，可能为空
-- `ref_wiki`：外部数据源的简介，可能为空
-- `other_names`：Danbooru Wiki 记录的别名列表
-- `raw_cn_name`：数据库中已有的中文名（可能为空或机翻错误）
-{_TAG_GROUPS_RULE}
-{_COOC_RULE}
-
-请完成：
-
-1. **生成中文描述 (chinese_wiki)**: 将 `ref_wiki` 完整翻译为中文简述。若为空，根据知识库写约 50 字简介。
-2. **确定中文名 (cn_name)**: 优先级：`ref_cn` > `other_names` 中的中文名 > 你的知识库。
-   如果 `ref_cn` 存在，直接采纳。如果以上均为空，且你对该角色/作品的官方汉字名有把握则填写，否则保留原英文名。
-3. **扩展中文名 (extended_cn_name)**: 生成分类锚点词 + 所属作品名/阵营/常见别名（1~2 个），半角逗号分隔。
-4. **NSFW 判定 (nsfw)**: 包含裸露、性暗示等则为 1，否则为 0。
-
-输出格式（合法 JSON）：
-{{"items": [{{"name": "原始英文名", "cn_name": "确定的基础中文名", "extended_cn_name": "扩展词", "chinese_wiki": "中文简介", "nsfw": 0}}]}}
-"""
 
 # ── LLM 调用层 ─────────────────────────────────────────────────────────────
 
@@ -752,7 +678,7 @@ def run_llm_process(db_path: str = None, preview: bool = False,
             batch = entity_tags[i:i + batch_size]
             payload = _build_entity_payloads_batch(batch, tag_to_groups, group_cn_names, bangumi_token, cooc_data)
             print(f"[LLM] Entity 进度: {min(i + batch_size, len(entity_tags))}/{len(entity_tags)}")
-            results = _call_llm(client, model, _SYSTEM_PROMPT_ENTITY, payload, temperature=0.1)
+            results = _call_llm(client, model, get_system_prompt('llm_entity'), payload, temperature=0.1)
             n = _apply_results(conn, results)
             current_run.update(item["name"] for item in results if item.get("name"))
 
@@ -764,7 +690,7 @@ def run_llm_process(db_path: str = None, preview: bool = False,
             payload = [_build_general_payload(t, tag_to_groups, group_cn_names, cooc_data)
                        for t in batch]
             print(f"[LLM] General 进度: {min(i + batch_size, len(general_tags))}/{len(general_tags)}")
-            results = _call_llm(client, model, _SYSTEM_PROMPT_GENERAL, payload, temperature=0.4)
+            results = _call_llm(client, model, get_system_prompt('llm_general'), payload, temperature=0.4)
             _apply_results(conn, results)
             current_run.update(item["name"] for item in results if item.get("name"))
 
@@ -776,7 +702,7 @@ def run_llm_process(db_path: str = None, preview: bool = False,
             payload = [_build_general_payload(t, tag_to_groups, group_cn_names, cooc_data)
                        for t in batch]
             print(f"[LLM] Fallback 进度: {min(i + batch_size, len(fallback_tags))}/{len(fallback_tags)}")
-            results = _call_llm(client, model, _SYSTEM_PROMPT_FALLBACK, payload, temperature=0.5)
+            results = _call_llm(client, model, get_system_prompt('llm_fallback'), payload, temperature=0.5)
             _apply_results(conn, results)
             current_run.update(item["name"] for item in results if item.get("name"))
 

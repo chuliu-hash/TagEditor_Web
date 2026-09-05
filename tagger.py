@@ -3,7 +3,7 @@ import os
 import base64
 import numpy as np
 from flask import Blueprint, jsonify, current_app, Response
-from config import get_vision_config, get_wd14_config, get_image_files
+from config import get_vision_config, get_wd14_config, get_image_files, get_prompt
 from sse_utils import sse_event
 
 tagger_bp = Blueprint('tagger', __name__)
@@ -213,23 +213,10 @@ def auto_caption_vlm():
     if not vcfg['api_url'] or not vcfg['model']:
         return jsonify({'error': '未配置视觉模型（VISION_API_URL / VISION_MODEL）'}), 400
 
-    # 描述提示词：允许用户自定义，否则使用默认提示词
-    caption_prompt = vcfg['caption_prompt'] or (
-    'You are a visual captioner for an anime-style image. '
-    'The user has provided tags for objects, characters, poses, and clothing. '
-    'Your task is to describe ONLY what these tags CANNOT express.\n'
-    'Rules:\n'
-    '1. NEVER repeat the obvious tags (hair color, clothing, simple actions).\n'
-    '2. Describe composition, lighting, background depth, and spatial relationships.\n'
-    '3. Describe the atmosphere, weather, and emotional tone of the scene briefly.\n'
-    '4. Use 2 to 3 short English sentences. Keep it concise.\n'
-    '5. Output only the description, no prefixes.\n'
-    'Example:\n'
-    'a large blue peony covering half of her face, '
-    'soft blue flowers fading into the foreground, '
-    'warm sunlight creating a dreamy atmosphere, '
-    'flower petals slightly out of focus in the foreground'
-)
+    # 描述提示词：统一从 prompts/ 目录读取（vlm_caption.txt），必填
+    caption_prompt = get_prompt('vlm_caption')
+    if not caption_prompt:
+        return jsonify({'error': '未配置 VLM 描述提示词，请创建 prompts/vlm_caption.txt'}), 400
 
     upload_dir = current_app.config['UPLOAD_FOLDER']
     all_images = get_image_files(upload_dir)

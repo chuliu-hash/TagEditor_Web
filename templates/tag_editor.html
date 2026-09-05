@@ -121,18 +121,28 @@
         {% if images %}
         <!-- 图片列表侧栏 + 编辑区 -->
         <div class="flex gap-3 h-[calc(100vh-120px)]">
-            <!-- 左侧：文件名列表 -->
-            <div class="w-48 flex-shrink-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+            <!-- 左侧：文件名列表（flex-[2] 占剩余 2/10） -->
+            <div class="flex-[2] min-w-40 flex-shrink-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
                 <div class="px-3 py-2 bg-gray-50 border-b border-gray-200 font-semibold text-xs text-gray-500 uppercase tracking-wide flex items-center justify-between">
                     <span>图片列表</span>
                     <span class="text-xs text-gray-400 font-normal" id="image-counter">{{ image_count }} 张</span>
+                </div>
+                <!-- 按标签过滤 -->
+                <div class="px-3 pt-2 pb-1.5 flex items-center gap-1.5 border-b border-gray-100">
+                    <div class="relative flex-1 min-w-0">
+                        <i class="fa fa-search absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-gray-400"></i>
+                        <input id="file-filter-input" type="text" class="w-full border border-gray-200 rounded-lg pl-7 pr-2 py-1.5 text-sm focus:outline-none focus:border-primary transition-colors" placeholder="按标签内容查找" oninput="debouncedApplyFilter()">
+                    </div>
+                    <button id="file-filter-reset" onclick="resetFilter()" title="重置，显示全部图片" class="w-7 h-7 flex items-center justify-center text-gray-400 hover:text-primary hover:bg-primary/5 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed" disabled>
+                        <i class="fa fa-rotate-left"></i>
+                    </button>
                 </div>
                 <div id="file-list" class="flex-grow overflow-y-auto overflow-x-auto">
                 </div>
             </div>
 
-            <!-- 中间：图片预览（flex-[1] 占一半剩余空间） -->
-            <div id="preview-panel" class="flex-[1] min-w-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+            <!-- 中间：图片预览（flex-[3] 占剩余 3/10） -->
+            <div id="preview-panel" class="flex-[3] min-w-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
                 <div id="preview-area" class="relative flex-1 min-h-0 flex justify-center items-center bg-gray-100 overflow-hidden" style="cursor:default">
                     <div id="preview-zoom-wrap">
                         <img id="preview-img" src="" alt="" class="rounded select-none">
@@ -149,8 +159,8 @@
                 </div>
             </div>
 
-            <!-- 右侧：标签列表 + 操作按钮（flex-[1] 占 1/3 剩余空间） -->
-            <div id="editor-panel" class="flex-[1] min-w-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+            <!-- 右侧：标签列表 + 操作按钮（flex-[5] 占剩余 5/10 = 1/2） -->
+            <div id="editor-panel" class="flex-[5] min-w-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
                 <!-- 标签列表容器 -->
                 <div id="tags-container" class="flex-grow flex flex-col min-h-0">
                     <!-- 表头（在滚动容器外，用 pr-1 补偿滚动条宽度使分隔线对齐） -->
@@ -170,21 +180,22 @@
                     </div>
                 </div>
                 <!-- 底部按钮栏 -->
-                <div class="flex gap-2 px-3 py-2.5 border-t border-gray-200 bg-gray-50">
-                    <button class="flex-1 bg-secondary hover:bg-secondary/90 text-white font-medium py-1.5 px-3 rounded-md transition-all flex items-center justify-center text-sm" onclick="addTag()">
-                        <i class="fa fa-plus mr-1"></i> 添加标签
+                <div class="flex gap-1.5 px-2 py-2.5 border-t border-gray-200 bg-gray-50">
+                    <button class="flex-1 flex flex-col items-center justify-center gap-0.5 bg-secondary hover:bg-secondary/90 text-white font-medium py-1.5 px-1 rounded-md transition-all text-xs leading-tight text-center" onclick="addTag()" title="添加标签">
+                        <i class="fa fa-plus"></i> 添加标签
                     </button>
-                    <button class="flex-1 bg-indigo-500 hover:bg-indigo-600 text-white font-medium py-1.5 px-3 rounded-md transition-all flex items-center justify-center text-sm" onclick="moveTag(-1)">
-                        <i class="fa fa-arrow-up mr-1"></i> 选中标签上移
+                    <button class="flex-1 flex flex-col items-center justify-center gap-0.5 bg-indigo-500 hover:bg-indigo-600 text-white font-medium py-1.5 px-1 rounded-md transition-all text-xs leading-tight text-center" onclick="moveTag(-1)" title="选中标签上移">
+                        <i class="fa fa-arrow-up"></i> 上移
                     </button>
-                    <button class="flex-1 bg-indigo-500 hover:bg-indigo-600 text-white font-medium py-1.5 px-3 rounded-md transition-all flex items-center justify-center text-sm" onclick="moveTag(1)">
-                        <i class="fa fa-arrow-down mr-1"></i> 选中标签下移
+                    <button class="flex-1 flex flex-col items-center justify-center gap-0.5 bg-indigo-500 hover:bg-indigo-600 text-white font-medium py-1.5 px-1 rounded-md transition-all text-xs leading-tight text-center" onclick="moveTag(1)" title="选中标签下移">
+                        <i class="fa fa-arrow-down"></i> 下移
                     </button>
-                    <button id="btn-save" class="flex-1 bg-primary hover:bg-primary/90 text-white font-medium py-1.5 px-3 rounded-md transition-all flex items-center justify-center text-sm" onclick="saveCaption()">
-                        <i class="fa fa-save mr-1"></i> 保存当前标签
+                    <button id="btn-save" class="flex-1 flex flex-col items-center justify-center gap-0.5 bg-primary hover:bg-primary/90 text-white font-medium py-1.5 px-1 rounded-md transition-all text-xs leading-tight text-center" onclick="saveCaption()" title="保存当前标签">
+                        <i class="fa fa-save"></i> 保存
                     </button>
-                    <button id="btn-nl" class="flex-1 bg-amber-600 hover:bg-amber-700 text-white font-medium py-1.5 px-3 rounded-md transition-all flex items-center justify-center text-sm hidden" onclick="openNlModal()" title="编辑自然语言描述">
-                        <i class="fa fa-file-text-o mr-1"></i> 自然语言描述
+                    <!-- NL 按钮常显；无 .nl.txt 时 disabled 置灰不可点 -->
+                    <button id="btn-nl" class="flex-1 flex flex-col items-center justify-center gap-0.5 bg-amber-600 hover:bg-amber-700 disabled:bg-gray-300 disabled:text-gray-500 disabled:hover:bg-gray-300 disabled:cursor-not-allowed text-white font-medium py-1.5 px-1 rounded-md transition-all text-xs leading-tight text-center" onclick="openNlModal()" title="编辑自然语言描述" disabled>
+                        <i class="fa fa-file-text-o"></i> 自然语言描述
                     </button>
                 </div>
             </div>
@@ -248,6 +259,46 @@
             <div class="flex justify-end gap-2 mt-5">
                 <button id="confirm-cancel-btn" class="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" onclick="confirmCancel()">取消</button>
                 <button id="confirm-ok-btn" class="px-4 py-2 text-sm text-white rounded-lg transition-colors bg-red-500 hover:bg-red-600" onclick="confirmOk()">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 清空方式选择弹窗 -->
+    <div id="clear-modal" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center hidden" onclick="if(event.target===this)closeClearModal()">
+        <div class="bg-white rounded-xl shadow-xl w-[440px] p-6">
+            <h3 class="text-lg font-semibold text-gray-800 mb-1">清空文件</h3>
+            <p class="text-sm text-gray-400 mb-4">选择要清空的内容（操作不可恢复）</p>
+            <div class="space-y-3">
+                <button class="w-full flex items-center gap-3 p-4 rounded-lg border-2 border-gray-200 hover:border-danger hover:bg-red-50 transition-all text-left group" onclick="executeClear('all')">
+                    <div class="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center flex-shrink-0">
+                        <i class="fa fa-trash text-red-500"></i>
+                    </div>
+                    <div>
+                        <div class="font-medium text-gray-800 group-hover:text-red-600">清空全部</div>
+                        <div class="text-xs text-gray-400">删除所有图片及标签(.txt)、描述(.nl.txt)</div>
+                    </div>
+                </button>
+                <button class="w-full flex items-center gap-3 p-4 rounded-lg border-2 border-gray-200 hover:border-amber-500 hover:bg-amber-50 transition-all text-left group" onclick="executeClear('nl')">
+                    <div class="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center flex-shrink-0">
+                        <i class="fa fa-pencil text-amber-600"></i>
+                    </div>
+                    <div>
+                        <div class="font-medium text-gray-800 group-hover:text-amber-600">仅删除自然语言描述 (.nl.txt)</div>
+                        <div class="text-xs text-gray-400">清空 VLM 生成的描述，保留图片和标签</div>
+                    </div>
+                </button>
+                <button class="w-full flex items-center gap-3 p-4 rounded-lg border-2 border-gray-200 hover:border-indigo-500 hover:bg-indigo-50 transition-all text-left group" onclick="executeClear('tags')">
+                    <div class="w-10 h-10 rounded-full bg-indigo-50 flex items-center justify-center flex-shrink-0">
+                        <i class="fa fa-tags text-indigo-500"></i>
+                    </div>
+                    <div>
+                        <div class="font-medium text-gray-800 group-hover:text-indigo-600">删除所有标签 (.txt + .nl.txt)</div>
+                        <div class="text-xs text-gray-400">清空全部标签文件，保留图片（可重新打标）</div>
+                    </div>
+                </button>
+            </div>
+            <div class="flex justify-end mt-5">
+                <button class="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" onclick="closeClearModal()">取消</button>
             </div>
         </div>
     </div>
@@ -341,7 +392,7 @@
                         <i class="fa fa-tags text-secondary"></i>
                     </div>
                     <div>
-                        <div class="font-medium text-gray-800 group-hover:text-secondary">常规标签（.txt）</div>
+                        <div class="font-medium text-gray-800 group-hover:text-secondary">常规标签</div>
                         <div class="text-xs text-gray-400">导出 WD14 打标结果</div>
                     </div>
                 </button>
@@ -350,8 +401,8 @@
                         <i class="fa fa-pencil text-amber-600"></i>
                     </div>
                     <div>
-                        <div class="font-medium text-gray-800 group-hover:text-amber-600">自然语言描述（.nl.txt）</div>
-                        <div class="text-xs text-gray-400">导出 VLM 生成的描述</div>
+                        <div class="font-medium text-gray-800 group-hover:text-amber-600">常规标签 + 自然语言描述</div>
+                        <div class="text-xs text-gray-400">导出 WD14 和 VLM 打标结果</div>
                     </div>
                 </button>
             </div>
@@ -497,6 +548,9 @@
         let currentTags = [];
         let savedTags = '';  // 记录上次保存/加载时的标签文本
         let savedNlCaption = '';  // 记录上次保存/加载时的自然语言描述
+        let currentImageName = '';  // 当前预览图片文件名（过滤后定位用）
+        let visibleImages = allImages;  // 当前视图（过滤时 = 后端返回的匹配子集）
+        let filterActive = false;       // 是否处于过滤状态
 
         // 通用防抖：连续触发时只执行最后一次。用于 oninput 实时筛选（filterTagStats），
         // 避免大标签集下每次按键都全量 filter+排序+渲染 DOM 造成输入卡顿。
@@ -590,9 +644,17 @@
                         .then(r => r.json())
                         .then(data => {
                             if (!data.success) { showNotification('删除失败', 'error'); return; }
-                            allImages.splice(index, 1);
+                            // name 为准从全量数组移除（过滤态下 index 是视图下标，不能直接用于 allImages）
+                            const ai = allImages.indexOf(name);
+                            if (ai >= 0) allImages.splice(ai, 1);
+                            if (filterActive) {
+                                // 过滤态：重新拉取过滤结果以保持视图正确
+                                applyFilter();
+                                showNotification('已删除 ' + name, 'success');
+                                return;
+                            }
                             rebuildFileList();
-                            document.getElementById('image-counter').textContent = allImages.length + ' 张';
+                            updateImageCounter();
                             if (allImages.length === 0) {
                                 location.reload();
                             } else if (index < allImages.length) {
@@ -609,12 +671,19 @@
 
         function rebuildFileList() {
             const list = document.getElementById('file-list');
-            list.innerHTML = allImages.map((img, i) =>
-                '<div class="file-item flex items-center px-2 py-1.5 text-sm cursor-pointer border-l-2 border-transparent hover:bg-primary/5 transition-colors group"'
+            if (visibleImages.length === 0) {
+                list.innerHTML = '<div class="p-6 text-center text-gray-300 text-sm">'
+                    + (filterActive ? '没有匹配的图片' : '暂无图片') + '</div>';
+                return;
+            }
+            list.innerHTML = visibleImages.map((img, i) =>
+                '<div class="file-item relative flex items-center px-2 py-1.5 text-sm cursor-pointer border-l-2 border-transparent hover:bg-primary/5 transition-colors group"'
                 + ' data-image="' + escapeHtml(img) + '" data-index="' + i + '">'
-                + '<button class="del-btn flex-shrink-0 w-5 h-5 flex items-center justify-center text-gray-500 hover:text-red-500 transition-colors rounded opacity-0 group-hover:opacity-100" data-name="' + escapeHtml(img) + '" data-index="' + i + '" title="删除">'
+                // 删除按钮绝对定位不占布局空间（否则平时会留下透明占位空白），hover 行时出现
+                + '<button class="del-btn absolute left-2 top-1/2 -translate-y-1/2 z-10 w-5 h-5 flex items-center justify-center text-gray-500 hover:text-red-500 transition-colors rounded opacity-0 group-hover:opacity-100" data-name="' + escapeHtml(img) + '" data-index="' + i + '" title="删除" style="line-height:1">'
                 + '<i class="fa fa-times text-xs"></i></button>'
-                + '<span class="flex-1 min-w-0 ml-1 text-gray-600 group-hover:text-gray-800 whitespace-nowrap" title="' + escapeHtml(img) + '">' + escapeHtml(img) + '</span></div>'
+                // 文件名起点贴左；hover 时右移 24px 为删除按钮让位（平滑过渡，不遮挡文字）
+                + '<span class="flex-1 min-w-0 pl-1 transition-[padding] duration-150 group-hover:pl-7 text-gray-600 group-hover:text-gray-800 whitespace-nowrap" title="' + escapeHtml(img) + '">' + escapeHtml(img) + '</span></div>'
             ).join('');
         }
 
@@ -631,6 +700,58 @@
             }
         });
 
+        // === 按标签过滤 ===
+        let filterSeq = 0;  // 过滤响应序列守卫，丢弃过期响应避免异步竞态
+
+        function updateImageCounter() {
+            const el = document.getElementById('image-counter');
+            el.textContent = (filterActive ? visibleImages.length + ' / ' + allImages.length + ' 张' : allImages.length + ' 张');
+        }
+
+        function applyFilter() {
+            const input = document.getElementById('file-filter-input');
+            const keyword = input ? input.value.trim() : '';
+            filterActive = keyword.length > 0;
+            const seq = ++filterSeq;
+            fetch('/filter_images', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({keyword: keyword})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (seq !== filterSeq) return;  // 过期响应
+                visibleImages = data.images || [];
+                document.getElementById('file-filter-reset').disabled = !filterActive;
+                updateImageCounter();
+                rebuildFileList();
+                // 定位：当前图仍在结果中则保持，否则跳到视图第一张；空视图禁用翻页
+                if (visibleImages.length === 0) {
+                    document.getElementById('btn-prev').disabled = true;
+                    document.getElementById('btn-next').disabled = true;
+                    return;
+                }
+                const idx = visibleImages.indexOf(currentImageName);
+                navigateTo(idx >= 0 ? idx : 0);
+            })
+            .catch(() => { if (seq === filterSeq) showNotification('过滤失败', 'error'); });
+        }
+
+        function resetFilter() {
+            const input = document.getElementById('file-filter-input');
+            if (input) input.value = '';
+            applyFilter();
+        }
+
+        // 统计弹窗点击标签 → 主页面过滤图片列表
+        function filterImagesByTag(tag) {
+            closeTagStats();
+            const input = document.getElementById('file-filter-input');
+            if (input) input.value = tag;
+            applyFilter();
+        }
+        const debouncedApplyFilter = debounce(applyFilter, 250);
+
         // === 导航 ===
         function isDirty() {
             const current = currentTags.map(t => t.tag).filter(t => t.trim()).join(', ');
@@ -642,7 +763,7 @@
         }
 
         function navigateTo(index) {
-            if (index < 0 || index >= allImages.length) return;
+            if (index < 0 || index >= visibleImages.length) return;
             const tagDirty = isDirty();
             const nlDirty = isNlDirty();
             if (tagDirty || nlDirty) {
@@ -690,7 +811,8 @@
             savedTags = '';
             savedNlCaption = '';
             focusedRowIndex = -1;
-            const name = allImages[index];
+            const name = visibleImages[index];
+            currentImageName = name;
 
             document.getElementById('preview-img').src = '/uploads/' + encodeURIComponent(name);
             fitPreviewImage();
@@ -713,16 +835,16 @@
             }
 
             document.getElementById('btn-prev').disabled = (index === 0);
-            document.getElementById('btn-next').disabled = (index === allImages.length - 1);
+            document.getElementById('btn-next').disabled = (index === visibleImages.length - 1);
 
-            // 预加载前后图片和标签
+            // 预加载前后图片和标签（按当前视图）
             if (index > 0) {
-                new Image().src = '/uploads/' + encodeURIComponent(allImages[index - 1]);
-                fetch('/get_caption/' + encodeURIComponent(allImages[index - 1]));
+                new Image().src = '/uploads/' + encodeURIComponent(visibleImages[index - 1]);
+                fetch('/get_caption/' + encodeURIComponent(visibleImages[index - 1]));
             }
-            if (index < allImages.length - 1) {
-                new Image().src = '/uploads/' + encodeURIComponent(allImages[index + 1]);
-                fetch('/get_caption/' + encodeURIComponent(allImages[index + 1]));
+            if (index < visibleImages.length - 1) {
+                new Image().src = '/uploads/' + encodeURIComponent(visibleImages[index + 1]);
+                fetch('/get_caption/' + encodeURIComponent(visibleImages[index + 1]));
             }
 
             loadCaption(name);
@@ -1379,13 +1501,13 @@
                         renderTags();
                     }
 
-                    // 处理自然语言描述（显示/隐藏 NL 按钮）
+                    // 处理自然语言描述（按钮常显，无描述时 disabled 置灰不可点）
                     const nlText = (data.nl_caption || '').trim();
                     savedNlCaption = nlText;
                     const nlTextarea = document.getElementById('nl-textarea');
                     const nlBtn = document.getElementById('btn-nl');
                     nlTextarea.value = nlText;
-                    nlBtn.classList.toggle('hidden', !nlText);
+                    nlBtn.disabled = !nlText;
                 })
                 .catch(() => { if (seq === loadSeq) showNotification('加载标签文件失败', 'error'); });
         }
@@ -1414,10 +1536,10 @@
             }
             document.getElementById('nl-modal').classList.add('hidden');
         }
-        // 保存后更新 NL 按钮显示状态
+        // 保存后更新 NL 按钮可用状态（有内容可编辑，无内容置灰）
         function _updateNlBar() {
             const nlText = document.getElementById('nl-textarea').value.trim();
-            document.getElementById('btn-nl').classList.toggle('hidden', !nlText);
+            document.getElementById('btn-nl').disabled = !nlText;
         }
 
         // === 保存自然语言描述 ===
@@ -1484,7 +1606,7 @@
 
             // 在异步开始前捕获快照，防止保存过程中用户切换图片
             const saveIndex = currentIndex;
-            const saveFilename = allImages[saveIndex];
+            const saveFilename = visibleImages[saveIndex];
             const savedCurrentTags = currentTags;
 
             const tags = savedCurrentTags.map(t => t.tag.trim()).filter(t => t);
@@ -1537,7 +1659,7 @@
             btn.disabled = true;
             if (method === 'caption') {
                 btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-2"></i> <span>生成描述中...</span>';
-                executeWithProgress('/auto_caption_vlm', {}, 'VLM 自然语言描述生成',
+                executeWithProgress('/auto_caption_vlm', {}, 'VLM 自然语言描述打标',
                     '正在为无 .nl.txt 的图片生成自然语言描述...',
                     function(data) {
                         btn.disabled = false; btn.innerHTML = '<i class="fa fa-magic mr-2"></i> <span>自动打标</span>';
@@ -1962,8 +2084,8 @@
 
         function refreshCurrentImage() {
             // 局部刷新当前图（标签 + 预览），替代整页 reload，保留滚动位置与编辑焦点
-            if (currentIndex >= 0 && allImages[currentIndex]) {
-                var name = allImages[currentIndex];
+            if (currentIndex >= 0 && visibleImages[currentIndex]) {
+                var name = visibleImages[currentIndex];
                 currentTags = []; savedTags = ''; savedNlCaption = '';  // 同步清空，避免 loadCaption 异步返回前 isDirty 误报
                 document.getElementById('preview-img').src = '/uploads/' + encodeURIComponent(name) + '?t=' + Date.now();
                 loadCaption(name);
@@ -2081,8 +2203,8 @@
         }
 
         function navigateToEditor() {
-            const target = (currentIndex >= 0 && allImages[currentIndex])
-                ? '/img_editor#' + encodeURIComponent(allImages[currentIndex])
+            const target = (currentIndex >= 0 && visibleImages[currentIndex])
+                ? '/img_editor#' + encodeURIComponent(visibleImages[currentIndex])
                 : '/img_editor';
             navigateAway(target);
             return false;  // 阻止 a 标签默认跳转（由 navigateAway 处理）
@@ -2129,14 +2251,20 @@
                 return;
             }
             tbody.innerHTML = stats.map((s, i) =>
-                '<tr class="border-b border-gray-50 hover:bg-gray-50/80">'
+                '<tr class="border-b border-gray-50 hover:bg-gray-50/80 cursor-pointer" data-tag="' + escapeHtml(s.tag) + '" title="点击过滤图片列表，仅显示含该标签的图片">'
                 + '<td class="px-6 py-1.5 text-gray-300">' + (startIndex + i + 1) + '</td>'
-                + '<td class="px-4 py-1.5 font-mono">' + escapeHtml(s.tag) + '</td>'
+                + '<td class="px-4 py-1.5 font-mono text-primary">' + escapeHtml(s.tag) + '</td>'
                 + '<td class="px-4 py-1.5 text-right font-medium text-primary">' + s.count + '</td>'
                 + '<td class="px-4 py-1.5 text-gray-400">' + escapeHtml(s.translation || '') + '</td>'
                 + '</tr>'
             ).join('');
         }
+
+        // 统计表格行点击委托：点击标签行 → 主页面过滤图片列表（data-tag 经 escapeHtml 转义，读回自动还原）
+        document.getElementById('tag-stats-body').addEventListener('click', function(e) {
+            const row = e.target.closest('tr[data-tag]');
+            if (row) filterImagesByTag(row.dataset.tag);
+        });
 
         // 渲染当前页（_statsView 的 _statsPage 切片）+ 更新分页栏状态
         function renderStatsPage() {
@@ -2235,23 +2363,38 @@
                 document.getElementById('ts-replace-to').value = '';
                 document.getElementById('ts-replace-btn').disabled = true;
                 reloadTagStats().catch(() => showNotification('统计刷新失败，请重开弹窗', 'warning'));
+                // 若主页面处于过滤状态，替换可能改变命中集 → 重新过滤保持视图一致
+                if (filterActive) applyFilter();
             })
             .catch(() => showNotification('替换失败', 'error'))
             .finally(() => { btn.textContent = '替换匹配项'; updateReplaceBtnState(); });
         }
 
-        document.getElementById('clear-all').addEventListener('click', function() {
-            showConfirm({
-                title: '清空所有文件',
-                message: '确定要清空所有图片和标签文件吗？此操作不可恢复。',
-                danger: true,
-                okText: '清空',
-                onOk: function() {
-                    savedTags = currentTags.map(t => t.tag).filter(t => t.trim()).join(', ');
-                    fetch('/clear_all', {method: 'POST'}).then(() => location.reload());
-                }
-            });
-        });
+        // === 清空文件（弹窗选择模式） ===
+        function openClearModal() {
+            document.getElementById('clear-modal').classList.remove('hidden');
+        }
+        function closeClearModal() {
+            document.getElementById('clear-modal').classList.add('hidden');
+        }
+        // mode: 'all' | 'nl' | 'tags'，执行后刷新页面
+        function executeClear(mode) {
+            // 先同步脏状态，避免刷新时触发未保存提示
+            savedTags = currentTags.map(t => t.tag).filter(t => t.trim()).join(', ');
+            fetch('/clear_all', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({mode: mode})
+            })
+            .then(r => r.json())
+            .then(data => {
+                closeClearModal();
+                if (data.error) { showNotification('清空失败: ' + data.error, 'error'); return; }
+                location.reload();
+            })
+            .catch(() => { closeClearModal(); showNotification('清空失败', 'error'); });
+        }
+        document.getElementById('clear-all').addEventListener('click', openClearModal);
 
         // 初始化
         if (allImages.length > 0) {

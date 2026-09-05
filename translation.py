@@ -474,7 +474,7 @@ def llm_process_db():
                                                              os.environ.get('BANGUMI_ACCESS_TOKEN', ''),
                                                              cooc_data)
                     try:
-                        results = lp._call_llm(client, model, lp._SYSTEM_PROMPT_ENTITY, payload, temperature=0.1)
+                        results = lp._call_llm(client, model, lp.get_system_prompt('llm_entity'), payload, temperature=0.1)
                     except Exception as e:
                         print(f'[LLM 翻译] 实体批处理失败: {e}')
                         yield sse_event('error', {'item': f'实体批 {i}-{i + len(batch)}', 'error': str(e)})
@@ -500,7 +500,7 @@ def llm_process_db():
                     payload = [lp._build_general_payload(t, tag_to_groups, group_cn_names, cooc_data)
                                for t in batch]
                     try:
-                        results = lp._call_llm(client, model, lp._SYSTEM_PROMPT_GENERAL, payload, temperature=0.4)
+                        results = lp._call_llm(client, model, lp.get_system_prompt('llm_general'), payload, temperature=0.4)
                     except Exception as e:
                         print(f'[LLM 翻译] 常规批处理失败: {e}')
                         yield sse_event('error', {'item': f'常规批 {i}-{i + len(batch)}', 'error': str(e)})
@@ -526,7 +526,7 @@ def llm_process_db():
                     payload = [lp._build_general_payload(t, tag_to_groups, group_cn_names, cooc_data)
                                for t in batch]
                     try:
-                        results = lp._call_llm(client, model, lp._SYSTEM_PROMPT_FALLBACK, payload, temperature=0.5)
+                        results = lp._call_llm(client, model, lp.get_system_prompt('llm_fallback'), payload, temperature=0.5)
                     except Exception as e:
                         print(f'[LLM 翻译] 兜底批处理失败: {e}')
                         yield sse_event('error', {'item': f'兜底批 {i}-{i + len(batch)}', 'error': str(e)})
@@ -766,7 +766,7 @@ def translate_single_tag():
     # 加载 tag_groups 和共现数据
     from llm_pipeline import (
         _build_entity_payload, _build_general_payload,
-        _SYSTEM_PROMPT_ENTITY, _SYSTEM_PROMPT_GENERAL, _SYSTEM_PROMPT_FALLBACK,
+        get_system_prompt,
         _call_llm, _apply_results, _load_tag_groups, _load_cooc_data,
     )
     from config import get_tag_db_config
@@ -792,15 +792,15 @@ def translate_single_tag():
             os.environ.get('BANGUMI_ACCESS_TOKEN', ''),
             cooc_data
         )]
-        system_prompt = _SYSTEM_PROMPT_ENTITY
+        system_prompt = get_system_prompt('llm_entity')
         temperature = 0.1
     elif has_wiki:
         payload = [_build_general_payload(tag_data, tag_to_groups, group_cn_names, cooc_data)]
-        system_prompt = _SYSTEM_PROMPT_GENERAL
+        system_prompt = get_system_prompt('llm_general')
         temperature = 0.4
     else:
         payload = [_build_general_payload(tag_data, tag_to_groups, group_cn_names, cooc_data)]
-        system_prompt = _SYSTEM_PROMPT_FALLBACK
+        system_prompt = get_system_prompt('llm_fallback')
         temperature = 0.5
 
     # LLM 调用

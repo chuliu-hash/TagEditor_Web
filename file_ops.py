@@ -2,7 +2,7 @@
 import os
 import struct
 from flask import Blueprint, request, redirect, url_for, jsonify, send_from_directory, current_app
-from config import allowed_file, safe_filename, is_within_directory
+from config import allowed_file, safe_filename, is_within_directory, get_image_files
 
 file_ops_bp = Blueprint('file_ops', __name__)
 
@@ -233,15 +233,42 @@ def save_nl_caption(image_name):
     return jsonify({'success': True})
 
 
+@file_ops_bp.route('/filter_images', methods=['POST'])
+def filter_images():
+    """按标签内容子串过滤图片（大小写不敏感）。
+
+    仅匹配 {base}.txt 标签文件内容，忽略 .nl.txt 描述文件；
+    无关键词时返回全部图片。结果保持 get_image_files 自然排序，与列表一致。
+    """
+    keyword = (request.get_json(silent=True) or {}).get('keyword', '').strip().lower()
+    upload_dir = current_app.config['UPLOAD_FOLDER']
+    if not keyword:
+        return jsonify({'images': get_image_files(upload_dir)})
+    matches = []
+    for name in get_image_files(upload_dir):
+        base = os.path.splitext(name)[0]
+        txt_path = os.path.join(upload_dir, base + '.txt')
+        if not os.path.exists(txt_path):
+            continue
+        try:
+            with open(txt_path, 'r', encoding='utf-8', errors='ignore') as f:
+                hit = keyword in f.read().lower()
+        except OSError:
+            hit = False
+        if hit:
+            matches.append(name)
+    return jsonify({'images': matches})
+
+
 @file_ops_bp.route('/tag_stats')
 def tag_stats():
-    """统计所有标签出现次数，附翻译（从 SQLite 查）"""
+    """统计所有标签出现次数，附翻译（从 SQLite 查）。排除 .nl.txt 描述文件"""
     from collections import Counter
     from translation import _lookup_cn_from_db
     upload_dir = current_app.config['UPLOAD_FOLDER']
     counter = Counter()
     for filename in os.listdir(upload_dir):
-        if not filename.endswith('.txt'):
+        if not (filename.endswith('.txt') and not filename.endswith('.nl.txt')):
             continue
         with open(os.path.join(upload_dir, filename), 'r', encoding='utf-8') as f:
             content = f.read().strip()
@@ -263,22 +290,41 @@ def tag_stats():
             entry['translation'] = tr
         stats.append(entry)
 
-    return jsonify({'stats': stats, 'total_files': len([f for f in os.listdir(upload_dir) if f.endswith('.txt')])})
+    return jsonify({'stats': stats, 'total_files': len([f for f in os.listdir(upload_dir)
+                                                        if f.endswith('.txt') and not f.endswith('.nl.txt')])})
 
 
 @file_ops_bp.route('/clear_all', methods=['POST'])
 def clear_all():
-    """清空所有上传的文件"""
-    upload_dir = current_app.config['UPLOAD_FOLDER']
-    for filename in os.listdir(upload_dir):
-        file_path = os.path.join(upload_dir, filename)
-        try:
-            if os.path.isfile(file_path):
-                os.unlink(file_path)
-        except Exception as e:
-            print(f"删除文件失败: {str(e)}")
+    """按模式清空上传目录中的文件。
 
-    return redirect(url_for('tag_editor'))
+    请求体 JSON：
+        mode: 'all'  全部文件（图片 + .txt + .nl.txt，默认，兼容旧调用）
+              'nl'   仅自然语言描述 .nl.txt
+              'tags' 所有标签文件 .txt + .nl.txt（保留图片）
+    返回 JSON: {removed: N}
+    """
+    data = request.get_json(silent=True) or {}
+    mode = data.get('mode', 'all')
+    upload_dir = current_app.config['UPLOAD_FOLDER']
+    removed = 0
+    for filename in os.listdir(upload_dir):
+        if mode == 'all':
+            delete = True
+        elif mode == 'nl':
+            delete = filename.endswith('.nl.txt')
+        elif mode == 'tags':
+            delete = filename.endswith('.txt')  # .nl.txt 同样以 .txt 结尾，一并涵盖
+        else:
+            return jsonify({'error': f'未知模式: {mode}'}), 400
+        if delete:
+            try:
+                os.unlink(os.path.join(upload_dir, filename))
+                removed += 1
+            except Exception as e:
+                print(f"删除文件失败 {filename}: {str(e)}")
+
+    return jsonify({'removed': removed})
 
 
 @file_ops_bp.route('/delete/<image_name>', methods=['POST'])
