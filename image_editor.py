@@ -2,7 +2,7 @@
 import os
 import numpy as np
 from io import BytesIO
-from flask import Blueprint, request, jsonify, Response, current_app, send_file
+from flask import Blueprint, request, jsonify, Response, current_app, send_file, stream_with_context
 from config import safe_filename, is_within_directory, get_realesrgan_config, get_birefnet_config
 from sse_utils import sse_event
 
@@ -113,7 +113,8 @@ def batch_alpha_to_white():
                 return jsonify({'success': True, 'message': 'no_alpha'})
             alpha = img[:, :, 3:4] / 255.0
             result = (img[:, :, :3] * alpha + bg_rgb * (1.0 - alpha)).astype(np.uint8)
-            cv2.imwrite(fpath, result, [cv2.IMWRITE_PNG_COMPRESSION, 3])
+            if not cv2.imwrite(fpath, result, [cv2.IMWRITE_PNG_COMPRESSION, 3]):
+                return jsonify({'success': False, 'error': '图片写入失败'}), 500
             return jsonify({'success': True, 'converted': 1, 'item': filename})
         except Exception as e:
             return jsonify({'success': False, 'error': str(e)}), 500
@@ -154,7 +155,8 @@ def batch_alpha_to_white():
                     result = img[:, :, :3] * alpha + bg_rgb * (1.0 - alpha)
                     result = result.astype(np.uint8)
 
-                    cv2.imwrite(fpath, result, [cv2.IMWRITE_PNG_COMPRESSION, 3])
+                    if not cv2.imwrite(fpath, result, [cv2.IMWRITE_PNG_COMPRESSION, 3]):
+                        raise RuntimeError('图片写入失败 (cv2.imwrite 返回 False)')
                     converted += 1
                     yield sse_event('progress', {
                         'current': i + 1, 'total': total, 'item': fname
@@ -172,7 +174,7 @@ def batch_alpha_to_white():
             # 生成器级别的未预期异常：发 fatal，前端能正常收尾
             yield sse_event('fatal', {'error': f'批量转换异常终止: {e}'})
 
-    return Response(generate(), mimetype='text/event-stream',
+    return Response(stream_with_context(generate()), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 

@@ -215,19 +215,21 @@ def auto_caption_vlm():
 
     # 描述提示词：允许用户自定义，否则使用默认提示词
     caption_prompt = vcfg['caption_prompt'] or (
-        'You are an image caption generator. Based on the provided Danbooru-style tags '
-        'and image content, generate a natural language description in Anima style for '
-        'AI image generation.\n'
-        'Anima style: one or two clear, factual English sentences describing only what is '
-        'visible — no emotions, backstory, atmosphere, or interpretations.\n'
-        'Rules:\n'
-        '1. Describe only observable elements — no emotions, mood, or narrative.\n'
-        '2. Use simple factual sentences. Keep it brief (1-2 sentences).\n'
-        '3. Output only the description — no prefixes, quotes, or Markdown.\n'
-        'Example: "A young woman with long blonde hair and blue eyes wearing a school '
-        'uniform stands outdoors under cherry blossom trees, looking directly at the '
-        'viewer with a slight smile."'
-    )
+    'You are a visual captioner for an anime-style image. '
+    'The user has provided tags for objects, characters, poses, and clothing. '
+    'Your task is to describe ONLY what these tags CANNOT express.\n'
+    'Rules:\n'
+    '1. NEVER repeat the obvious tags (hair color, clothing, simple actions).\n'
+    '2. Describe composition, lighting, background depth, and spatial relationships.\n'
+    '3. Describe the atmosphere, weather, and emotional tone of the scene briefly.\n'
+    '4. Use 2 to 3 short English sentences. Keep it concise.\n'
+    '5. Output only the description, no prefixes.\n'
+    'Example:\n'
+    'a large blue peony covering half of her face, '
+    'soft blue flowers fading into the foreground, '
+    'warm sunlight creating a dreamy atmosphere, '
+    'flower petals slightly out of focus in the foreground'
+)
 
     upload_dir = current_app.config['UPLOAD_FOLDER']
     all_images = get_image_files(upload_dir)
@@ -287,9 +289,7 @@ def auto_caption_vlm():
                     if ref_tags:
                         user_content.append({
                             'type': 'text',
-                            'text': (
-                                'Reference tags: ' + ref_tags
-                            )
+                            'text': 'Reference tags:\n' + ref_tags
                         })
 
                     response = client.chat.completions.create(
@@ -300,7 +300,6 @@ def auto_caption_vlm():
                         ],
                         temperature=0.7,
                         max_tokens=512,
-                        extra_body={"repeat_penalty": 1.15},
                     )
 
                     description = (response.choices[0].message.content or '').strip()

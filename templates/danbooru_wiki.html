@@ -117,6 +117,9 @@
                     <div class="w-64 shrink-0 border-r border-gray-300 overflow-y-auto p-4 bg-white flex flex-col gap-2.5">
                         <div>
                             <h2 id="d-name" class="text-lg font-bold text-dark break-all"></h2>
+                            <a id="d-danbooru-link" href="#" target="_blank" class="text-xs text-primary hover:text-primary/80 inline-flex items-center gap-0.5 hidden" title="在 Danbooru 官方查看该标签的完整 wiki">
+                                <i class="fa fa-external-link"></i> Danbooru
+                            </a>
                             <div class="flex items-center gap-1">
                                 <span id="d-cn-name" class="text-sm text-gray-700"></span>
                                 <input id="d-cn-input" type="text" class="hidden flex-1 text-sm border border-gray-300 rounded px-2 py-0.5 focus:outline-none focus:border-primary min-w-0" placeholder="输入中文名">
@@ -606,6 +609,10 @@
             document.getElementById('detail-card').classList.remove('hidden');
 
             document.getElementById('d-name').textContent = data.tag;
+            // 设置 Danbooru 官方 wiki 跳转链接
+            const dbLink = document.getElementById('d-danbooru-link');
+            dbLink.href = 'https://danbooru.donmai.us/wiki_pages/' + encodeURIComponent(data.tag);
+            dbLink.classList.remove('hidden');
             const cnName = (data.cn_name || '').split(',')[0].trim();
             document.getElementById('d-cn-name').textContent = cnName;
             // cn_name 有值时显示编辑按钮
@@ -838,7 +845,8 @@
                 tabZh.className = 'px-3 py-1 text-sm bg-primary text-white rounded-lg';
                 tabEn.className = 'px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg';
                 if (_detailState.cnWiki) {
-                    view.textContent = _detailState.cnWiki;
+                    view.innerHTML = _dtextInline(_detailState.cnWiki
+                        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'));
                 } else if (_detailState.enWiki) {
                     view.textContent = '(暂无中文 wiki，可点击"翻译并保存"生成，或点"编辑"手写)';
                 } else {
@@ -983,8 +991,12 @@
                         view.textContent = '(该标签暂无英文 wiki)';
                     }
                 } else {
-                    view.textContent = _detailState.cnWiki
-                        || (_detailState.enWiki ? '(暂无中文 wiki，可点击"翻译并保存"生成，或点"编辑"手写)' : '(该标签暂无 wiki)');
+                    view.innerHTML = _detailState.cnWiki
+                        ? _dtextInline(_detailState.cnWiki
+                            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'))
+                        : (_detailState.enWiki
+                            ? '(暂无中文 wiki，可点击"翻译并保存"生成，或点"编辑"手写)'
+                            : '(该标签暂无 wiki)');
                 }
             }
             refreshActionButtons();
@@ -1065,7 +1077,8 @@
                 var updatedWiki = false;
                 if (data.cn_wiki) {
                     _detailState.cnWiki = data.cn_wiki;
-                    view.textContent = _detailState.cnWiki;
+                    view.innerHTML = _dtextInline(_detailState.cnWiki
+                        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'));
                     updatedWiki = true;
                 }
                 refreshActionButtons();

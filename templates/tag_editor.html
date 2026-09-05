@@ -29,7 +29,7 @@
     <style>
         /* 自定义滚动条 */
         #file-list::-webkit-scrollbar,
-        #tag-rows::-webkit-scrollbar { width: 4px; }
+        #tag-rows::-webkit-scrollbar { width: 4px; height: 4px; }
         #file-list::-webkit-scrollbar-track,
         #tag-rows::-webkit-scrollbar-track { background: transparent; }
         #file-list::-webkit-scrollbar-thumb,
@@ -127,12 +127,12 @@
                     <span>图片列表</span>
                     <span class="text-xs text-gray-400 font-normal" id="image-counter">{{ image_count }} 张</span>
                 </div>
-                <div id="file-list" class="flex-grow overflow-y-auto">
+                <div id="file-list" class="flex-grow overflow-y-auto overflow-x-auto">
                 </div>
             </div>
 
-            <!-- 中间：图片预览 -->
-            <div id="preview-panel" class="w-64 flex-shrink-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+            <!-- 中间：图片预览（flex-[1] 占一半剩余空间） -->
+            <div id="preview-panel" class="flex-[1] min-w-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
                 <div id="preview-area" class="relative flex-1 min-h-0 flex justify-center items-center bg-gray-100 overflow-hidden" style="cursor:default">
                     <div id="preview-zoom-wrap">
                         <img id="preview-img" src="" alt="" class="rounded select-none">
@@ -149,8 +149,8 @@
                 </div>
             </div>
 
-            <!-- 右侧：标签列表 + 操作按钮 -->
-            <div id="editor-panel" class="flex-grow bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col min-w-0 overflow-hidden">
+            <!-- 右侧：标签列表 + 操作按钮（flex-[1] 占 1/3 剩余空间） -->
+            <div id="editor-panel" class="flex-[1] min-w-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
                 <!-- 标签列表容器 -->
                 <div id="tags-container" class="flex-grow flex flex-col min-h-0">
                     <!-- 表头（在滚动容器外，用 pr-1 补偿滚动条宽度使分隔线对齐） -->
@@ -614,7 +614,7 @@
                 + ' data-image="' + escapeHtml(img) + '" data-index="' + i + '">'
                 + '<button class="del-btn flex-shrink-0 w-5 h-5 flex items-center justify-center text-gray-500 hover:text-red-500 transition-colors rounded opacity-0 group-hover:opacity-100" data-name="' + escapeHtml(img) + '" data-index="' + i + '" title="删除">'
                 + '<i class="fa fa-times text-xs"></i></button>'
-                + '<span class="flex-1 min-w-0 truncate ml-1 text-gray-600 group-hover:text-gray-800" title="' + escapeHtml(img) + '">' + escapeHtml(img) + '</span></div>'
+                + '<span class="flex-1 min-w-0 ml-1 text-gray-600 group-hover:text-gray-800 whitespace-nowrap" title="' + escapeHtml(img) + '">' + escapeHtml(img) + '</span></div>'
             ).join('');
         }
 
@@ -705,7 +705,12 @@
                 el.querySelector('span').classList.toggle('text-gray-600', !active);
             });
             const activeItem = document.querySelector('.file-item[data-index="' + index + '"]');
-            if (activeItem) activeItem.scrollIntoView({ block: 'nearest' });
+            if (activeItem) {
+                const fileList = document.getElementById('file-list');
+                const savedScrollLeft = fileList.scrollLeft;
+                activeItem.scrollIntoView({ block: 'nearest' });
+                fileList.scrollLeft = savedScrollLeft;
+            }
 
             document.getElementById('btn-prev').disabled = (index === 0);
             document.getElementById('btn-next').disabled = (index === allImages.length - 1);
@@ -1097,6 +1102,11 @@
         }
         // DText 行内标记：[[tag]] 链接 + !post #ID 图片
         function _dtextInline(text) {
+            // 行内标记：[b]粗体[/b] [i]斜体[/i] [s]删除线[/s] [u]下划线[/u]
+            text = text.replace(/\[b\]([\s\S]*?)\[\/b\]/g, '<strong>$1</strong>');
+            text = text.replace(/\[i\]([\s\S]*?)\[\/i\]/g, '<em>$1</em>');
+            text = text.replace(/\[s\]([\s\S]*?)\[\/s\]/g, '<s>$1</s>');
+            text = text.replace(/\[u\]([\s\S]*?)\[\/u\]/g, '<u>$1</u>');
             // 外部链接 "显示文本":https://url → 纯文本
             text = text.replace(/"([^"]+)"\s*:\s*(https?:\/\/[^\s<>"']+)/g, function(_, label, url) {
                 return '<span class="text-gray-700">' + label + '</span>';
@@ -1999,12 +2009,9 @@
             const btn = document.getElementById('btn-toggle-editor');
             if (editorVisible) {
                 editor.style.display = '';
-                preview.classList.remove('flex-grow');
-                preview.classList.add('w-64');
+                // preview 已是 flex-1，无需切换
             } else {
                 editor.style.display = 'none';
-                preview.classList.remove('w-64');
-                preview.classList.add('flex-grow');
             }
             btn.innerHTML = editorVisible
                 ? '<i class="fa fa-columns mr-2"></i> <span>隐藏编辑</span>'

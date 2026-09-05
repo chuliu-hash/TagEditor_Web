@@ -391,8 +391,8 @@ def rename_files():
     errors = 0
     try:
         for i, (old_base, new_base, ext, _, _) in enumerate(plan):
-            # 该图的两个待重命名后缀：图片原后缀 + 标签 .txt
-            exts = (ext, '.txt')
+            # 三个待重命名后缀：图片原后缀 + 标签 .txt + 自然语言描述 .nl.txt
+            exts = (ext, '.txt', '.nl.txt')
             # 阶段1：old → tmp
             for e in exts:
                 old_path = os.path.join(upload_dir, old_base + e)
