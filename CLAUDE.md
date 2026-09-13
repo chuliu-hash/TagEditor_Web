@@ -150,6 +150,7 @@ WD14（onnxruntime/cv2/pandas）、Real-ESRGAN（torch/basicsr）、BiRefNet（t
 - 无标签的图片纯靠 VLM 看图描述
 - **仅处理无 `.nl.txt` 的图片**，已有描述的自动跳过（`skipped`）
 - 保存到 `.nl.txt`，不覆盖原 `.txt` 标签
+- **提示词分工（`prompts/vlm_caption.txt`，改这个文件时别退回）**：人物特征/外貌（发色、瞳色、五官、身材、服装、配饰及其颜色）**全部由结构化标签负责**，NL 描述**禁止**再写（连标签漏掉的外貌细节也不补）；描述只补标签表达不了的三件事——**动作细节**（重量落在哪、躯干怎么扭、哪个肢体做什么、视线落点）、**构图**（景别、机位角度、主体在画面中的位置、前后景层次、景深）、**背景氛围**（光线方向与质感、天气、情绪）。四肢只能作为动作的施动者出现（"one arm reaches back"），不得描述身体长什么样。反面教训：旧版 A 段 + `[complex action]` 示例通篇是身体部位细节（"ears and tail still lifted"），模型照抄示例去写外貌；示例本身必须干净
 - 提示词：从 `prompts/vlm_caption.txt` 读取（必填），提示词引导 VLM 扮演"翻译官"而非"创作者"
 - VLM 配置（`.env`）：`VISION_API_URL` / `VISION_API_KEY` / `VISION_MODEL` / `VISION_MAX_TOKENS`（默认 1024）/ `VISION_THINKING`（默认 `off`）
 - **`max_tokens` 是 `reasoning_content` + `content` 的共享额度**，不是只算正式回答。推理模型（DeepSeek 等）思考模式默认开启，额度被思考吃光后 `content` 为空、`finish_reason=length`，日志表现为「模型在思考中，未生成正式描述」。故默认关思考（`extra_body={'thinking': {'type': 'disabled'}}`）——本任务只要 2~3 个短句，思考纯烧时间和钱
