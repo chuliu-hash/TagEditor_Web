@@ -8,6 +8,8 @@ translation_cache.json
 # ===== 标签数据库（由 build_tag_db.py 构建/增量更新，体积大不入库）=====
 data/
 
+dump/
+
 # ===== WD14 模型（体积大，按 WD14_MODEL_PATH 单独下载到 models/）=====
 models/
 

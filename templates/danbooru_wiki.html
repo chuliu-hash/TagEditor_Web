@@ -76,12 +76,21 @@
                 <button class="btn-tool bg-cyan-500 hover:bg-cyan-600" onclick="runLLMProcess()" title="批量 LLM 深度翻译">
                     <i class="fa fa-magic"></i><span class="hidden sm:inline ml-1">批量深度翻译</span>
                 </button>
+                <button class="btn-tool bg-teal-500 hover:bg-teal-600" onclick="openUserTagsModal()" title="维护打标中遇到的新标签（独立于主标签库）">
+                    <i class="fa fa-plus-square"></i><span class="hidden sm:inline ml-1">新标签</span>
+                </button>
+                <button class="btn-tool bg-slate-500 hover:bg-slate-600" onclick="openHistoryModal()" title="查看曾经查阅过的标签（存在浏览器本地）">
+                    <i class="fa fa-history"></i><span class="hidden sm:inline ml-1">浏览记录</span>
+                </button>
                 <div class="w-px h-5 bg-gray-200 mx-0.5"></div>
                 <a href="/tag_editor" class="flex items-center justify-center bg-white hover:bg-gray-50 text-gray-600 font-medium py-1.5 px-3 rounded-lg transition-all text-xs border border-gray-300">
                     <i class="fa fa-tags mr-1.5"></i> 标签编辑
                 </a>
                 <a href="/img_editor" class="flex items-center justify-center bg-white hover:bg-gray-50 text-gray-600 font-medium py-1.5 px-3 rounded-lg transition-all text-xs border border-gray-300">
                     <i class="fa fa-crop mr-1.5"></i> 图片编辑
+                </a>
+                <a href="/prompt_tool" class="flex items-center justify-center bg-white hover:bg-gray-50 text-gray-600 font-medium py-1.5 px-3 rounded-lg transition-all text-xs border border-gray-300">
+                    <i class="fa fa-magic mr-1.5"></i> 提示词优化
                 </a>
             </div>
         </div>
@@ -102,6 +111,8 @@
             </div>
             <!-- 下拉搜索结果 -->
             <div id="search-dropdown" class="hidden absolute left-4 right-4 top-full mt-1 bg-white rounded-lg shadow-xl border border-gray-200 max-h-80 overflow-y-auto z-50">
+                <!-- 本地浏览记录命中（在搜索结果之上）。独立容器：不参与 #search-results 的分页状态机 -->
+                <div id="history-matches" class="hidden border-b-2 border-gray-100"></div>
                 <div id="search-results"></div>
             </div>
         </div>
@@ -204,6 +215,52 @@
             </div>
             <div class="px-6 py-3 border-t border-gray-200 shrink-0 flex justify-end">
                 <button class="px-4 py-2 text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg transition-colors" onclick="closeGroupModal()">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 用户新标签弹窗（独立于主标签库，用户手动维护打标中遇到的新标签） -->
+    <div id="usertags-modal" class="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center hidden" onclick="if(event.target===this)closeUserTagsModal()">
+        <div class="bg-white rounded-xl shadow-2xl w-[720px] max-h-[80vh] flex flex-col">
+            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-200 shrink-0">
+                <h3 class="text-lg font-semibold text-gray-800">用户新标签</h3>
+                <button class="text-gray-400 hover:text-gray-600 text-xl leading-none" onclick="closeUserTagsModal()">&times;</button>
+            </div>
+            <div class="px-6 py-3 border-b border-gray-100 shrink-0">
+                <div class="flex items-center gap-2">
+                    <input id="ut-new-name" type="text" placeholder="新标签名，如 my custom tag" spellcheck="false"
+                           onkeydown="if(event.key==='Enter')addUserTag()"
+                           class="flex-1 min-w-0 px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:border-primary">
+                    <button id="ut-add-btn" onclick="addUserTag()" class="px-3 py-1.5 text-sm bg-secondary hover:bg-secondary/90 disabled:opacity-50 text-white rounded-lg transition-colors shrink-0">添加并翻译</button>
+                </div>
+                <div class="mt-2 text-xs text-gray-400">
+                    记录打标过程中遇到、主标签库未收录的标签；添加后自动调用模型翻译，中文名无需手动填写。
+                    翻译结果存在本表，主库收录同名标签时以主库为准。
+                </div>
+            </div>
+            <div id="ut-list" class="flex-1 overflow-y-auto px-6 py-3"></div>
+            <div class="px-6 py-3 border-t border-gray-200 shrink-0 flex justify-end">
+                <button class="px-4 py-2 text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg transition-colors" onclick="closeUserTagsModal()">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 浏览记录弹窗（数据存在浏览器 localStorage，不经后端） -->
+    <div id="history-modal" class="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center hidden" onclick="if(event.target===this)closeHistoryModal()">
+        <div class="bg-white rounded-xl shadow-2xl w-[560px] max-h-[80vh] flex flex-col">
+            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-200 shrink-0">
+                <h3 class="text-lg font-semibold text-gray-800">浏览记录</h3>
+                <button class="text-gray-400 hover:text-gray-600 text-xl leading-none" onclick="closeHistoryModal()">&times;</button>
+            </div>
+            <div class="px-6 pt-3 text-xs text-gray-400 shrink-0">
+                查看过的标签自动记录在这里，存在浏览器本地（换浏览器或清缓存会丢失）。
+            </div>
+            <div id="history-list" class="flex-1 overflow-y-auto px-6 py-3"></div>
+            <div class="px-6 py-3 border-t border-gray-200 shrink-0 flex items-center justify-between">
+                <button id="history-clear-btn" class="px-3 py-2 text-sm text-red-500 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed" onclick="clearHistory()">
+                    <i class="fa fa-trash mr-1"></i>清空
+                </button>
+                <button class="px-4 py-2 text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg transition-colors" onclick="closeHistoryModal()">关闭</button>
             </div>
         </div>
     </div>
@@ -491,7 +548,9 @@
         }
         function liveSearch() {
             const keyword = document.getElementById('search-input').value.trim();
-            if (!keyword) { closeSearchDropdown(); _searchResults = []; return; }
+            // 清空输入时也要清历史容器：下拉只是加 hidden 类，内容还在，
+            // 再次聚焦输入框不会触发 input 事件，不主动清就会残留上一次的「最近看过」行
+            if (!keyword) { closeSearchDropdown(); _searchResults = []; clearHistoryMatches(); return; }
             searchTags();
         }
         var debouncedLiveSearch = debounce(liveSearch, 200);
@@ -537,6 +596,9 @@
         function searchTags() {
             const keyword = document.getElementById('search-input').value.trim();
             if (!keyword) return;
+            // 历史命中渲染进独立的 #history-matches（在 #search-results 之上），
+            // 不走 _searchResults/_searchRendered 那套增量分页
+            renderHistoryMatches(keyword);
             const seq = ++_searchSeq;
             const resultsEl = document.getElementById('search-results');
             resultsEl.innerHTML = '<div class="p-4 text-center text-gray-400 text-sm"><i class="fa fa-spinner fa-spin mr-1"></i>搜索中...</div>';
@@ -596,6 +658,9 @@
         }
 
         function renderDetail(data) {
+            // 浏览记录的唯一埋点：本函数只被 showTagDetail 调用（@625），
+            // 覆盖搜索/回车/随机推荐/DText/共现/标签组全部入口；data.error 在那之前就 return 了
+            historyAdd(data.tag, (data.cn_name || '').split(',')[0].trim());
             // 加载新标签前，先确保退出编辑态（隐藏 textarea、显示只读视图）
             if (typeof _wikiEditing !== 'undefined' && _wikiEditing) {
                 _wikiEditing = false;
@@ -688,12 +753,15 @@
             // 加载共现标题栏（列表折叠，点击才加载数据）
             loadCooc(data.tag);
 
-            // 标签未收录到数据库（无 post_count）时隐藏深度翻译/编辑/锁按钮
-            if (data.post_count === undefined) {
+            // 主库未收录（in_main_db=false）时隐藏深度翻译/编辑/锁按钮：
+            // 这些都是只作用于主库的写操作，对 user_tags 独有的标签点了只会 404；
+            // 编辑中文名更危险——update_cn_name 是 INSERT ... ON CONFLICT，会把标签插进主库
+            if (data.in_main_db === false) {
                 document.getElementById('wiki-translate-btn').classList.add('hidden');
                 document.getElementById('wiki-edit-btn').classList.add('hidden');
                 document.getElementById('d-wiki-lock-btn').classList.add('hidden');
                 document.getElementById('d-cn-lock-btn').classList.add('hidden');
+                document.getElementById('d-cn-edit-btn').classList.add('hidden');
             }
         }
 
@@ -750,7 +818,9 @@
             _cnNameEditing = true;
             const span = document.getElementById('d-cn-name');
             const input = document.getElementById('d-cn-input');
-            input.value = span.textContent;
+            // 装完整 cn_name（含逗号分隔的拓展名）：span 只显示主名，若用它回填，
+            // 保存时会整串覆盖 → 静默丢掉拓展名（如 "单人,独图,单独" 变 "单人"）
+            input.value = _detailState.cnName || span.textContent;
             span.classList.add('hidden');
             input.classList.remove('hidden');
             document.getElementById('d-cn-edit-btn').classList.add('hidden');
@@ -786,7 +856,20 @@
             .then(data => {
                 saveBtn.disabled = false;
                 if (data.error) { showNotification(data.error, 'error'); return; }
-                document.getElementById('d-cn-name').textContent = trimmed;
+                // 与列表显示口径一致：主名进 span，其余进拓展名区（否则保存后拓展名区还显示旧值）
+                _detailState.cnName = trimmed;
+                const parts = trimmed.split(',').map(s => s.trim()).filter(Boolean);
+                document.getElementById('d-cn-name').textContent = parts[0] || '';
+                const extWrap = document.getElementById('d-ext-cn-wrap');
+                const extEl = document.getElementById('d-ext-cn');
+                if (parts.length > 1) {
+                    extEl.textContent = parts.slice(1).join('、');
+                    extWrap.classList.remove('hidden');
+                    extWrap.classList.add('flex');
+                } else {
+                    extWrap.classList.add('hidden');
+                    extWrap.classList.remove('flex');
+                }
                 cancelCnNameEdit();
                 showNotification('中文名已更新', 'success');
             })
@@ -950,6 +1033,134 @@
 
         function closeGroupModal() {
             document.getElementById('tag-group-modal').classList.add('hidden');
+        }
+
+        // ── 用户新标签（独立于主标签库，翻译结果存本表） ────────────────────
+        // 中文名不手动填写：添加后自动调用模型翻译；列表行可点 ✨ 重新翻译
+        let _utRows = [];              // 最近一次拉取的列表（供 pending 态重渲染）
+        const _utPending = new Set();  // 翻译中的标签名 → 结果区显示 spinner
+        function openUserTagsModal() {
+            document.getElementById('ut-new-name').value = '';
+            document.getElementById('usertags-modal').classList.remove('hidden');
+            loadUserTags();
+        }
+        function closeUserTagsModal() {
+            document.getElementById('usertags-modal').classList.add('hidden');
+        }
+        function loadUserTags() {
+            const list = document.getElementById('ut-list');
+            if (!_utRows.length) {
+                list.innerHTML = '<span class="text-gray-400 text-sm"><i class="fa fa-spinner fa-spin mr-1"></i>加载中...</span>';
+            }
+            fetch('/user_tags')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.error) { list.innerHTML = '<span class="text-red-500 text-sm">' + escapeHtml(data.error) + '</span>'; return; }
+                    _utRows = data.user_tags || [];
+                    renderUserTags();
+                })
+                .catch(() => { list.innerHTML = '<span class="text-red-500 text-sm">请求失败</span>'; });
+        }
+        function renderUserTags() {
+            const list = document.getElementById('ut-list');
+            if (!_utRows.length) {
+                list.innerHTML = '<span class="text-gray-400 text-sm">暂无新标签，可在上方添加</span>';
+                return;
+            }
+            list.innerHTML = _utRows.map(t => {
+                const arg = 'decodeURIComponent(\'' + encodeURIComponent(t.name) + '\')';
+                const cnName = (t.cn_name || '').trim();
+                const cnWiki = (t.cn_wiki || '').trim();
+                // 翻译结果显示区：整行宽 + 自动换行，中文名与 wiki 都完整展示
+                let tr;
+                if (_utPending.has(t.name)) {
+                    tr = '<span class="text-xs text-purple-500"><i class="fa fa-spinner fa-spin mr-1"></i>翻译中…（模型调用约需 10 秒）</span>';
+                } else if (cnName || cnWiki) {
+                    tr = '<div class="text-sm text-gray-800 break-words">' + escapeHtml(cnName || '（无中文名）') + '</div>'
+                       + (cnWiki
+                          ? '<div class="text-xs text-gray-500 leading-relaxed mt-1 break-words whitespace-pre-wrap max-h-32 overflow-y-auto">' + escapeHtml(cnWiki) + '</div>'
+                          : '');
+                } else {
+                    tr = '<span class="text-xs text-gray-300">未翻译 —— 点右侧 <i class="fa fa-magic"></i> 调用模型翻译</span>';
+                }
+                return '<div class="py-3 border-b border-gray-100 last:border-b-0">'
+                    + '<div class="flex items-center justify-between gap-3">'
+                    + '<div class="min-w-0 flex-1">'
+                    + '<div class="flex items-center gap-1.5 flex-wrap">'
+                    + '<code class="text-sm text-gray-800 font-medium break-all">' + escapeHtml(t.name) + '</code>'
+                    + (t.in_main_db ? '<span class="px-1.5 py-0.5 bg-amber-50 text-amber-600 rounded text-xs shrink-0" title="主标签库已收录同名标签，翻译/展示以主库为准">主库已收录</span>' : '')
+                    + '</div>'
+                    + (t.created_at ? '<div class="text-xs text-gray-300">' + escapeHtml(t.created_at) + '</div>' : '')
+                    + '</div>'
+                    + '<div class="flex items-center gap-2 shrink-0">'
+                    + '<button class="text-xs text-purple-500 hover:text-purple-700" onclick="utTranslate(' + arg + ', this)" title="调用模型重新翻译（结果存本表）"><i class="fa fa-magic"></i></button>'
+                    + '<button class="text-xs text-red-500 hover:text-red-700" onclick="utDelete(' + arg + ')" title="删除"><i class="fa fa-trash"></i></button>'
+                    + '</div></div>'
+                    + '<div class="mt-2 px-3 py-2 bg-gray-50 rounded-lg min-h-[3.5rem]">' + tr + '</div>'
+                    + '</div>';
+            }).join('');
+        }
+        function addUserTag() {
+            const name = document.getElementById('ut-new-name').value.trim();
+            if (!name) { showNotification('请填写标签名', 'warning'); return; }
+            const btn = document.getElementById('ut-add-btn');
+            if (btn) btn.disabled = true;
+            // 不传 cn_name：中文名一律由模型翻译得到
+            fetch('/user_tags', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: name})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) { showNotification(data.error, 'error'); return; }
+                document.getElementById('ut-new-name').value = '';
+                showNotification('已添加「' + data.name + '」，正在翻译…', 'success');
+                loadUserTags();                 // 先刷新列表（此时新行尚未进 pending，等下面 utTranslate 标记）
+                utTranslate(data.name, null);   // 自动翻译：同步标记 pending，列表响应回来即显示"翻译中"
+            })
+            .catch(() => showNotification('添加失败', 'error'))
+            .finally(() => { if (btn) btn.disabled = false; });
+        }
+        function utTranslate(name, btn) {
+            if (_utPending.has(name)) return;   // 防重复（自动翻译进行中时点 ✨ 无效）
+            const icon = btn ? btn.querySelector('i') : null;   // 重渲染会替换按钮节点，先取图标
+            if (icon) icon.className = 'fa fa-spinner fa-spin';
+            _utPending.add(name);                   // 注意：标记必须在调用方（addUserTag）之后，
+            if (_utRows.length) renderUserTags();   // 否则上面这行防重入会拦掉添加后的自动翻译
+            fetch('/user_tags/translate', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: name})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) { showNotification(data.error, 'error'); return; }
+                showNotification(data.source === 'main_db'
+                    ? '主库已收录，返回主库翻译'
+                    : ('翻译完成：' + (data.cn_name || '(空)')), 'success');
+            })
+            .catch(() => showNotification('翻译失败', 'error'))
+            .finally(() => {
+                if (icon) icon.className = 'fa fa-magic';
+                _utPending.delete(name);
+                loadUserTags();                 // 拉取翻译结果
+            });
+        }
+        function utDelete(name) {
+            if (!confirm('删除新标签「' + name + '」？')) return;
+            fetch('/user_tags/delete', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: name})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) { showNotification(data.error, 'error'); return; }
+                showNotification('已删除', 'success');
+                loadUserTags();
+            })
+            .catch(() => showNotification('删除失败', 'error'));
         }
 
         function enterWikiEditMode() {
@@ -1370,6 +1581,161 @@
 
         function closeProgressModal() {
             document.getElementById('progress-modal').classList.add('hidden');
+        }
+
+        // === 浏览记录（localStorage，纯前端，不经后端） ===
+        const HISTORY_KEY = 'danbooru_tag_history_v1';  // 带版本号：换结构时升版本，旧数据自然失效
+        const HISTORY_MAX = 200;      // 上限条数（≈12KB，远低于 localStorage 配额）
+        const HISTORY_MATCH_MAX = 6;  // 搜索下拉里最多混入几条
+        let _history = null;          // 内存缓存（懒加载），null = 尚未读盘
+        let _historyMatches = [];     // 下拉命中的子集 —— 下拉行的下标空间，与弹窗的 _history 不同
+
+        // 与后端 build_tag_db.normalize_tag_key 同口径：小写 + 空格转下划线
+        function _histKey(name) {
+            return String(name || '').trim().toLowerCase().replace(/\s+/g, '_');
+        }
+
+        // localStorage 在隐私模式/配额满时会直接抛异常 —— 埋点绝不能因此把 renderDetail 打挂，
+        // 故读写全包 try/catch：读失败退化为空列表，写失败仅丢失持久化（本次会话内仍可用）
+        function _historyLoad() {
+            if (_history !== null) return _history;
+            _history = [];
+            try {
+                const raw = localStorage.getItem(HISTORY_KEY);
+                const parsed = raw ? JSON.parse(raw) : null;
+                if (Array.isArray(parsed)) {
+                    _history = parsed.filter(it => it && typeof it.name === 'string' && it.name);
+                }
+            } catch (e) { _history = []; }   // 脏数据 / localStorage 不可用 → 回落空列表
+            return _history;
+        }
+        function _historySave() {
+            try {
+                localStorage.setItem(HISTORY_KEY, JSON.stringify(_history || []));
+            } catch (e) { /* 配额满 / 隐私模式：忽略，本次会话内存里仍有 */ }
+        }
+
+        // 埋点：记录一次「查看了这个标签」。重复查看移到队首（顺带刷新可能变过的中文名）
+        function historyAdd(name, cn) {
+            name = String(name || '').trim();
+            if (!name) return;
+            const key = _histKey(name);
+            const list = _historyLoad();
+            const idx = list.findIndex(it => _histKey(it.name) === key);
+            if (idx >= 0) list.splice(idx, 1);
+            list.unshift({name: name, cn: cn || '', ts: Date.now()});
+            if (list.length > HISTORY_MAX) list.length = HISTORY_MAX;  // 截尾
+            _historySave();
+        }
+
+        function openHistoryModal() {
+            document.getElementById('history-modal').classList.remove('hidden');
+            renderHistory();
+        }
+        function closeHistoryModal() {
+            document.getElementById('history-modal').classList.add('hidden');
+        }
+
+        // 相对时间：刚刚 / N 分钟前 / N 小时前 / N 天前 / 日期（渲染时现算，不需要定时器）
+        function _fmtAgo(ts) {
+            const diff = Date.now() - (ts || 0);
+            const min = Math.floor(diff / 60000);
+            if (!ts || diff < 0 || min < 1) return '刚刚';
+            if (min < 60) return min + ' 分钟前';
+            const hr = Math.floor(min / 60);
+            if (hr < 24) return hr + ' 小时前';
+            const day = Math.floor(hr / 24);
+            if (day <= 7) return day + ' 天前';
+            const d = new Date(ts), p = n => (n < 10 ? '0' : '') + n;
+            return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+        }
+
+        // 弹窗列表：每次从 _history 整体重建；行下标即 _history 下标
+        function renderHistory() {
+            const listEl = document.getElementById('history-list');
+            const list = _historyLoad();
+            const clearBtn = document.getElementById('history-clear-btn');
+            if (clearBtn) clearBtn.disabled = !list.length;
+            if (!list.length) {
+                listEl.innerHTML = '<div class="text-center text-gray-300 text-sm py-8">暂无浏览记录，查看过的标签会自动记录在这里</div>';
+                return;
+            }
+            // 下标传参而非拼标签名：标签名可能含引号，拼进 onclick 会拼坏 JS
+            listEl.innerHTML = list.map((it, i) =>
+                '<div class="group flex items-center justify-between gap-3 px-3 py-2 rounded-lg hover:bg-primary/5 cursor-pointer transition-colors" onclick="openHistoryItem(' + i + ')">'
+                + '<div class="min-w-0 flex-1">'
+                + '<code class="text-sm text-gray-800 font-medium break-all">' + escapeHtml(it.name) + '</code>'
+                + (it.cn ? '<div class="text-xs text-gray-500 truncate">' + escapeHtml(it.cn) + '</div>' : '')
+                + '</div>'
+                + '<div class="flex items-center gap-2 shrink-0">'
+                + '<span class="text-xs text-gray-400">' + escapeHtml(_fmtAgo(it.ts)) + '</span>'
+                + '<button class="text-xs text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity" onclick="event.stopPropagation();removeHistoryItem(' + i + ')" title="删除这条记录"><i class="fa fa-times"></i></button>'
+                + '</div></div>'
+            ).join('');
+        }
+
+        // 打开历史项：先同步搜索框（与 showTagDetail 的既有约定一致），再走统一的详情入口
+        function openHistoryItem(idx) {
+            const it = _historyLoad()[idx];
+            if (!it) return;
+            closeHistoryModal();
+            document.getElementById('search-input').value = it.name;
+            showTagDetail(encodeURIComponent(it.name));
+        }
+        function removeHistoryItem(idx) {
+            const list = _historyLoad();
+            if (idx < 0 || idx >= list.length) return;
+            list.splice(idx, 1);
+            _historySave();
+            renderHistory();
+        }
+        function clearHistory() {
+            if (!_historyLoad().length) return;
+            if (!confirm('清空全部浏览记录？')) return;   // 同页 utDelete 的既有口径
+            _history = [];
+            _historySave();
+            renderHistory();
+            showNotification('已清空浏览记录', 'success');
+        }
+
+        // ── 搜索下拉里混入历史命中 ────────────────────────────────────────────
+        // 用独立的 #history-matches 容器，完全不参与 #search-results 的增量分页状态机。
+        // 下拉行的下标空间是 _historyMatches（过滤子集），不是 _history。
+        function renderHistoryMatches(keyword) {
+            const box = document.getElementById('history-matches');
+            const kw = _histKey(keyword);
+            const raw = String(keyword).trim().toLowerCase();
+            _historyMatches = kw
+                ? _historyLoad().filter(it =>
+                      _histKey(it.name).indexOf(kw) >= 0
+                      || String(it.cn || '').toLowerCase().indexOf(raw) >= 0
+                  ).slice(0, HISTORY_MATCH_MAX)
+                : [];
+            if (!_historyMatches.length) { clearHistoryMatches(); return; }
+            box.innerHTML = '<div class="px-3 py-1 text-xs text-gray-400 bg-gray-50">浏览记录</div>'
+                + _historyMatches.map((it, i) =>
+                    '<div class="px-3 py-2 border-b border-gray-100 hover:bg-primary/5 cursor-pointer transition-colors" onclick="openHistoryMatch(' + i + ')">'
+                    + '<div class="flex items-baseline justify-between gap-2">'
+                    + '<span class="font-medium text-sm text-gray-800 truncate">' + escapeHtml(it.name) + '</span>'
+                    + '<span class="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded text-xs shrink-0">最近看过</span>'
+                    + '</div>'
+                    + (it.cn ? '<span class="text-xs text-gray-500 truncate block">' + escapeHtml(it.cn) + '</span>' : '')
+                    + '</div>'
+                ).join('');
+            box.classList.remove('hidden');
+        }
+        function clearHistoryMatches() {
+            _historyMatches = [];
+            const box = document.getElementById('history-matches');
+            box.classList.add('hidden');
+            box.innerHTML = '';
+        }
+        function openHistoryMatch(idx) {
+            const it = _historyMatches[idx];
+            if (!it) return;
+            closeSearchDropdown();
+            document.getElementById('search-input').value = it.name;
+            showTagDetail(encodeURIComponent(it.name));
         }
 
         // === 工具 ===

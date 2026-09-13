@@ -9,6 +9,10 @@ pyarrow  # 读取 wiki_pages.parquet（构建标签数据库用）
 torch>=1.7
 torchvision
 basicsr>=1.4.2
+# LLM/VLM 调用（翻译管线 + 提示词优化器）
+openai
+json-repair  # 模型输出不是严格 JSON 时的兜底解析（prompt_tool._parse_json_loose）
+Pillow       # 提示词优化器送图前的压缩重编码
 # 背景移除（BiRefNet/ToonOut）：trust_remote_code 加载 birefnet.py 需要 kornia/einops/timm
 transformers
 kornia

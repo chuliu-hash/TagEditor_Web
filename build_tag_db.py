@@ -42,6 +42,16 @@ CREATE TABLE IF NOT EXISTS fetch_state (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT ''
 );
+-- 用户新标签表：打标过程中遇到、主标签库（tags）未收录的标签，由用户手动维护。
+-- 与爬取的 tags 表独立：同步/重建 tags 不会影响本表；翻译结果存本表自己的字段。
+-- 两表存在相同标签时以主表（tags）为准（查询/翻译优先主表）。
+CREATE TABLE IF NOT EXISTS user_tags (
+    name        TEXT PRIMARY KEY,            -- 标签名（规范化 key：strip+小写+空格→下划线）
+    cn_name     TEXT NOT NULL DEFAULT '',    -- 中文名（翻译结果或手动编辑）
+    cn_wiki     TEXT NOT NULL DEFAULT '',    -- 中文 wiki（深度翻译生成）
+    created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    updated_at  TEXT NOT NULL DEFAULT ''     -- 最后修改时间（翻译/编辑时更新）
+);
 """
 
 # search_tags 全文索引：FTS5 trigram 虚拟表，对 name(规范化) + other_names + cn_name 做子串匹配。
@@ -182,6 +192,82 @@ def _table_exists(conn, table_name):
     return conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name = ?", (table_name,)
     ).fetchone() is not None
+
+
+def normalize_tag_key(tag):
+    """规范化标签 key：strip + 小写 + 空格→下划线（与 tags.name / lookup_tags 口径一致）。"""
+    return (tag or '').strip().lower().replace(' ', '_')
+
+
+# ── 用户新标签表（user_tags）─────────────────────────────────────────────
+# 与爬取的 tags 表独立：CSV/同步流程不触碰本表。翻译结果存本表字段。
+
+def list_user_tags(conn):
+    """读取全部用户新标签，按名称排序。返回 [{name, cn_name, cn_wiki, created_at, updated_at}]。
+    不依赖 conn.row_factory（build_tag_db.get_conn 未设置 Row）。"""
+    cols = ('name', 'cn_name', 'cn_wiki', 'created_at', 'updated_at')
+    rows = conn.execute(
+        "SELECT name, cn_name, cn_wiki, created_at, updated_at FROM user_tags ORDER BY name"
+    ).fetchall()
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def lookup_user_tags(conn, tags):
+    """批量查用户新标签的翻译。返回 {name: {'cn_name', 'cn_wiki'}}（key 为规范化 name）。
+
+    供显示链路（标签编辑页翻译列 / 标签统计 / 标签详情）在主表无中文名时回落补齐。
+    只返回翻译字段——user_tags 没有 en_wiki / category 等主表字段，调用方按缺失处理。
+    分批查询原因同 lookup_tags（SQLITE_MAX_VARIABLE_NUMBER）。"""
+    if not tags:
+        return {}
+    norm_list = []
+    seen = set()
+    for t in tags:
+        n = normalize_tag_key(t)
+        if n and n not in seen:
+            seen.add(n)
+            norm_list.append(n)
+
+    result = {}
+    BATCH = 500
+    for i in range(0, len(norm_list), BATCH):
+        chunk = norm_list[i:i+BATCH]
+        placeholders = ','.join('?' * len(chunk))
+        rows = conn.execute(
+            f"SELECT name, cn_name, cn_wiki FROM user_tags WHERE name IN ({placeholders})",
+            chunk
+        ).fetchall()
+        for r in rows:
+            result[r[0]] = {'cn_name': r[1], 'cn_wiki': r[2]}
+    return result
+
+
+def upsert_user_tag(conn, name, cn_name=None, cn_wiki=None):
+    """新增/更新用户新标签。name 为规范化 key。
+    cn_name / cn_wiki 为 None 时保持原值不变（新增时默认空串）。
+    更新时刷新 updated_at。"""
+    fields = []
+    params = []
+    if cn_name is not None:
+        fields.append("cn_name = ?")
+        params.append(cn_name)
+    if cn_wiki is not None:
+        fields.append("cn_wiki = ?")
+        params.append(cn_wiki)
+    set_clause = ", ".join(fields + ["updated_at = datetime('now', 'localtime')"])
+    conn.execute(f"""
+        INSERT INTO user_tags (name, cn_name, cn_wiki, updated_at)
+        VALUES (?, ?, ?, datetime('now', 'localtime'))
+        ON CONFLICT(name) DO UPDATE SET {set_clause}
+    """, [name, cn_name or '', cn_wiki or ''] + params)
+    conn.commit()
+
+
+def delete_user_tag(conn, name):
+    """删除用户新标签。返回是否命中。"""
+    cur = conn.execute("DELETE FROM user_tags WHERE name = ?", (name,))
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def get_conn(db_path=None):

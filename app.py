@@ -7,6 +7,7 @@ from tagger import tagger_bp
 from file_ops import file_ops_bp
 from tag_operations import tag_ops_bp
 from image_editor import image_editor_bp
+from prompt_tool import prompt_tool_bp
 
 app = Flask(__name__)
 
@@ -24,6 +25,7 @@ app.register_blueprint(tagger_bp)
 app.register_blueprint(file_ops_bp)
 app.register_blueprint(tag_ops_bp)
 app.register_blueprint(image_editor_bp)
+app.register_blueprint(prompt_tool_bp)
 
 
 @app.route('/')
@@ -44,6 +46,33 @@ def editor():
     """图片编辑器页面"""
     images = get_image_files(app.config['UPLOAD_FOLDER'])
     return render_template('image_editor.html', images=images, image_count=len(images))
+
+
+@app.route('/prompt_tool')
+def prompt_tool_page():
+    """提示词优化器页面（图片 + 提示词 + 效果描述 → 结合标签库重调提示词）"""
+    images = get_image_files(app.config['UPLOAD_FOLDER'])
+    return render_template('prompt_tool.html', images=images, image_count=len(images))
+
+
+def _preheat_cooc():
+    """后台预热共现数据（首次 _load_cooc_data 要 3~6s，纯 CPU/磁盘、不占显存）。
+    预热与首次请求竞争时只是重复读一次，无正确性问题，故无条件开。"""
+    import threading
+    import time
+
+    def warmup():
+        time.sleep(2)
+        try:
+            from config import get_tag_db_config
+            from llm_pipeline import _load_cooc_data
+            print("[预热] 后台加载共现数据...")
+            data = _load_cooc_data(get_tag_db_config()['db_path'], top_k=8)
+            print(f"[预热] 共现数据预热完成（{len(data)} 个标签有共现关系）")
+        except Exception as e:
+            print(f"[预热] 共现数据预热失败（不影响应用，首次调用会重试）: {e}")
+
+    threading.Thread(target=warmup, daemon=True).start()
 
 
 def _preheat_models():
@@ -81,5 +110,7 @@ if __name__ == '__main__':
     # 考虑到 GPU 显存与启动资源，重型模型始终懒加载。
     if os.environ.get('MODEL_PRELOAD', 'false').strip().lower() in ('true', '1', 'yes'):
         _preheat_models()
+    # 共现数据预热只读 parquet（3~6s，不占显存）——否则提示词优化器首次运行要多等这么久
+    _preheat_cooc()
     # debug 默认关闭（生产避免暴露 Werkzeug 调试器）；通过 FLASK_DEBUG=1 显式开启
     app.run(debug=os.environ.get('FLASK_DEBUG', '0') == '1', port=8001)

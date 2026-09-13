@@ -71,6 +71,9 @@
                     <a id="link-to-editor" href="/img_editor" class="flex items-center justify-center bg-white hover:bg-gray-50 text-gray-600 font-medium py-1.5 px-3 rounded-lg transition-all text-xs border border-gray-300" onclick="return navigateToEditor()">
                         <i class="fa fa-crop mr-1.5"></i> 图片编辑
                     </a>
+                    <a id="link-to-prompt-tool" href="/prompt_tool" class="flex items-center justify-center bg-white hover:bg-gray-50 text-gray-600 font-medium py-1.5 px-3 rounded-lg transition-all text-xs border border-gray-300" onclick="navigateAway('/prompt_tool'); return false;">
+                        <i class="fa fa-magic mr-1.5"></i> 提示词优化
+                    </a>
                 </div>
             </div>
             <!-- 第二行：功能按钮分组（上传 | 处理 | 清理） -->
@@ -1029,6 +1032,52 @@
             });
         }
 
+        // 补齐翻译列：只补「标签非空但翻译为空」的行。
+        // 场景：某些标签的翻译是在本次页面加载之后才写进库的（例如在 Danbooru 页给新标签补了翻译，
+        // 或刚手动敲进一个库里已有的标签但还没触发 onchange），翻译列会一直空着。
+        // 保存本身不刷新翻译，用户看到的就是"库里明明有翻译却不显示"。
+        // 只查库（/lookup_cache 不触发 LLM），失败静默——补齐是附加效果，不能影响保存结果。
+        let _refillSeq = 0;
+        function refillTranslations(tagsRef) {
+            if (currentTags !== tagsRef) return;  // 保存期间已切图，交给 loadCaption
+            const indexes = [], query = [];
+            currentTags.forEach((item, i) => {
+                const tag = (item.tag || '').trim();
+                if (tag && !item.translation) { indexes.push(i); query.push(tag); }
+            });
+            if (!query.length) return;
+
+            const seq = ++_refillSeq;
+            const keyOf = t => (t || '').trim().toLowerCase();
+            const sent = query.map(keyOf);
+            fetch('/lookup_cache', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({tags: query})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (seq !== _refillSeq) return;       // 有更新的一次补齐在途
+                if (currentTags !== tagsRef) return;  // 期间切了图
+                const translations = data.translations || [];
+                indexes.forEach((index, k) => {
+                    const tr = translations[k] || '';
+                    if (!tr || index >= currentTags.length) return;
+                    // 二次校验：这一行可能已被编辑或被 onTagChanged 填过，只写仍是空白的原行
+                    if (currentTags[index].translation) return;
+                    if (keyOf(currentTags[index].tag) !== sent[k]) return;
+                    currentTags[index].translation = tr;
+                    const row = document.querySelector('[data-row="' + index + '"]');
+                    if (row) {
+                        // div.flex-1 只匹配翻译格（标签格是 input.flex-1，不冲突）
+                        const div = row.querySelector('div.flex-1');
+                        if (div) { div.textContent = tr; div.title = tr; }
+                    }
+                });
+            })
+            .catch(() => {});
+        }
+
         function escapeHtml(str) {
             return str.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         }
@@ -1445,10 +1494,12 @@
             btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-1"></i>翻译中...';
             body.innerHTML = '<i class="fa fa-spinner fa-spin mr-1"></i>正在翻译，请稍候...';
 
-            fetch('/translate_tag_wiki', {
+            // 深度翻译（与 Danbooru 查询页的「深度翻译」同一路由）：
+            // 后端按标签自身数据判层级，翻译中文名 + 中文 wiki 并写回主库
+            fetch('/translate_single_tag', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({tag: _detailState.tag, en_wiki: _detailState.enWiki})
+                body: JSON.stringify({tag: _detailState.tag})
             })
             .then(r => r.json())
             .then(data => {
@@ -1625,6 +1676,8 @@
                         // 若已导航离开，该图的保存仍会落盘（正确），但不干扰当前查看的新图。
                         if (currentIndex === saveIndex) {
                             savedTags = content;
+                            // 保存成功后补齐翻译列：库里有翻译但页面上空白的行（多为保存前后才写入的翻译）
+                            refillTranslations(savedCurrentTags);
                         }
                         showNotification('保存成功', 'success');
                         return content;  // resolve 成功

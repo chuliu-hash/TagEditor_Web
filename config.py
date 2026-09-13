@@ -92,6 +92,12 @@ def get_vision_config():
         'api_url': os.environ.get('VISION_API_URL', ''),
         'api_key': os.environ.get('VISION_API_KEY', ''),
         'model': os.environ.get('VISION_MODEL', ''),
+        # max_tokens 是 reasoning_content + content 的共享额度，不是只算正式回答。
+        # 推理模型（DeepSeek 等）思考模式默认开启，512 会被思考吃光 → content 为空。
+        'max_tokens': int(os.environ.get('VISION_MAX_TOKENS', '1024')),
+        # 'off' = 关闭思考（本任务只需 2~3 个短句，思考纯烧时间和钱；
+        # 且思考模式下服务端会静默忽略 temperature，关掉后 temperature 才真正生效）
+        'thinking': os.environ.get('VISION_THINKING', 'off').strip().lower(),
     }
 
 
@@ -101,6 +107,52 @@ def get_caption_config():
     return {
         'reference_tags': os.environ.get('CAPTION_REFERENCE_TAGS', 'true').strip().lower() in ('true', '1', 'yes'),
         'save_format': os.environ.get('CAPTION_SAVE_FORMAT', 'txt'),  # txt 覆盖标签 / separate 另存 .caption.txt
+    }
+
+
+# ── 提示词优化器（/prompt_tool）的内置参数 ──────────────────────────────────
+# 这些是「调好就不动」的实现细节（检索口径、token 预算、图片编码上限），不是用户配置项，
+# 故写死在代码里。.env 只留三个会真的按需调整的：PROMPT_MAX_TOKENS / THINKING / TIMEOUT。
+_PROMPT_TEMPERATURE = 0.4        # 结构化改写求稳，不要 0.7 的发散
+_PROMPT_MAX_INPUT_TAGS = 60      # 输入标签注入上限
+_PROMPT_WIKI_CHARS = 240         # 每条标签注入的 en_wiki 字符数（实测均值 546、最大 30393，必须截断）
+_PROMPT_COOC_TOPK = 8            # 共现推荐条数
+_PROMPT_COOC_NSFW = 'hide'       # 过滤 tags.nsfw=1 的推荐词（hide | show）
+# 候选自身 post_count 下限：太冷门的标签 lift 虚高（实测 three-tone_hair 只有 237 条却霸榜）
+_PROMPT_COOC_MIN_POST = 500
+# 候选只取通用类：22445 条角色标签会淹没风格/光影类候选
+_PROMPT_CANDIDATE_CATEGORIES = {0}
+_PROMPT_IMAGE_MAX_BYTES = 4194304   # 超过则用 Pillow 缩到最长边 _PROMPT_IMAGE_MAX_SIDE 并重编码
+_PROMPT_IMAGE_MAX_SIDE = 1536
+
+
+def get_prompt_tool_config():
+    """每次调用时重新读取提示词优化器（/prompt_tool）配置。
+
+    模型端点复用 VISION_API_URL/KEY/MODEL（多模态），只有三个参数走 .env：
+    - max_tokens：输出是逐条 diff JSON + 一段自然语言描述，条目多；且与思考共享额度
+    - thinking：结构化 JSON 任务，思考纯烧钱且会静默吃掉 temperature
+    - timeout：单次调用超时（tagger.py 的 VLM 路径没传 timeout，这里必须显式传）
+    其余检索/编码参数见上方 _PROMPT_* 常量。
+    """
+    load_env()
+    vision = get_vision_config()
+    return {
+        'api_url': vision['api_url'],
+        'api_key': vision['api_key'],
+        'model': vision['model'],
+        'max_tokens': int(os.environ.get('PROMPT_MAX_TOKENS', '8192')),
+        'thinking': os.environ.get('PROMPT_THINKING', 'off').strip().lower(),
+        'timeout': int(os.environ.get('PROMPT_TIMEOUT', '180')),
+        'temperature': _PROMPT_TEMPERATURE,
+        'max_input_tags': _PROMPT_MAX_INPUT_TAGS,
+        'wiki_chars': _PROMPT_WIKI_CHARS,
+        'cooc_topk': _PROMPT_COOC_TOPK,
+        'cooc_nsfw': _PROMPT_COOC_NSFW,
+        'cooc_min_post': _PROMPT_COOC_MIN_POST,
+        'candidate_categories': _PROMPT_CANDIDATE_CATEGORIES,
+        'image_max_bytes': _PROMPT_IMAGE_MAX_BYTES,
+        'image_max_side': _PROMPT_IMAGE_MAX_SIDE,
     }
 
 

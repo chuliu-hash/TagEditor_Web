@@ -108,9 +108,15 @@ def _sanitize_rename_name(name):
     return name.strip()[:128]
 
 
+# 上传后允许跳回的页面（表单里的 next 字段）。
+# 白名单而非直接 redirect(next)：next 来自表单，不校验就是开放重定向漏洞。
+_UPLOAD_NEXT_PAGES = {'tag_editor': 'tag_editor', 'image_editor': 'editor',
+                      'prompt_tool': 'prompt_tool_page'}   # 值必须是 endpoint 名：新页面的函数是 prompt_tool_page
+
+
 @file_ops_bp.route('/upload', methods=['POST'])
 def upload_files():
-    """上传文件"""
+    """上传文件。可选表单字段 next 指定上传后回哪个页面（默认标签编辑页）。"""
     if 'files' not in request.files:
         return redirect(request.url)
 
@@ -126,7 +132,8 @@ def upload_files():
             print(f"[上传] {filename} -> {save_path}")
             file.save(save_path)
 
-    return redirect(url_for('tag_editor'))
+    endpoint = _UPLOAD_NEXT_PAGES.get((request.form.get('next') or '').strip())
+    return redirect(url_for(endpoint or 'tag_editor'))
 
 
 @file_ops_bp.route('/get_caption/<image_name>')
@@ -208,6 +215,13 @@ def save_caption(image_name):
     return jsonify({'success': True})
 
 
+def _write_nl_caption(upload_dir, base_name, content):
+    """把自然语言描述写入 {base}.nl.txt。抽出来供 /save_nl_caption 与提示词优化器复用。"""
+    nl_path = os.path.join(upload_dir, f"{base_name}.nl.txt")
+    with open(nl_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+
 @file_ops_bp.route('/save_nl_caption/<image_name>', methods=['POST'])
 def save_nl_caption(image_name):
     """保存自然语言描述到 .nl.txt"""
@@ -221,11 +235,8 @@ def save_nl_caption(image_name):
     content = data.get('content', '').strip()
 
     base_name = os.path.splitext(filename)[0]
-    nl_path = os.path.join(upload_dir, f"{base_name}.nl.txt")
-
     try:
-        with open(nl_path, 'w', encoding='utf-8') as f:
-            f.write(content)
+        _write_nl_caption(upload_dir, base_name, content)
     except Exception as e:
         print(f"保存自然语言描述失败: {str(e)}")
         return jsonify({'success': False, 'error': str(e)})
@@ -483,7 +494,7 @@ def export_zip():
     """将所有图片及对应的标签文件导出为 ZIP。
     请求体 JSON：
         txt_ext: str   标签后缀，如 'txt'（常规标签）或 'nl'（自然语言描述）
-    返回 ZIP 文件下载，标签文件名重置为与图片同名。
+    返回 ZIP 文件下载，标签文件名重置为与图片同名。所有文件放入 zip 内 train/ 文件夹。
     """
     import io
     import zipfile
@@ -504,7 +515,7 @@ def export_zip():
             img_path = os.path.join(upload_dir, filename)
             if not os.path.exists(img_path):
                 continue
-            zf.write(img_path, filename)
+            zf.write(img_path, f"train/{filename}")
 
             base = os.path.splitext(filename)[0]
 
@@ -530,11 +541,11 @@ def export_zip():
 
                 if tags_content or nl_content:
                     merged = tags_content + (', ' + nl_content if tags_content and nl_content else nl_content)
-                    zf.writestr(f"{base}.txt", merged.encode('utf-8'))
+                    zf.writestr(f"train/{base}.txt", merged.encode('utf-8'))
             else:
                 txt_path = os.path.join(upload_dir, f"{base}.txt")
                 if os.path.exists(txt_path):
-                    zf.write(txt_path, f"{base}.txt")
+                    zf.write(txt_path, f"train/{base}.txt")
 
     buf.seek(0)
     return (

@@ -279,6 +279,13 @@ def auto_caption_vlm():
                             'text': 'Reference tags:\n' + ref_tags
                         })
 
+                    # 思考模式与正式回答共享 max_tokens：推理模型（DeepSeek 等）默认开启思考，
+                    # 额度被 reasoning_content 吃光后 content 为空、finish_reason=length。
+                    # 本任务只要 2~3 个短句（约 40 token），思考纯属浪费，默认关闭。
+                    extra = {}
+                    if vcfg['thinking'] not in ('on', 'true', '1', 'enabled'):
+                        extra['extra_body'] = {'thinking': {'type': 'disabled'}}
+
                     response = client.chat.completions.create(
                         model=vcfg['model'],
                         messages=[
@@ -286,7 +293,8 @@ def auto_caption_vlm():
                             {'role': 'user', 'content': user_content}
                         ],
                         temperature=0.7,
-                        max_tokens=512,
+                        max_tokens=vcfg['max_tokens'],
+                        **extra,
                     )
 
                     description = (response.choices[0].message.content or '').strip()
@@ -295,7 +303,9 @@ def auto_caption_vlm():
                         # 推理模型（如 Qwen3.5 Vision）可能把 token 全花在思考上，未输出正式回答
                         has_reasoning = hasattr(response.choices[0].message, 'reasoning_content') and response.choices[0].message.reasoning_content
                         if has_reasoning:
-                            print(f"[VLM] △ {filename}: 模型在思考中，未生成正式描述, finish={finish}")
+                            print(f"[VLM] △ {filename}: 模型在思考中，未生成正式描述, finish={finish}, "
+                                  f"max_tokens={vcfg['max_tokens']}（VISION_THINKING={vcfg['thinking']}，"
+                                  f"调大 VISION_MAX_TOKENS 或关闭思考）")
                         else:
                             print(f"[VLM] △ {filename}: 描述为空, finish={finish}")
                         skipped += 1

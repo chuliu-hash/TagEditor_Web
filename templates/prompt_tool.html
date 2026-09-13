@@ -1,0 +1,943 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>提示词优化</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#3B82F6',
+                        secondary: '#10B981',
+                        accent: '#F59E0B',
+                        danger: '#EF4444',
+                        dark: '#1E293B',
+                        light: '#F8FAFC'
+                    },
+                    fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },
+                }
+            }
+        }
+    </script>
+    <style>
+        .btn-tool {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.375rem 0.625rem;
+            font-size: 0.75rem;
+            border-radius: 0.5rem;
+            color: #ffffff;
+            transition: all 0.15s;
+            cursor: pointer;
+            border: none;
+            white-space: nowrap;
+        }
+        .btn-tool:hover { filter: brightness(0.9); }
+        .pt-scroll::-webkit-scrollbar { width: 6px; }
+        .pt-scroll::-webkit-scrollbar-track { background: transparent; }
+        .pt-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+
+        /* diff 行 */
+        .pt-row {
+            display: flex;
+            align-items: flex-start;
+            gap: 0.5rem;
+            padding: 0.4rem 0.6rem;
+            border-radius: 0.5rem;
+            border: 1px solid transparent;
+            cursor: pointer;
+            font-size: 0.75rem;
+        }
+        .pt-row:hover { filter: brightness(0.97); }
+        .pt-row[data-op="keep"]   { background: #f8fafc; border-color: #e2e8f0; }
+        .pt-row[data-op="add"]    { background: #f0fdf4; border-color: #bbf7d0; }
+        .pt-row[data-op="remove"] { background: #fef2f2; border-color: #fecaca; }
+        .pt-row[data-op="modify"] { background: #eff6ff; border-color: #bfdbfe; }
+        .pt-row.is-off { opacity: 0.45; }
+        .pt-row code {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.75rem;
+        }
+        .pt-row .badge {
+            flex-shrink: 0;
+            padding: 0.05rem 0.35rem;
+            border-radius: 0.25rem;
+            font-size: 0.65rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .pt-row[data-op="keep"]   .badge { background: #e2e8f0; color: #475569; }
+        .pt-row[data-op="add"]    .badge { background: #16a34a; color: #fff; }
+        .pt-row[data-op="remove"] .badge { background: #dc2626; color: #fff; }
+        .pt-row[data-op="modify"] .badge { background: #2563eb; color: #fff; }
+        .pt-st { padding: 0.05rem 0.3rem; border-radius: 0.25rem; font-size: 0.65rem; white-space: nowrap; }
+        .pt-st-uncollected { background: #fee2e2; color: #b91c1c; }
+        .pt-st-quality_meta { background: #e5e7eb; color: #4b5563; }
+        .pt-st-user_tag { background: #dbeafe; color: #1d4ed8; }
+        .pt-sug {
+            border: 1px solid #cbd5e1;
+            background: #fff;
+            border-radius: 0.25rem;
+            padding: 0 0.3rem;
+            font-size: 0.65rem;
+            color: #475569;
+            cursor: pointer;
+        }
+        .pt-sug:hover { background: #f1f5f9; }
+        .pt-aggr-btn.on { background: #3B82F6; color: #fff; border-color: #3B82F6; }
+    </style>
+</head>
+<body class="bg-gray-50 font-sans text-gray-800 min-h-screen flex flex-col">
+    <!-- 顶部导航 -->
+    <header class="bg-white shadow-sm sticky top-0 z-50 border-b border-gray-200">
+        <div class="container mx-auto px-4 py-3 flex justify-between items-center">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
+                    <i class="fa fa-wand-magic-sparkles text-primary"></i>
+                </div>
+                <h1 class="text-xl font-bold text-dark">提示词优化</h1>
+                <span class="text-xs text-gray-400 hidden sm:inline">以标签库为知识库，结合图片重调提示词</span>
+            </div>
+            <div class="flex items-center gap-2">
+                <a href="/" class="flex items-center justify-center bg-white hover:bg-gray-50 text-gray-600 font-medium py-1.5 px-3 rounded-lg transition-all text-xs border border-gray-300">
+                    <i class="fa fa-book mr-1.5"></i> 标签查询
+                </a>
+                <a href="/tag_editor" class="flex items-center justify-center bg-white hover:bg-gray-50 text-gray-600 font-medium py-1.5 px-3 rounded-lg transition-all text-xs border border-gray-300">
+                    <i class="fa fa-tags mr-1.5"></i> 标签编辑
+                </a>
+                <a href="/img_editor" class="flex items-center justify-center bg-white hover:bg-gray-50 text-gray-600 font-medium py-1.5 px-3 rounded-lg transition-all text-xs border border-gray-300">
+                    <i class="fa fa-crop mr-1.5"></i> 图片编辑
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <!-- 主内容：三栏 -->
+    <main class="flex-grow container mx-auto px-4 py-3">
+        <div class="flex gap-3 h-[calc(100vh-80px)]">
+
+            <!-- 左栏：图片 -->
+            <div class="w-56 shrink-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+                <div class="px-3 py-2 border-b border-gray-100 flex items-center justify-between">
+                    <span class="text-xs font-semibold text-gray-600">图片</span>
+                    <span id="pt-image-counter" class="text-xs text-gray-400">0 / 0</span>
+                </div>
+                <form action="/upload" method="post" enctype="multipart/form-data" class="px-3 py-2 border-b border-gray-100">
+                    <input type="hidden" name="next" value="prompt_tool">
+                    <input id="pt-upload-input" type="file" name="files" multiple accept="image/*,.txt"
+                           class="hidden" onchange="this.form.submit()">
+                    <button type="button" onclick="document.getElementById('pt-upload-input').click()"
+                            class="w-full py-1.5 text-xs bg-primary hover:bg-primary/90 text-white rounded-lg transition-colors">
+                        <i class="fa fa-upload mr-1"></i> 上传图片
+                    </button>
+                </form>
+                <div class="px-3 py-2 border-b border-gray-100">
+                    <input id="pt-filter" type="text" placeholder="筛选文件名..." oninput="renderFileList()"
+                           class="w-full px-2 py-1 border border-gray-300 rounded-lg text-xs focus:outline-none focus:border-primary">
+                </div>
+                <div id="pt-file-list" class="pt-scroll flex-1 overflow-y-auto px-2 py-1"></div>
+                <div class="border-t border-gray-100 p-2">
+                    <div class="h-28 bg-gray-50 rounded-lg flex items-center justify-center overflow-hidden mb-1">
+                        <img id="pt-preview-img" class="max-h-28 max-w-full object-contain hidden" alt="">
+                        <span id="pt-preview-empty" class="text-xs text-gray-400">未选择图片</span>
+                    </div>
+                    <div id="pt-current-name" class="text-xs text-gray-600 truncate mb-1">—</div>
+                    <div id="pt-nl-badge" class="text-xs text-gray-400"></div>
+                </div>
+            </div>
+
+            <!-- 中栏：输入 -->
+            <div class="flex-1 min-w-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+                <div class="px-4 py-2 border-b border-gray-100 flex items-center justify-between shrink-0">
+                    <span class="text-xs font-semibold text-gray-600">输入</span>
+                    <button id="pt-merge-nl" onclick="mergeNlIntoPrompt()"
+                            class="hidden text-xs text-primary hover:underline">
+                        <i class="fa fa-plus-circle mr-0.5"></i>并入该图的自然语言描述
+                    </button>
+                </div>
+                <div class="pt-scroll flex-1 overflow-y-auto p-4 flex flex-col gap-3">
+                    <div>
+                        <label class="text-xs font-semibold text-gray-600 block mb-1">
+                            当前提示词 <span class="text-gray-400 font-normal">（标签行 + 换行 + 自然语言描述，两段都可留空）</span>
+                        </label>
+                        <textarea id="pt-prompt-input" rows="9" spellcheck="false"
+                                  placeholder="masterpiece, best quality, 1girl, ...&#10;A dramatic high-angle anime-style close-up shot with ..."
+                                  class="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs font-mono leading-relaxed focus:outline-none focus:border-primary"></textarea>
+                    </div>
+                    <div>
+                        <label class="text-xs font-semibold text-gray-600 block mb-1">
+                            优化要求 <span class="text-gray-400 font-normal">（告诉模型<b>怎么改</b>这份提示词，必填）</span>
+                        </label>
+                        <textarea id="pt-request-input" rows="3"
+                                  placeholder="精简到 20 个标签以内并去掉查不到的假标签；背景按图片改成室内夜景"
+                                  class="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs leading-relaxed focus:outline-none focus:border-primary"></textarea>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+                        <label class="flex items-center gap-1 text-xs text-gray-600" title="开放 search_tags / tag_detail / tag_groups 三个检索工具">
+                            <input id="pt-opt-db" type="checkbox" checked class="accent-primary"> 用标签库
+                        </label>
+                        <label class="flex items-center gap-1 text-xs text-gray-600" title="开放 cooc 共现推荐工具">
+                            <input id="pt-opt-cooc" type="checkbox" checked class="accent-primary"> 用共现推荐
+                        </label>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button id="pt-run-btn" onclick="runAdjust()"
+                                class="px-4 py-2 text-sm bg-primary hover:bg-primary/90 text-white rounded-lg transition-colors">
+                            <i class="fa fa-magic mr-1"></i> 调整提示词
+                        </button>
+                    </div>
+                    <!-- 检索计划面板：模型判的意图 + 点了哪些工具 + 查回了什么 -->
+                    <div class="border border-gray-200 rounded-lg overflow-hidden">
+                        <button type="button" onclick="toggleCandidates()"
+                                class="w-full px-3 py-1.5 text-xs text-left text-gray-600 bg-gray-50 hover:bg-gray-100">
+                            <i class="fa fa-chevron-right mr-1" id="pt-cand-caret"></i> 模型判断与检索计划
+                            <span id="pt-cand-count" class="text-gray-400"></span>
+                        </button>
+                        <div id="pt-candidates-panel" class="hidden p-3 text-xs"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 右栏：结果 -->
+            <div class="w-[46%] shrink-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+                <div class="px-4 py-2 border-b border-gray-100 flex items-center justify-between shrink-0">
+                    <div class="flex items-center gap-2">
+                        <span class="text-xs font-semibold text-gray-600">结果</span>
+                        <span id="pt-input-mode" class="hidden text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-500"></span>
+                        <span id="pt-intent-badge" class="hidden text-xs px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600"></span>
+                    </div>
+                    <span class="text-xs text-gray-400">本页不写入任何文件</span>
+                </div>
+                <div class="pt-scroll flex-1 overflow-y-auto p-3 flex flex-col gap-3">
+                    <div id="pt-warnings" class="hidden"></div>
+                    <div id="pt-summary" class="hidden text-xs text-gray-700 bg-blue-50 border border-blue-100 rounded-lg p-2.5"></div>
+
+                    <div>
+                        <div class="flex items-center justify-between mb-1">
+                            <span class="text-xs font-semibold text-gray-600">标签改动</span>
+                            <span id="pt-diff-stats" class="text-xs text-gray-400"></span>
+                        </div>
+                        <div id="pt-diff-list" class="flex flex-col gap-1"></div>
+                        <div id="pt-diff-empty" class="text-xs text-gray-400 py-6 text-center">
+                            还没有结果。填好左边的提示词与优化要求后点「调整提示词」。
+                        </div>
+                    </div>
+
+                    <div>
+                        <div class="flex items-center justify-between mb-1">
+                            <span class="text-xs font-semibold text-gray-600">自然语言描述</span>
+                            <span id="pt-caption-note" class="text-xs text-gray-400"></span>
+                        </div>
+                        <textarea id="pt-caption" rows="6" spellcheck="false" oninput="onCaptionInput()"
+                                  placeholder="调整后的英文描述（一段连贯的话）"
+                                  class="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs leading-relaxed focus:outline-none focus:border-primary"></textarea>
+                        <div id="pt-caption-hint" class="hidden text-xs text-amber-600 mt-1"></div>
+                    </div>
+
+                    <div>
+                        <div class="flex items-center justify-between mb-1">
+                            <span class="text-xs font-semibold text-gray-600">最终提示词</span>
+                            <button onclick="regenFinal()" class="text-xs text-primary hover:underline">
+                                <i class="fa fa-refresh mr-0.5"></i>按勾选重算
+                            </button>
+                        </div>
+                        <textarea id="pt-final-prompt" rows="6" spellcheck="false" oninput="onFinalInput()"
+                                  class="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs font-mono leading-relaxed focus:outline-none focus:border-primary"></textarea>
+                    </div>
+                </div>
+                <div class="px-3 py-2 border-t border-gray-100 flex items-center gap-2 shrink-0">
+                    <button id="pt-copy-btn" onclick="copyFinal()"
+                            class="px-3 py-1.5 text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg transition-colors">
+                        <i class="fa fa-clipboard mr-1"></i> 复制
+                    </button>
+                    <span class="text-xs text-gray-400">本页不写入任何文件，复制后自行使用</span>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- 确认弹窗 -->
+    <div id="confirm-modal" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center hidden" onclick="if(event.target===this)closeConfirm()">
+        <div class="bg-white rounded-xl shadow-xl w-96 p-6">
+            <div class="flex items-start gap-3">
+                <div id="confirm-icon-wrap" class="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center flex-shrink-0">
+                    <i id="confirm-icon" class="fa fa-exclamation-triangle text-red-500"></i>
+                </div>
+                <div class="flex-1 pt-1">
+                    <h3 id="confirm-title" class="text-base font-semibold text-gray-800 mb-1">确认操作</h3>
+                    <p id="confirm-message" class="text-sm text-gray-500 leading-relaxed"></p>
+                </div>
+            </div>
+            <div class="flex justify-end gap-2 mt-5">
+                <button id="confirm-cancel-btn" class="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" onclick="confirmCancel()">取消</button>
+                <button id="confirm-ok-btn" class="px-4 py-2 text-sm text-white rounded-lg transition-colors bg-red-500 hover:bg-red-600" onclick="confirmOk()">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 进度弹窗 -->
+    <div id="progress-modal" class="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center hidden">
+        <div class="bg-white rounded-xl shadow-2xl w-[480px] p-6">
+            <h3 id="progress-title" class="text-lg font-semibold text-gray-800 mb-1">处理中</h3>
+            <p id="progress-subtitle" class="text-sm text-gray-400 mb-4"></p>
+            <div class="w-full bg-gray-200 rounded-full h-3 mb-3 overflow-hidden">
+                <div id="progress-bar" class="bg-primary h-3 rounded-full transition-all duration-300 ease-out" style="width: 0%"></div>
+            </div>
+            <div class="flex justify-between text-sm text-gray-500 mb-3">
+                <span id="progress-count"></span>
+                <span id="progress-percent"></span>
+            </div>
+            <div class="text-sm text-gray-600 mb-2 truncate" id="progress-item"></div>
+            <div id="progress-errors" class="hidden max-h-32 overflow-y-auto text-sm text-red-600 bg-red-50 rounded-lg p-3 mb-4 space-y-1"></div>
+            <div class="flex justify-end gap-2">
+                <button id="progress-cancel-btn" class="px-4 py-2 text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg transition-colors" onclick="cancelProgress()">中断</button>
+                <button id="progress-close-btn" class="hidden px-4 py-2 text-sm bg-primary hover:bg-primary/90 text-white rounded-lg transition-colors" onclick="closeProgressModal()">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 通知 -->
+    <div id="notification" class="fixed bottom-5 right-5 px-5 py-3 rounded-lg shadow-lg transform translate-y-20 opacity-0 transition-all duration-300 flex items-center z-50 text-sm"></div>
+
+    <script>
+        // === 状态 ===
+        var _images = {{ images | tojson }};
+        var _current = '';        // 当前图片文件名
+        var _origNl = '';         // 当前图原有 .nl.txt（用于「并入」与覆盖确认）
+        var _ptDiff = [];         // diff 行数据（DOM 由它渲染，勾选态存在对象里）
+        var _ptFinalDirty = false;// 用户手改过 #pt-final-prompt
+        var _ptResult = null;     // 最近一次 complete 结果
+
+        var CAT_NAMES = {0: '通用', 1: '艺术家', 3: '版权', 4: '角色', 5: '元数据'};
+        var OP_NAMES = {keep: '保留', add: '新增', remove: '删除', modify: '修改'};
+
+        // === 通知 ===
+        var _notifyTimer = null;
+        function showNotification(message, type) {
+            var n = document.getElementById('notification');
+            var colors = {success:'bg-green-500 text-white',error:'bg-red-500 text-white',warning:'bg-amber-500 text-white',info:'bg-blue-500 text-white'};
+            n.className = 'fixed bottom-5 right-5 px-5 py-3 rounded-lg shadow-lg flex items-center z-50 transition-all duration-300 text-sm ' + (colors[type] || colors.info);
+            n.textContent = message;
+            n.style.transform = 'translateY(0)'; n.style.opacity = '1';
+            if (_notifyTimer) clearTimeout(_notifyTimer);
+            _notifyTimer = setTimeout(function() {
+                n.style.transform = 'translateY(20px)'; n.style.opacity = '0'; _notifyTimer = null;
+            }, 3000);
+        }
+
+        function escapeHtml(str) {
+            return String(str).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+
+        // === 确认弹窗 ===
+        var _confirmOnOk = null, _confirmOnCancel = null;
+        function showConfirm(opts) {
+            var o = opts || {};
+            document.getElementById('confirm-title').textContent = o.title || '确认操作';
+            document.getElementById('confirm-message').textContent = o.message || '';
+            var okBtn = document.getElementById('confirm-ok-btn');
+            var cancelBtn = document.getElementById('confirm-cancel-btn');
+            okBtn.textContent = o.okText || '确定';
+            cancelBtn.textContent = o.cancelText || '取消';
+            var danger = o.danger !== false;
+            okBtn.className = 'px-4 py-2 text-sm text-white rounded-lg transition-colors ' +
+                (danger ? 'bg-red-500 hover:bg-red-600' : 'bg-primary hover:bg-primary/90');
+            var icon = document.getElementById('confirm-icon');
+            var iconWrap = document.getElementById('confirm-icon-wrap');
+            if (danger) {
+                icon.className = 'fa fa-exclamation-triangle text-red-500';
+                iconWrap.className = 'w-10 h-10 rounded-full bg-red-50 flex items-center justify-center flex-shrink-0';
+            } else {
+                icon.className = 'fa fa-question-circle text-primary';
+                iconWrap.className = 'w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0';
+            }
+            _confirmOnOk = o.onOk || null;
+            _confirmOnCancel = o.onCancel || null;
+            document.getElementById('confirm-modal').classList.remove('hidden');
+        }
+        function closeConfirm() {
+            document.getElementById('confirm-modal').classList.add('hidden');
+            _confirmOnOk = null; _confirmOnCancel = null;
+        }
+        function confirmOk() { var cb = _confirmOnOk; closeConfirm(); if (cb) cb(); }
+        function confirmCancel() { var cb = _confirmOnCancel; closeConfirm(); if (cb) cb(); }
+
+        // === 文件列表 ===
+        function renderFileList() {
+            var kw = (document.getElementById('pt-filter').value || '').trim().toLowerCase();
+            var box = document.getElementById('pt-file-list');
+            var list = _images.filter(function(n) {
+                return !kw || n.toLowerCase().indexOf(kw) >= 0;
+            });
+            var html = '';
+            for (var i = 0; i < list.length; i++) {
+                var n = list[i];
+                var on = n === _current;
+                // 文件名走 data-* + 事件委托（不在 onclick 里拼字符串：含引号的文件名会拼坏 JS，
+                // 且 escapeHtml 已把 ' 转成 &#39;，再转义也救不回来）
+                html += '<div class="pt-file-item px-2 py-1 rounded cursor-pointer text-xs truncate ' +
+                    (on ? 'bg-primary/10 text-primary font-medium' : 'text-gray-600 hover:bg-gray-50') +
+                    '" data-name="' + escapeHtml(n) + '" title="' + escapeHtml(n) + '">' + escapeHtml(n) + '</div>';
+            }
+            box.innerHTML = html || '<div class="text-xs text-gray-400 p-2">没有匹配的图片</div>';
+            var idx = _images.indexOf(_current);
+            document.getElementById('pt-image-counter').textContent =
+                (idx >= 0 ? (idx + 1) : 0) + ' / ' + _images.length;
+        }
+
+        // 事件委托：文件项的 data-name 只在点击时读，不进 JS 字符串
+        document.getElementById('pt-file-list').addEventListener('click', function(e) {
+            var item = e.target.closest('.pt-file-item');
+            if (item) selectImage(item.dataset.name);
+        });
+
+        function selectImage(name) {
+            _current = name;
+            _origNl = '';
+            var img = document.getElementById('pt-preview-img');
+            var empty = document.getElementById('pt-preview-empty');
+            if (name) {
+                img.src = '/uploads/' + encodeURIComponent(name);
+                img.classList.remove('hidden');
+                empty.classList.add('hidden');
+                location.hash = encodeURIComponent(name);
+            } else {
+                img.removeAttribute('src');
+                img.classList.add('hidden');
+                empty.classList.remove('hidden');
+            }
+            document.getElementById('pt-current-name').textContent = name || '—';
+            document.getElementById('pt-nl-badge').textContent = '';
+            document.getElementById('pt-merge-nl').classList.add('hidden');
+            renderFileList();
+            if (name) loadCaptionFor(name);
+        }
+
+        // 选图后预填：标签行 + （若有）.nl.txt 供一键并入
+        function loadCaptionFor(name) {
+            fetch('/get_caption/' + encodeURIComponent(name))
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (name !== _current) return;   // 切图竞态
+                    var ta = document.getElementById('pt-prompt-input');
+                    var tags = (data.caption || '').replace(/\s+$/, '');
+                    ta.value = tags;
+                    _origNl = (data.nl_caption || '').trim();
+                    document.getElementById('pt-nl-badge').textContent =
+                        _origNl ? '已有自然语言描述（' + _origNl.length + ' 字）' : '无自然语言描述文件';
+                    document.getElementById('pt-merge-nl').classList.toggle('hidden', !_origNl);
+                })
+                .catch(function() { showNotification('读取标签失败', 'error'); });
+        }
+
+        function mergeNlIntoPrompt() {
+            if (!_origNl) return;
+            var ta = document.getElementById('pt-prompt-input');
+            var head = ta.value.trim();
+            // 已经是两段式时只替换描述段，避免叠加两份描述
+            var nl = head.indexOf('\n');
+            if (nl >= 0) head = head.slice(0, nl).trim();
+            ta.value = head + '\n' + _origNl;
+            showNotification('已并入自然语言描述', 'success');
+        }
+
+        // === 运行 ===
+        function runAdjust() {
+            var prompt = document.getElementById('pt-prompt-input').value;
+            // 优化要求必填：没有它就没有本次调整的目标（提示词可空，允许从零起步）
+            var request = document.getElementById('pt-request-input').value.trim();
+            if (!request) {
+                showNotification('请填写优化要求（告诉模型怎么改这份提示词）', 'warning');
+                return;
+            }
+            var body = {
+                image: _current || '',
+                prompt: prompt,
+                request: request,
+                options: {
+                    use_db: document.getElementById('pt-opt-db').checked,
+                    use_cooc: document.getElementById('pt-opt-cooc').checked
+                }
+            };
+            executeWithProgress('/prompt_adjust', body, 'AI 调整提示词', '正在准备...',
+                function(data) { renderResult(data); }, null);
+        }
+
+        function renderResult(data) {
+            // executeWithProgress 在中断/失败时也会回调 onComplete({}) —— 只有完整的结果才渲染
+            if (!data || !('diff' in data) || !('caption' in data)) return;
+            _ptResult = data;
+            _ptDiff = (data.diff || []).map(function(d) {
+                return {
+                    op: d.op, tag: d.tag, from: d.from || '', raw: d.raw || '',
+                    weight: d.weight, cn_name: d.cn_name || '', category: d.category,
+                    post_count: d.post_count, status: d.status || '', reason: d.reason || '',
+                    suggestions: d.suggestions || [], checked: true
+                };
+            });
+            document.getElementById('pt-summary').classList.toggle('hidden', !data.summary);
+            document.getElementById('pt-summary').textContent = data.summary || '';
+            var modeNames = {both: '标签 + 描述', tags_only: '仅标签', prose_only: '仅描述', empty: '空输入'};
+            var mb = document.getElementById('pt-input-mode');
+            mb.textContent = modeNames[data.input_mode] || data.input_mode;
+            mb.classList.remove('hidden');
+            var ib = document.getElementById('pt-intent-badge');
+            var intent = ((data.plan || {}).intent || '').trim();
+            ib.textContent = intent ? '要求类型：' + intent : '';
+            ib.classList.toggle('hidden', !intent);
+            renderPlan(data.plan, data.tool_results);
+            renderWarnings(data.warnings || []);
+            document.getElementById('pt-caption').value = data.caption || '';
+            document.getElementById('pt-caption-note').textContent = data.caption_note || '';
+            renderDiff();
+            onCaptionInput();
+            regenFinal(true);
+        }
+
+        function renderWarnings(list) {
+            var box = document.getElementById('pt-warnings');
+            if (!list.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+            var html = '';
+            for (var i = 0; i < list.length; i++) {
+                html += '<div class="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2">' +
+                        '<i class="fa fa-exclamation-circle mr-1"></i>' + escapeHtml(list[i]) + '</div>';
+            }
+            box.innerHTML = '<div class="flex flex-col gap-1">' + html + '</div>';
+            box.classList.remove('hidden');
+        }
+
+        function fmtCount(n) {
+            if (n == null) return '';
+            if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+            return String(n);
+        }
+
+        function renderDiff() {
+            var box = document.getElementById('pt-diff-list');
+            document.getElementById('pt-diff-empty').classList.toggle('hidden', _ptDiff.length > 0);
+            var html = '';
+            for (var i = 0; i < _ptDiff.length; i++) {
+                var d = _ptDiff[i];
+                var nameHtml;
+                if (d.op === 'modify') {
+                    nameHtml = '<code class="text-gray-400 line-through">' + escapeHtml(d.from) + '</code>' +
+                               '<i class="fa fa-long-arrow-right mx-1 text-gray-400"></i>' +
+                               '<code class="font-medium">' + escapeHtml(d.tag) + '</code>';
+                } else {
+                    nameHtml = '<code class="' + (d.op === 'remove' ? 'line-through text-gray-500' : 'font-medium') + '">' +
+                               escapeHtml(d.tag) + '</code>';
+                }
+                var st = '';
+                if (d.status === 'uncollected') st = '<span class="pt-st pt-st-uncollected">未收录</span>';
+                else if (d.status === 'quality_meta') st = '<span class="pt-st pt-st-quality_meta">质量标签</span>';
+                else if (d.status === 'user_tag') st = '<span class="pt-st pt-st-user_tag">用户标签</span>';
+                var cat = '';
+                if (d.category != null && CAT_NAMES[d.category]) {
+                    cat = '<span class="text-gray-400">' + CAT_NAMES[d.category] +
+                          (d.post_count != null ? ' · ' + fmtCount(d.post_count) : '') + '</span>';
+                }
+                var sug = '';
+                if (d.suggestions && d.suggestions.length) {
+                    sug = '<span class="flex items-center gap-1 flex-wrap">';
+                    for (var k = 0; k < d.suggestions.length; k++) {
+                        sug += '<button type="button" class="pt-sug" onclick="applySuggestion(' + i + ',' + k + ')">换成 ' +
+                               escapeHtml(d.suggestions[k].name) + '</button>';
+                    }
+                    sug += '</span>';
+                }
+                var w = '';
+                if (d.weight != null && Number(d.weight) !== 1) {
+                    w = '<span class="text-gray-400">×' + d.weight + '</span>';
+                }
+                html += '<label class="pt-row' + (d.checked ? '' : ' is-off') + '" data-op="' + d.op + '">' +
+                    '<input type="checkbox" class="pt-check mt-0.5 shrink-0 accent-primary"' + (d.checked ? ' checked' : '') +
+                    ' onchange="toggleRow(' + i + ', this.checked)">' +
+                    '<span class="badge">' + OP_NAMES[d.op] + '</span>' +
+                    '<span class="flex-1 min-w-0 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">' +
+                        '<span>' + nameHtml + '</span>' + st +
+                        (d.cn_name ? '<span class="text-gray-500">' + escapeHtml(d.cn_name) + '</span>' : '') +
+                        cat + w + sug +
+                        (d.reason ? '<span class="text-gray-400 w-full truncate">' + escapeHtml(d.reason) + '</span>' : '') +
+                    '</span></label>';
+            }
+            box.innerHTML = html;
+            var st2 = {keep: 0, add: 0, remove: 0, modify: 0};
+            for (var j = 0; j < _ptDiff.length; j++) st2[_ptDiff[j].op] = (st2[_ptDiff[j].op] || 0) + 1;
+            document.getElementById('pt-diff-stats').textContent =
+                '保留 ' + st2.keep + ' · 新增 ' + st2.add + ' · 修改 ' + st2.modify + ' · 删除 ' + st2.remove;
+        }
+
+        function toggleRow(i, checked) {
+            _ptDiff[i].checked = checked;
+            renderDiff();
+            renderTags();
+        }
+
+        // 用库内近似标签原地替换该行（不重跑模型）
+        function applySuggestion(i, k) {
+            var d = _ptDiff[i];
+            var sug = d.suggestions[k];
+            if (!sug) return;
+            if (d.op !== 'add' && d.op !== 'modify') d.from = d.tag;
+            if (d.op === 'keep' || d.op === 'remove') d.op = 'modify';
+            d.tag = sug.name;
+            d.cn_name = sug.cn_name || '';
+            d.category = sug.category;
+            d.post_count = sug.post_count;
+            d.status = sug.status || 'in_db';
+            d.suggestions = [];      // 换过名字后旧建议已失效
+            d.reason = '手动改用库内真实标签 ' + sug.name;
+            renderDiff();
+            renderTags();
+            showNotification('已换成 ' + sug.name, 'success');
+        }
+
+        // === 拼装最终提示词 ===
+        function tagExpr(tag, weight) {
+            if (weight == null || Number(weight) === 1) return tag;
+            return '(' + tag + ':' + weight + ')';
+        }
+
+        function effectiveTag(d) {
+            // 未勾选 → 反向操作；返回 null 表示该标签不出现在最终提示词里
+            if (d.op === 'keep')   return d.checked ? (d.raw || d.tag) : null;
+            if (d.op === 'add')    return d.checked ? tagExpr(d.tag, d.weight) : null;
+            if (d.op === 'remove') return d.checked ? null : (d.raw || d.tag);
+            if (d.op === 'modify') return d.checked ? tagExpr(d.tag, d.weight) : (d.raw || d.from);
+            return d.raw || d.tag;
+        }
+
+        function renderTags() {
+            var out = [];
+            // 原提示词顺序在前、新增追加在后（与后端的补全顺序无关，这里再保一次）
+            for (var i = 0; i < _ptDiff.length; i++) {
+                if (_ptDiff[i].op === 'add') continue;
+                var t = effectiveTag(_ptDiff[i]);
+                if (t) out.push(t);
+            }
+            for (var j = 0; j < _ptDiff.length; j++) {
+                if (_ptDiff[j].op !== 'add') continue;
+                var t2 = effectiveTag(_ptDiff[j]);
+                if (t2) out.push(t2);
+            }
+            return out.join(', ');
+        }
+
+        function composeFinal() {
+            var tags = renderTags();
+            var caption = document.getElementById('pt-caption').value.trim();
+            if (!tags) return caption;
+            if (!caption) return tags;
+            return tags + '\n' + caption;
+        }
+
+        function regenFinal(force) {
+            if (_ptFinalDirty && !force) {
+                showConfirm({
+                    title: '重算最终提示词',
+                    message: '你在「最终提示词」里的手动修改会被覆盖，继续？',
+                    danger: false,
+                    okText: '覆盖',
+                    onOk: function() { regenFinal(true); }
+                });
+                return;
+            }
+            document.getElementById('pt-final-prompt').value = composeFinal();
+            _ptFinalDirty = false;
+        }
+
+        function onFinalInput() { _ptFinalDirty = true; }
+
+        function onCaptionInput() {
+            var cap = document.getElementById('pt-caption').value;
+            var hint = document.getElementById('pt-caption-hint');
+            var hints = [];
+            if (!cap.trim()) {
+                hints.push('无描述，可保存但建议补全');
+            } else if (looksLikeTagList(cap)) {
+                hints.push('这段描述看起来像标签罗列（没有句子），建议改写成连贯的一句话');
+            }
+            hint.textContent = hints.join('；');
+            hint.classList.toggle('hidden', !hints.length);
+            regenFinal();   // 描述是最终提示词的第二段，跟着更新
+        }
+
+        // 描述里没有句读、却被逗号切成很多块 → 更像标签行
+        function looksLikeTagList(text) {
+            var t = text.trim();
+            if (!t) return false;
+            if (/[.?!。！？]/.test(t)) return false;
+            return t.split(/[,，]/).length > 5;
+        }
+
+        // === 复制 ===
+        function copyFinal() {
+            var text = document.getElementById('pt-final-prompt').value;
+            if (!text.trim()) { showNotification('没有可复制的内容', 'warning'); return; }
+            navigator.clipboard.writeText(text)
+                .then(function() { showNotification('已复制到剪贴板', 'success'); })
+                .catch(function() { showNotification('复制失败，请手动选择复制', 'error'); });
+        }
+
+        // === 模型判断与检索计划（数据随 complete 事件回来，不再单独请求）===
+        function toggleCandidates() {
+            var panel = document.getElementById('pt-candidates-panel');
+            panel.classList.toggle('hidden');
+            document.getElementById('pt-cand-caret').className =
+                'fa mr-1 fa-chevron-' + (panel.classList.contains('hidden') ? 'right' : 'down');
+        }
+
+        function renderPlan(plan, toolResults) {
+            var p = plan || {};
+            var tr = toolResults || {};
+            var calls = p.tools || [];
+            var hit = 0;
+            for (var k in tr) { if (tr[k] && tr[k].length) hit += tr[k].length; }
+            document.getElementById('pt-cand-count').textContent =
+                calls.length ? '（点 ' + calls.length + ' 个工具 · 命中 ' + hit + ' 条）' : '（未点工具）';
+
+            var html = '<div class="text-gray-500 mb-2">模型判断的意图：<span class="text-indigo-600 font-medium">' +
+                       escapeHtml(p.intent || '未判断') + '</span></div>';
+            if (p.understanding) html += '<div class="text-gray-600 mb-1">理解：' + escapeHtml(p.understanding) + '</div>';
+            if (p.plan) html += '<div class="text-gray-600 mb-2">计划：' + escapeHtml(p.plan) + '</div>';
+            if (!calls.length) {
+                html += '<div class="text-gray-400">本次没有调用检索工具（纯格式/元操作要求不需要查库）。</div>';
+            }
+            for (var i = 0; i < calls.length; i++) {
+                var c = calls[i] || {};
+                var name = c.tool || '?';
+                var args = [];
+                for (var key in c) { if (key !== 'tool') args.push(key + ': ' + JSON.stringify(c[key])); }
+                var got = tr[name] || [];
+                html += '<div class="mb-2"><div class="font-semibold text-gray-600">' + escapeHtml(name) +
+                        ' <span class="text-gray-400 font-normal">' + escapeHtml(args.join(' ')) +
+                        '</span> <span class="text-gray-400 font-normal">→ ' + got.length + ' 条</span></div>';
+                if (got.length) {
+                    var cls = name === 'cooc' ? 'bg-indigo-50 text-indigo-700' : 'bg-gray-100 text-gray-600';
+                    html += '<div class="flex flex-wrap gap-1 mt-0.5">';
+                    for (var g = 0; g < Math.min(got.length, 48); g++) {
+                        var it = got[g] || {};
+                        if (name === 'tag_groups') {
+                            var gs = (it.groups || []).map(function(x) {
+                                return x.member_total + ' 个同组标签';
+                            }).join(' / ');
+                            html += '<span class="px-1.5 py-0.5 ' + cls + ' rounded">' + escapeHtml(it.name) +
+                                    ' <span class="opacity-60">' + escapeHtml(gs || '无分组') + '</span></span>';
+                        } else {
+                            var extra = name === 'cooc' ? it.lift
+                                      : (it.post_count != null ? fmtCount(it.post_count) : '');
+                            html += '<span class="px-1.5 py-0.5 ' + cls + ' rounded" title="' +
+                                    escapeHtml(it.cn_name || '') + '">' + escapeHtml(it.name) +
+                                    (extra ? ' <span class="opacity-60">' + escapeHtml(String(extra)) + '</span>' : '') +
+                                    '</span>';
+                        }
+                    }
+                    html += '</div>';
+                }
+                html += '</div>';
+            }
+            document.getElementById('pt-candidates-panel').innerHTML = html;
+        }
+
+        // === SSE 通用流式消费器（支持取消） ===
+        var _progressController = null;
+        var _progressSeq = 0;
+        var _lastProgress = null;
+
+        function cancelProgress() {
+            fetch('/danbooru_cancel', {method: 'POST'}).catch(function() {});
+            if (_progressController) { _progressController.abort(); _progressController = null; }
+            document.getElementById('progress-close-btn').classList.remove('hidden');
+            document.getElementById('progress-cancel-btn').classList.add('hidden');
+            var bar = document.getElementById('progress-bar');
+            bar.classList.remove('bg-primary'); bar.classList.add('bg-red-500');
+            document.getElementById('progress-subtitle').textContent = '已中断';
+        }
+
+        function executeWithProgress(url, body, title, subtitle, onComplete, summaryFn) {
+            var modal = document.getElementById('progress-modal');
+            var bar = document.getElementById('progress-bar');
+            var count = document.getElementById('progress-count');
+            var pct = document.getElementById('progress-percent');
+            var itemEl = document.getElementById('progress-item');
+            var errBox = document.getElementById('progress-errors');
+            var closeBtn = document.getElementById('progress-close-btn');
+            var cancelBtn = document.getElementById('progress-cancel-btn');
+
+            var seq = ++_progressSeq;
+            if (_progressController) { _progressController.abort(); _progressController = null; }
+            var controller = new AbortController();
+            _progressController = controller;
+
+            function openModal() {
+                document.getElementById('progress-title').textContent = title;
+                document.getElementById('progress-subtitle').textContent = subtitle;
+                bar.style.width = '0%';
+                bar.classList.remove('bg-red-500'); bar.classList.add('bg-primary');
+                count.textContent = ''; pct.textContent = '';
+                itemEl.textContent = '';
+                errBox.innerHTML = ''; errBox.classList.add('hidden');
+                closeBtn.classList.add('hidden');
+                cancelBtn.classList.remove('hidden');
+                modal.classList.remove('hidden');
+            }
+
+            function finalize(success, subtitleText) {
+                if (seq !== _progressSeq) return;
+                if (!success) {
+                    bar.style.width = '100%';
+                    bar.classList.remove('bg-primary'); bar.classList.add('bg-red-500');
+                }
+                document.getElementById('progress-subtitle').textContent = subtitleText;
+                cancelBtn.classList.add('hidden');
+                closeBtn.classList.remove('hidden');
+                if (onComplete) onComplete({});
+            }
+
+            fetch(url, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body),
+                signal: controller.signal
+            }).then(function(response) {
+                var contentType = response.headers.get('Content-Type') || '';
+                if (contentType.includes('application/json')) {
+                    return response.json().then(function(data) {
+                        if (data.error) showNotification(data.error, 'error');
+                        if (onComplete) onComplete(data);
+                        return null;
+                    });
+                }
+                if (!response.ok) {
+                    return response.text().then(function(text) {
+                        var msg = '请求失败';
+                        try { msg = JSON.parse(text).error || msg; } catch(e) {}
+                        throw new Error(msg);
+                    });
+                }
+                openModal();
+                var reader = response.body.getReader();
+                var decoder = new TextDecoder();
+                var buffer = '';
+                var currentEventType = '';
+                var streamFinished = false;
+
+                function processLines() {
+                    if (seq !== _progressSeq) return;
+                    var lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+                    for (var i = 0; i < lines.length; i++) {
+                        var line = lines[i];
+                        if (line.startsWith('event: ')) {
+                            currentEventType = line.slice(7).trim();
+                        } else if (line.startsWith('data: ')) {
+                            var data;
+                            try { data = JSON.parse(line.slice(6)); } catch(e) { currentEventType = ''; continue; }
+                            if (currentEventType === 'progress') {
+                                _lastProgress = data;
+                                itemEl.textContent = data.item || '';
+                                if (data.total && data.total !== '?') {
+                                    var percent = Math.round((data.current / data.total) * 100);
+                                    bar.style.width = percent + '%';
+                                    count.textContent = data.current + ' / ' + data.total;
+                                    pct.textContent = percent + '%';
+                                } else {
+                                    count.textContent = data.current || '';
+                                    pct.textContent = '';
+                                }
+                            } else if (currentEventType === 'error') {
+                                errBox.classList.remove('hidden');
+                                var div = document.createElement('div');
+                                div.textContent = (data.item ? data.item + ': ' : '') + data.error;
+                                errBox.appendChild(div);
+                            } else if (currentEventType === 'complete') {
+                                streamFinished = true;
+                                bar.style.width = '100%';
+                                pct.textContent = '100%';
+                                itemEl.textContent = '';
+                                if (summaryFn) {
+                                    document.getElementById('progress-subtitle').textContent = summaryFn(data);
+                                }
+                                cancelBtn.classList.add('hidden');
+                                closeBtn.classList.remove('hidden');
+                                if (onComplete) onComplete(data);
+                            } else if (currentEventType === 'fatal') {
+                                streamFinished = true;
+                                bar.style.width = '100%';
+                                bar.classList.remove('bg-primary'); bar.classList.add('bg-red-500');
+                                itemEl.textContent = data.error;
+                                cancelBtn.classList.add('hidden');
+                                closeBtn.classList.remove('hidden');
+                                if (onComplete) onComplete(data);
+                            } else if (currentEventType === 'cancelled') {
+                                streamFinished = true;
+                                finalize(false, data.message || '已取消');
+                            }
+                            currentEventType = '';
+                        }
+                    }
+                }
+
+                function isAborted() { return controller && controller.signal.aborted; }
+
+                function finishStream(aborted) {
+                    if (streamFinished) return;
+                    if (aborted || isAborted()) { finalize(false, '操作已中断'); return; }
+                    bar.style.width = '100%';
+                    bar.classList.remove('bg-primary'); bar.classList.add('bg-red-500');
+                    errBox.classList.remove('hidden');
+                    var div = document.createElement('div');
+                    div.textContent = '连接异常中断：未收到完成信号';
+                    errBox.appendChild(div);
+                    finalize(false, '连接异常中断');
+                }
+
+                function read() {
+                    reader.read().then(function(result) {
+                        if (isAborted()) { finishStream(true); return; }
+                        if (result.done) {
+                            if (buffer.trim()) { buffer += '\n'; processLines(); }
+                            finishStream();
+                            return;
+                        }
+                        buffer += decoder.decode(result.value, {stream: true});
+                        processLines();
+                        read();
+                    }).catch(function(err) {
+                        if (isAborted()) { finishStream(true); return; }
+                        bar.style.width = '100%';
+                        bar.classList.remove('bg-primary'); bar.classList.add('bg-red-500');
+                        errBox.classList.remove('hidden');
+                        var div = document.createElement('div');
+                        div.textContent = '读取流失败：' + (err && err.message ? err.message : '网络中断');
+                        errBox.appendChild(div);
+                        finalize(false, '连接异常，已停止');
+                    });
+                }
+                read();
+                return null;
+            }).catch(function(err) {
+                if (err.name === 'AbortError') { finalize(false, '操作已取消'); return; }
+                showNotification(err.message || '请求失败', 'error');
+                if (onComplete) onComplete({});
+            });
+        }
+
+        function closeProgressModal() {
+            document.getElementById('progress-modal').classList.add('hidden');
+        }
+
+        // === 初始化 ===
+        (function init() {
+            var h = decodeURIComponent(location.hash.replace(/^#/, ''));
+            if (h && _images.indexOf(h) >= 0) selectImage(h);
+            else if (_images.length) selectImage(_images[0]);
+            else renderFileList();
+        })();
+    </script>
+</body>
+</html>
