@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests as req
 import urllib3
 from pathlib import Path
-from config import get_tag_db_config
+from config import get_tag_db_config, resolve_api_key
 from build_tag_db import normalize_tag_key
 
 # 抑制 verify=False 时的 SSL 警告（Bangumi API 偶发 TLS 兼容性问题）
@@ -694,7 +694,8 @@ def translate_one_tag(tag_data: dict, db_path: str = None) -> dict:
 
     tag_data: {name, cn_name, en_wiki, category, other_names}（与 _load_tags 返回结构一致）
     返回 {'cn_name': 合并后中文名, 'cn_wiki': 中文 wiki, 'nsfw': int 或 None}。
-    LLM_API_KEY 未配置时抛 ValueError；提示词缺失由 get_system_prompt 抛 ValueError。
+    LLM_API_URL 未配置时抛 ValueError（API Key 可空，本地部署无需配置）；
+    提示词缺失由 get_system_prompt 抛 ValueError。
     """
     if db_path is None:
         db_path = get_tag_db_config()['db_path']
@@ -719,11 +720,14 @@ def translate_one_tag(tag_data: dict, db_path: str = None) -> dict:
         system_prompt = get_system_prompt('llm_fallback')
         temperature = 0.5
 
-    api_key = os.environ.get('LLM_API_KEY', '')
-    if not api_key:
-        raise ValueError('未配置 LLM_API_KEY')
+    # 本地部署（Ollama / LM Studio / vLLM 等）无需 API Key：空值由 resolve_api_key
+    # 归一化为占位串（SDK 2.x 对空串同样抛 OpenAIError）。真正要守的是端点地址。
+    base_url = os.environ.get('LLM_API_URL', '')
+    if not base_url:
+        raise ValueError('未配置 LLM_API_URL')
     from openai import OpenAI
-    client = OpenAI(base_url=os.environ.get('LLM_API_URL', ''), api_key=api_key)
+    client = OpenAI(base_url=base_url,
+                    api_key=resolve_api_key(os.environ.get('LLM_API_KEY', '')))
     results = _call_llm(client, os.environ.get('LLM_MODEL', 'default'),
                         system_prompt, payload, temperature=temperature)
 
@@ -753,14 +757,14 @@ def run_llm_process(db_path: str = None, preview: bool = False,
     if db_path is None:
         db_path = get_tag_db_config()['db_path']
 
-    # LLM 客户端
-    api_key = os.environ.get('LLM_API_KEY', '')
+    # LLM 客户端（本地部署无需 API Key，空值经 resolve_api_key 归一化为占位串）
     base_url = os.environ.get('LLM_API_URL', '')
+    api_key = resolve_api_key(os.environ.get('LLM_API_KEY', ''))
     model = os.environ.get('LLM_MODEL', 'default')
     bangumi_token = os.environ.get('BANGUMI_ACCESS_TOKEN', '')
 
-    if not preview and not api_key:
-        print("[LLM] 错误：未配置 LLM_API_KEY")
+    if not preview and not base_url:
+        print("[LLM] 错误：未配置 LLM_API_URL")
         return
 
     from openai import OpenAI

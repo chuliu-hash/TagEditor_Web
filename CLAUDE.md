@@ -119,6 +119,14 @@ WD14（onnxruntime/cv2/pandas）、Real-ESRGAN（torch/basicsr）、BiRefNet（t
 
 所有配置通过 `.env` 文件管理。每次 API 调用触发 `config.load_env()`，通过 mtime 检测按需重读。
 
+### API Key 可空（本地部署）
+
+本地部署的 OpenAI 兼容端点（Ollama / LM Studio / vLLM / llama.cpp）不校验 Key，故 `LLM_API_KEY` / `VISION_API_KEY` **留空即可**。但 openai SDK 2.x 在 `api_key` 为空字符串时同样抛 `OpenAIError: Missing credentials`（`_client.py` 判的是 `not self.api_key`，不只是 `None`），所以**所有 `OpenAI()` 构造点必须过 `config.resolve_api_key()`**——它把空值/空白归一化为占位串 `not-needed`，真实 key 原样透传。
+
+- `get_llm_config()` / `get_vision_config()` 已在配置层归一化，消费方（`tagger.py` 的 VLM 路径、`prompt_tool.py` 的 `get_prompt_tool_config()`）直接取用即可
+- `llm_pipeline.py` / `translation.py` 直接读 `os.environ`，各自显式调用 `resolve_api_key()`
+- **该守的是端点地址不是 key**：缺 `LLM_API_URL` 仍报错（`ValueError` → 路由 400，SSE 路径发 `fatal`），缺 key 不再拦
+
 ### 提示词管理（prompts/）
 
 所有 LLM/VLM 提示词统一存放在 `prompts/` 目录，每个提示词一个 `.txt` 文件（代码和 `.env` 中不存提示词，缺失即报错，无内置默认）：

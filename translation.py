@@ -417,12 +417,14 @@ def llm_process_db():
             yield sse_event('progress', {'current': 0, 'total': 5, 'item': '准备 LLM 深度翻译...'})
             print('[LLM 翻译] 准备 LLM 深度翻译...')
 
-            api_key = os.environ.get('LLM_API_KEY', '')
+            # 本地部署（Ollama 等）无需 API Key，只要求端点地址；
+            # 空 key 由 resolve_api_key 归一化为占位串（SDK 2.x 对空串也会抛 OpenAIError）
+            from config import resolve_api_key
             base_url = os.environ.get('LLM_API_URL', '')
             model = os.environ.get('LLM_MODEL', 'default')
-            if not api_key:
-                print('[LLM 翻译] 错误: 未配置 LLM_API_KEY')
-                yield sse_event('fatal', {'error': '未配置 LLM_API_KEY'})
+            if not base_url:
+                print('[LLM 翻译] 错误: 未配置 LLM_API_URL')
+                yield sse_event('fatal', {'error': '未配置 LLM_API_URL'})
                 return
 
             if cancel_evt.is_set():
@@ -431,7 +433,8 @@ def llm_process_db():
                 return
 
             from openai import OpenAI
-            client = OpenAI(base_url=base_url, api_key=api_key)
+            client = OpenAI(base_url=base_url,
+                            api_key=resolve_api_key(os.environ.get('LLM_API_KEY', '')))
 
             conn = _get_tag_db_conn()
             if conn is None:

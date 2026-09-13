@@ -75,22 +75,39 @@ def load_env(env_path='.env'):
     _env_mtime = mtime
 
 
+# 本地部署的 OpenAI 兼容端点（Ollama / LM Studio / vLLM / llama.cpp 等）不校验 Key，
+# 但 openai SDK 2.x 在 api_key 为空字符串时同样抛 OpenAIError（_client.py 判定的是
+# `not self.api_key`，不只是 None），故统一喂一个占位串。需要鉴权的云端端点照旧在
+# .env 里填 LLM_API_KEY / VISION_API_KEY。
+API_KEY_PLACEHOLDER = 'not-needed'
+
+
+def resolve_api_key(raw_key):
+    """把空 API Key 归一化为占位串。本地端点无需配置 key，云端端点照旧透传。"""
+    return (raw_key or '').strip() or API_KEY_PLACEHOLDER
+
+
 def get_llm_config():
     """每次调用时重新读取 .env 配置"""
     load_env()
     return {
         'api_url': os.environ.get('LLM_API_URL', 'http://localhost:8080/v1'),
-        'api_key': os.environ.get('LLM_API_KEY', 'ollama'),
+        'api_key': resolve_api_key(os.environ.get('LLM_API_KEY', '')),
         'model': os.environ.get('LLM_MODEL', 'qwen2.5:7b'),
     }
 
 
 def get_vision_config():
-    """每次调用时重新读取视觉模型配置（用于 VLM 自然语言描述生成）"""
+    """每次调用时重新读取视觉模型配置（用于 VLM 自然语言描述生成）
+
+    api_key 经 resolve_api_key 归一化：本地部署（Ollama 等）不配 VISION_API_KEY
+    也能直接用，云端端点填了照旧透传。消费方（tagger.py / prompt_tool.py）
+    直接把该值喂给 OpenAI() 即可。
+    """
     load_env()
     return {
         'api_url': os.environ.get('VISION_API_URL', ''),
-        'api_key': os.environ.get('VISION_API_KEY', ''),
+        'api_key': resolve_api_key(os.environ.get('VISION_API_KEY', '')),
         'model': os.environ.get('VISION_MODEL', ''),
         # max_tokens 是 reasoning_content + content 的共享额度，不是只算正式回答。
         # 推理模型（DeepSeek 等）思考模式默认开启，512 会被思考吃光 → content 为空。
