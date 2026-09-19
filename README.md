@@ -69,7 +69,22 @@ python test_invariants.py
 - Python 3.11（conda 环境 `tageditor`）
 - GPU（可选，推荐）：超清放大 / 背景移除 / WD14 在 CUDA 上推理，CPU 也可运行但较慢
 
-### 安装依赖
+### 一键脚本（Windows）
+
+```
+setup.bat    安装依赖（可重复执行，已装的会跳过）
+run.bat      启动服务并自动打开浏览器
+```
+
+`setup.bat` 除了跑 `pip install -r requirements.txt`，还处理三个 pip 单独搞不定的包：`torch`（走 CUDA 专用源）、`basicsr`（依赖已下架的 `tb-nightly`，需 `--no-deps` 再补运行时依赖）、`onnxruntime-gpu`（需要额外的 index-url）。它**不会降级**你已经装好的包 —— 比如 `requirements.txt` 钉的是 `onnxruntime-gpu==1.18.0`，若你装的更高版本且能用，脚本会跳过而不是为了对齐版本降级。
+
+装完会跑一次 `setup_check.py` 自检，逐项报告哪个功能可用、哪个会降级（例如 onnxruntime 拿不到 cuDNN 时会回落到 CPU，WD14 会慢约 10 倍）。自检**只报告不修改环境**：
+
+```bash
+python setup_check.py
+```
+
+### 手动安装
 
 ```bash
 conda activate tageditor
@@ -82,6 +97,7 @@ pip install -r requirements.txt
 > pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
 > ```
 > `basicsr==1.4.2` 因依赖已下架的 `tb-nightly`，需用 `--no-deps` 安装并手动补齐运行时依赖（addict/future/lmdb/scipy/scikit-image/tqdm/yapf）。
+> 装完后 `import basicsr` 仍可能报 `No module named 'torchvision.transforms.functional_tensor'` —— 这是 basicsr 1.4.2 与 torchvision 0.20+ 的已知不兼容，应用侧已在 `realesrgan_utils.py` 顶部注入兼容垫片，**不影响运行**（自检脚本也复现了同样的导入顺序，所以不会误报）。
 
 ### 配置
 
@@ -113,11 +129,17 @@ cp .env.example .env      # Windows: copy .env.example .env
 
 ### 启动
 
+```
+run.bat              # Windows 一键启动（自动开浏览器）
+```
+
+或手动：
+
 ```bash
 python app.py
 ```
 
-访问 http://127.0.0.1:8001 即可使用。开发调试时可用 `FLASK_DEBUG=1 python app.py` 开启热重载。
+访问 http://127.0.0.1:8001 即可使用。开发调试时可用 `FLASK_DEBUG=1 python app.py` 开启热重载。第一次启动若没有 `.env`，`run.bat` 会从 `.env.example` 复制一份并打开记事本让你填。
 
 ### 构建标签数据库
 
