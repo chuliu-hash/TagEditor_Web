@@ -529,11 +529,42 @@ def llm_process_db():
             yield sse_event('progress', {'current': 2, 'total': 5,
                 'item': f'待处理 {total} 条（实体 {len(entity_tags)} / 常规 {len(general_tags)} / 兜底 {len(fallback_tags)}）'})
 
-            batch_size = 32
+            # 8。演进过 32 → 20 → 8 → 4 → 1 → 8，别再往下调了。
+            #
+            # 为什么不是更小：实测单条请求**耗时 94 秒，其中只有 12 秒在生成**
+            # （135 token @10.86 tok/s）—— 剩下约 82 秒是每次请求的固定开销
+            # （隧道往返 / n_slots=1 排队 / KV cache 重建，未最终定位）。
+            # 这个开销**每次请求都要付**，所以 batch 越小、总耗时越长：
+            #   batch=8：251 次请求 × ~170s ≈ 12 小时
+            #   batch=1：2003 次请求 × ~94s  ≈ 52 小时
+            # 结论是「别把批次切得太碎」——切碎只会让固定开销被重复支付更多次。
+            #
+            # 为什么不是更大：batch=8 每批约 1000 token → 生成 93 秒，而
+            # **客户端一旦超时断开，llama.cpp 仍会把这批跑完**（远端日志里
+            # `release` 才结束），重试就是纯浪费且会把队列越堆越长，
+            # 表现为界面进度永远停在 0（done 只在成功后累加）。
+            # 配合 _call_llm 的 240s 超时，8 条约有 2.6 倍余量，够用。
+            batch_size = 8
             current_run = set()
             done = 0
 
             banner_msg = None  # 中断时标记，避免 final complete/cancelled 冲突
+
+            def _stage(label, idx, n_total, phase, extra=''):
+                """中间态进度：批次**还没跑完**，所以 current/total 保持不变（进度条不动），
+                只更新 item 文案告诉用户「现在卡在哪一步」。
+
+                为什么需要它：原先只有「一批处理完」才 yield progress，而一批内部要
+                先查 Bangumi（entity 层，每个标签最多 4 次尝试 × timeout=10s × 两轮
+                verify_ssl）再调 LLM（重试 5 次）。任一步慢都会让界面长时间静止，
+                看起来像进度坏了。实测日志里 Bangumi SSL 失败 + LLM 超时可让一批
+                卡住好几分钟，期间零 progress 事件。
+                """
+                n_batches = max(1, (n_total + batch_size - 1) // batch_size)
+                return sse_event('progress', {
+                    'current': done, 'total': total,
+                    'item': f'{label} {idx}/{n_batches} 批 · {phase}（{len(batch)} 个{extra}）',
+                })
 
             # ── Entity ──
             if entity_tags and not cancel_evt.is_set():
@@ -544,9 +575,13 @@ def llm_process_db():
                         log.info('[LLM 翻译] 实体层被中断')
                         break
                     batch = entity_tags[i:i + batch_size]
+                    # entity 层的 payload 构建会**逐个标签查 Bangumi**，是这一批里
+                    # 最慢的一步，先报出来，避免用户以为卡死
+                    yield _stage('实体', i // batch_size + 1, len(entity_tags), '查询 Bangumi')
                     payload = lp._build_entity_payloads_batch(batch, tag_to_groups, group_cn_names,
                                                              os.environ.get('BANGUMI_ACCESS_TOKEN', ''),
                                                              cooc_data)
+                    yield _stage('实体', i // batch_size + 1, len(entity_tags), '调用模型')
                     try:
                         results = lp._call_llm(client, model, lp.get_system_prompt('llm_entity'), payload, temperature=0.1)
                     except Exception as e:
@@ -573,6 +608,7 @@ def llm_process_db():
                     batch = general_tags[i:i + batch_size]
                     payload = [lp._build_general_payload(t, tag_to_groups, group_cn_names, cooc_data)
                                for t in batch]
+                    yield _stage('常规', i // batch_size + 1, len(general_tags), '调用模型')
                     try:
                         results = lp._call_llm(client, model, lp.get_system_prompt('llm_general'), payload, temperature=0.4)
                     except Exception as e:
@@ -599,6 +635,7 @@ def llm_process_db():
                     batch = fallback_tags[i:i + batch_size]
                     payload = [lp._build_general_payload(t, tag_to_groups, group_cn_names, cooc_data)
                                for t in batch]
+                    yield _stage('兜底', i // batch_size + 1, len(fallback_tags), '调用模型')
                     try:
                         results = lp._call_llm(client, model, lp.get_system_prompt('llm_fallback'), payload, temperature=0.5)
                     except Exception as e:

@@ -11,7 +11,7 @@
 import json
 import os
 import re
-from tageditor.core.config import get_prompt
+from tageditor.core.config import get_prompt, USER_AGENT
 import sys
 import time
 import random
@@ -91,53 +91,168 @@ def _update_tag(conn, name: str, cn_name: str = None,
 
 # ── Bangumi API ────────────────────────────────────────────────────────────
 
+# 熔断状态：{失败计数}。Bangumi 挂掉时（实测 MeilisearchCommunicationError 会
+# 让它对每个请求返 500），不改这个的话每个标签都要撞满 13 个请求 × timeout=10s，
+# 一批 32 个标签最坏 8.7 分钟，而结果必然是空 —— 纯白等。
+#
+# 语义：失败达阈值就「跳闸」，之后本次进程内不再发包，直接返回空结果。
+# 任何一次成功都会把计数清零（说明服务恢复了）。
+# 不加时间窗口自动恢复，是因为恢复判定的代价同样是一次完整请求；
+# 让用户重启进程或重新触发任务更直观，且失败会被日志明确说明。
+#
+# **阈值 = 1（探针语义）**，不是 5。原先是 5，但一批 8 个 entity 标签是
+# **并发**发起的：它们同时开始、同时失败，在第一次 attempt 时谁都没累加到 5，
+# 于是必须等整批 8 个全部跑完才跳闸 —— 第一批照样白等 2~3 分钟才轮到 LLM。
+# 改成 1 之后，第一个标签失败即跳闸，同批其余 7 个直接拿到空结果。
+_BANGUMI_FAIL_THRESHOLD = 1
+_bangumi_fail_count = 0
+_bangumi_tripped = False
+
+
+def _bangumi_circuit_open() -> bool:
+    return _bangumi_tripped
+
+
+def _bangumi_note_success():
+    global _bangumi_fail_count, _bangumi_tripped
+    _bangumi_fail_count = 0
+    _bangumi_tripped = False
+
+
+def _bangumi_note_failure(tag_name: str, reason: str):
+    """记一次失败；达阈值则跳闸并只在这一刻打一条明确日志。
+
+    阈值当前是 1，所以不说「连续 N 次失败」—— 计数为 1 时那句话既冗余又别扭。
+    只在阈值 > 1 时才提次数。
+    """
+    global _bangumi_fail_count, _bangumi_tripped
+    _bangumi_fail_count += 1
+    if _bangumi_fail_count >= _BANGUMI_FAIL_THRESHOLD and not _bangumi_tripped:
+        _bangumi_tripped = True
+        if _BANGUMI_FAIL_THRESHOLD > 1:
+            head = '连续 %d 次查询失败' % _bangumi_fail_count
+        else:
+            head = '查询失败'
+        log.warning(
+            "[LLM] Bangumi %s（%s；示例标签 %s）。"
+            "本次任务内不再尝试 Bangumi 查证，改用本地 wiki/LLM 兜底。"
+            "多是代理未开或 Bangumi 服务故障，修好后重启进程即可恢复。",
+            head, reason, tag_name)
+
+
+def reset_bangumi_circuit():
+    """手动复位熔断（测试用；正常流程靠一次成功自动恢复）。"""
+    global _bangumi_fail_count, _bangumi_tripped
+    _bangumi_fail_count = 0
+    _bangumi_tripped = False
+
+
 def _build_bangumi_session():
-    """创建 Bangumi API 专用的 requests Session，带 SSL 降级和重试适配器。"""
+    """创建 Bangumi API 专用的 requests Session。
+
+    **不对 5xx 做重试**。原先 status_forcelist 含 500/502/503/504，服务端持续
+    故障时 urllib3 会把每次尝试放大成 4 个 HTTP 请求，再叠上内层 3 次 attempt
+    与 verify_ssl 两轮 —— 单标签最坏 13 个请求、约 130 秒，而结果必然是空。
+
+    实测（Bangumi 搜索后端故障期间）：`POST /v0/search/*` **0.5 秒**就返回 502，
+    是明确的「服务端坏了」信号，不是网络抖动。对明确故障重试没有价值，只会
+    把故障放大成白等。真正需要重试的是网络抖动（连接被重置、读超时），
+    那由内层 attempt 循环 + 熔断器处理，不在这里。
+
+    429 仍保留重试：那是限流，等一会儿确实能好。
+    """
     sess = req.Session()
-    retries = urllib3.Retry(total=3, backoff_factor=1,
+    # 只对 429（限流）做自动重试。**5xx 不重试** —— 实测 Bangumi 搜索后端故障时
+    # `POST /v0/search/*` 0.5 秒就返回 502，那是明确的服务端故障信号，重试没有价值
+    # （原先 status_forcelist 含 500/502/503/504，把每次尝试放大成 4 个 HTTP 请求）。
+    # 读超时也不重试（urllib3 默认就不对 read timeout 重试）：服务端不响应时
+    # 重试同一请求几乎不可能好转，直接失败交给熔断更快。
+    retries = urllib3.Retry(total=2, backoff_factor=1,
                             allowed_methods=["POST"],
-                            status_forcelist=[429, 500, 502, 503, 504])
+                            status_forcelist=[429])
     adapter = req.adapters.HTTPAdapter(max_retries=retries)
     sess.mount('https://', adapter)
     return sess
 
 
 def _fetch_bangumi_entity(tag_name: str, category: int, token: str) -> dict:
-    """从 Bangumi API 获取实体信息（角色/作品），返回 {cn_name, summary}。"""
+    """从 Bangumi API 获取实体信息（角色/作品），返回 {cn_name, summary}。
+
+    只处理 category 3（作品）/ 4（角色）；其它分类直接返回空。
+    失败一次即熔断（见 `_BANGUMI_FAIL_THRESHOLD`）。
+
+    **探针语义**：第一个标签会真正发包；只要它失败就立刻跳闸，后续所有标签
+    零开销。这是被实测逼出来的 —— 原先阈值 5 + 并发 8，8 个标签同时开始、
+    谁都没累加到 5，必须等整批跑完才跳闸，第一批仍要白等 2~3 分钟。
+    探针的代价是正常时多一次往返（0.1~0.5s），换来故障时第一批秒级返回。
+    """
+    result = {"cn_name": "", "summary": ""}
+    if category not in (3, 4):
+        return result
+    # 熔断：服务端已确认故障时不再为每个标签白撞
+    if _bangumi_circuit_open():
+        return result
+
     qualifier_match = re.search(r"_\(([^)]+)\)$", str(tag_name))
     qualifier = qualifier_match.group(1) if qualifier_match else ""
     clean_name = re.sub(r"_\(.*\)$", "", str(tag_name)).replace("_", " ").strip().lower()
 
-    headers = {"User-Agent": "TagEditorWeb/1.0", "Accept": "application/json"}
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     # 与 Danbooru 爬取使用同一代理
     proxy = os.environ.get('DANBOORU_PROXY', '')
     proxies = {'http': proxy, 'https': proxy} if proxy else None
-    result = {"cn_name": "", "summary": ""}
-    succeeded = False
 
-    # 尝试 SSL 降级兜底：首次正常请求 → 遇 SSL 错误时换 verify=False 再试
+    # SSL 降级兜底：首次正常请求 → 遇 SSL 错误时换 verify=False 再试。
+    # **只对 SSL 错误有意义**：服务端 5xx 时再跑一轮是纯浪费（实测每标签多 10s）。
+    urls = {3: "https://api.bgm.tv/v0/search/subjects",
+            4: "https://api.bgm.tv/v0/search/characters"}
+    url = urls[category]
+    # 最后一次失败的原因，用于熔断日志
+    last_reason = ''
+    # 是否还需要跑 verify_ssl=False 那一轮。只有 SSL 错误才置 True ——
+    # 裸 `break` 只能跳出内层 attempt 循环，外层 for 仍会继续，实测会导致
+    # 5xx 时白跑一轮 verify=False（每标签多 10s）。
+    try_ssl_fallback = False
+
     for verify_ssl in (True, False):
-        if succeeded:
-            break
-        if verify_ssl:
-            sess = _build_bangumi_session()
-        else:
-            sess = req.Session()  # verify=False 不需要重试适配器
-        for attempt in range(3 if verify_ssl else 1):
-            try:
-                if category == 3:  # 作品（Bangumi v0 API：POST /v0/search/subjects）
-                    url = "https://api.bgm.tv/v0/search/subjects"
+        if not verify_ssl and not try_ssl_fallback:
+            break          # 没遇到 SSL 错误，不需要降级重试
+        sess = _build_bangumi_session() if verify_ssl else req.Session()
+        try:
+            for attempt in range(3 if verify_ssl else 1):
+                try:
                     payload = {"keyword": clean_name}
-                    resp = sess.post(url, json=payload, headers=headers, timeout=10, proxies=proxies, verify=verify_ssl)
-                    if resp.status_code == 200:
-                        items = resp.json().get("data") or []
-                        if not items:
-                            payload["keyword"] = clean_name.replace(" ", "")
-                            resp = sess.post(url, json=payload, headers=headers, timeout=10, proxies=proxies, verify=verify_ssl)
-                            items = (resp.json().get("data") or []) if resp.status_code == 200 else []
-                        if items:
+                    resp = sess.post(url, json=payload, headers=headers,
+                                     timeout=10, proxies=proxies, verify=verify_ssl)
+                    # 状态码非 200。分两类处理：
+                    #   5xx = 服务端明确故障（实测 0.5s 就返回 502），立即放弃并
+                    #         上报熔断 —— 重试只会把故障放大成白等。
+                    #   4xx = 请求本身有问题，重试同样无用，立即放弃。
+                    #   429 = 限流，值得等一下再试（由 urllib3 的 Retry 处理）。
+                    # 旧代码在这里无条件 `succeeded = True; break`，等于把 500 当成
+                    # 「这一轮成功了」，既不重试也不计入失败，语义完全错乱。
+                    if resp.status_code != 200:
+                        last_reason = 'HTTP %s' % resp.status_code
+                        if resp.status_code == 429 and attempt < 2:
+                            time.sleep(3)
+                            continue
+                        break          # 明确失败：离开 attempt 循环，直接记熔断
+
+                    items = resp.json().get("data") or []
+                    if not items:
+                        # 去掉空格再搜一次（Bangumi 对空格的匹配很挑剔）
+                        payload["keyword"] = clean_name.replace(" ", "")
+                        resp = sess.post(url, json=payload, headers=headers,
+                                         timeout=10, proxies=proxies, verify=verify_ssl)
+                        items = (resp.json().get("data") or []) if resp.status_code == 200 else []
+
+                    # 200 且拿到响应 = 服务可用，即便没有匹配项也算「成功」
+                    # （没有匹配项是正常结果，不是故障）
+                    _bangumi_note_success()
+                    if items:
+                        if category == 3:
                             item = items[0]
                             name_lower = str(item.get("name", "")).lower()
                             name_cn_lower = str(item.get("name_cn", "")).lower()
@@ -151,42 +266,42 @@ def _fetch_bangumi_entity(tag_name: str, category: int, token: str) -> dict:
                                 result["cn_name"] = item.get("name_cn") or item.get("name")
                                 if item.get("summary"):
                                     result["summary"] = item["summary"].replace("\r", "").replace("\n", "")
-                    succeeded = True
-                    break
-                elif category == 4:  # 角色
-                    url = "https://api.bgm.tv/v0/search/characters"
-                    payload = {"keyword": clean_name}
-                    resp = sess.post(url, json=payload, headers=headers, timeout=10, proxies=proxies, verify=verify_ssl)
-                    if resp.status_code == 200 and not resp.json().get("data"):
-                        payload["keyword"] = clean_name.replace(" ", "")
-                        resp = sess.post(url, json=payload, headers=headers, timeout=10, proxies=proxies, verify=verify_ssl)
-                    if resp.status_code == 200:
-                        for char_data in (resp.json().get("data") or [])[:3]:
-                            validated = _validate_bangumi_char(char_data, clean_name, qualifier)
-                            if validated:
-                                result["cn_name"] = validated
-                                if char_data.get("summary"):
-                                    result["summary"] = char_data["summary"].replace("\r", "").replace("\n", "")[:200]
-                                break
-                    succeeded = True
-                    break
-            except req.exceptions.SSLError as e:
-                if verify_ssl:
-                    # SSL 错误 → 外层循环降级为 verify=False 重试
-                    break
-                if attempt < 2:
-                    time.sleep(2)
-                else:
-                    log.error(f"[LLM] Bangumi 网络失败 ({tag_name}): {e}")
-            except req.exceptions.RequestException as e:
-                if attempt < 2:
-                    time.sleep(2)
-                else:
-                    log.error(f"[LLM] Bangumi 网络失败 ({tag_name}): {e}")
-            except Exception as e:
-                log.error(f"[LLM] Bangumi 解析异常 ({tag_name}): {e}")
-                break
-        sess.close()
+                        else:
+                            for char_data in items[:3]:
+                                validated = _validate_bangumi_char(char_data, clean_name, qualifier)
+                                if validated:
+                                    result["cn_name"] = validated
+                                    if char_data.get("summary"):
+                                        result["summary"] = char_data["summary"].replace("\r", "").replace("\n", "")[:200]
+                                    break
+                    return result
+
+                except req.exceptions.SSLError as e:
+                    last_reason = 'SSL: %s' % e
+                    if verify_ssl:
+                        try_ssl_fallback = True   # 允许外层跑 verify=False
+                        break
+                    if attempt < 2:
+                        time.sleep(2)
+                except req.exceptions.RequestException as e:
+                    # 网络层失败（超时 / 连接重置 / urllib3 重试耗尽）。
+                    # 重试 3 次只为兜偶发抖动；但**必须在内层就放弃**，
+                    # 否则每个标签都要等满 3 轮 × timeout，实测单标签 120s+，
+                    # 一批 8 个并发就是 2 分钟起步 —— 而熔断计数要等整批跑完
+                    # 才累加够，等于第一批必然白等。
+                    last_reason = '%s: %s' % (type(e).__name__, str(e)[:120])
+                    if attempt < 2:
+                        time.sleep(2)
+                    else:
+                        break      # 内层放弃；外层由 try_ssl_fallback 守卫拦住
+                except Exception as e:
+                    # 解析异常：请求本身是成功的，不计入熔断，避免误跳闸
+                    log.error("[LLM] Bangumi 解析异常 (%s): %s", tag_name, e)
+                    return result
+        finally:
+            sess.close()
+
+    _bangumi_note_failure(tag_name, last_reason or '未知原因')
     return result
 
 
@@ -420,6 +535,20 @@ def _llm_max_tokens() -> int:
     return int(os.environ.get('LLM_TEXT_MAX_TOKENS', '8192'))
 
 
+def _llm_timeout() -> int:
+    """单次请求超时（秒）。**必须大于一批的真实生成时间** ——
+    实测 batch=8 约 1000 token @10.86 tok/s → 每批约 94 秒。
+    设小了每次都超时，而远端在客户端断开后仍会把那批跑完，重试纯属白烧。"""
+    return int(os.environ.get('LLM_TEXT_TIMEOUT', '240'))
+
+
+def _llm_thinking_on() -> bool:
+    """是否让模型思考。默认关：思考内容与正式回答共享 max_tokens，
+    实测 444 个输出 token 里思考占 410、正式回答只有 30，额度吃光就返回空。"""
+    return (os.environ.get('LLM_TEXT_THINKING', 'off').strip().lower()
+            in ('on', 'true', '1', 'enabled'))
+
+
 def _call_llm(client, model: str, system_prompt: str,
               batch_data: list, temperature: float) -> list:
     """调用 LLM，返回 items 列表。
@@ -431,8 +560,21 @@ def _call_llm(client, model: str, system_prompt: str,
     last_error = None
     for attempt in range(max_attempts):
         try:
-            current_timeout = 60 + 30 * attempt
+            # 超时**起点**来自 .env（LLM_TEXT_TIMEOUT，默认 240s），后续尝试递增。
+            # 起点必须大于一批的真实生成时间，否则每次尝试都必然失败。
+            # 实测（RTX 4060 笔记本跑 Qwen3.5-9B Q8_0，10.86 tok/s）：
+            #   batch=8 每批约 1000 token → eval 93s。
+            # 原先是 60 + 30*attempt（60/90/120…），前两次尝试 100% 超时；
+            # 更糟的是 llama.cpp 在客户端断开后**仍会把这批跑完**，
+            # 所以每次超时重试都在远端重跑一遍 93 秒，队列越堆越长、
+            # 界面进度永远不推进（done 只在成功后累加）。
+            current_timeout = _llm_timeout() + 120 * attempt
             max_tokens = _llm_max_tokens()
+            # 思考模式：关掉时显式告诉端点别思考（额度与正式回答共享）。
+            # 不支持的端点会忽略这个参数，不会报错。
+            extra = {}
+            if not _llm_thinking_on():
+                extra['extra_body'] = {'thinking': {'type': 'disabled'}}
             response = client.chat.completions.create(
                 model=model,
                 messages=[
@@ -443,6 +585,7 @@ def _call_llm(client, model: str, system_prompt: str,
                 response_format={"type": "json_object"},
                 max_tokens=max_tokens,
                 timeout=current_timeout,
+                **extra,
             )
             finish = response.choices[0].finish_reason
             raw = response.choices[0].message.content
@@ -544,8 +687,18 @@ def _call_llm(client, model: str, system_prompt: str,
             if attempt == max_attempts - 1:
                 log.error(f"[LLM] 请求失败，已重试 {max_attempts} 次: {e}")
                 raise
-            wait = min(2 ** attempt + random.uniform(0, 1), 60)
-            log.warning(f"[LLM] 请求出错 (尝试 {attempt + 1}/{max_attempts})，{wait:.1f}s 后重试: {e}")
+            # 超时类错误要等**更久**再重试，不能立刻重发：
+            # llama.cpp 在客户端断开后仍会把这批跑完（日志里 release 才结束），
+            # 立刻重试等于把同一份工作再排一次队，让它一直忙在已经没人要的结果上。
+            # 等待时间取「刚等的那个超时」，给远端足够时间把手上这单做完。
+            _is_timeout = ('timeout' in err_msg or 'timed out' in err_msg)
+            if _is_timeout:
+                wait = min(2 ** attempt * 30 + random.uniform(0, 5), 300)
+                log.warning(f"[LLM] 请求超时 (尝试 {attempt + 1}/{max_attempts})，"
+                            f"远端可能仍在生成该批，等 {wait:.0f}s 后再试: {e}")
+            else:
+                wait = min(2 ** attempt + random.uniform(0, 1), 60)
+                log.warning(f"[LLM] 请求出错 (尝试 {attempt + 1}/{max_attempts})，{wait:.1f}s 后重试: {e}")
             time.sleep(wait)
     raise last_error or RuntimeError("LLM 调用异常")
 
@@ -811,7 +964,7 @@ def translate_one_tag(tag_data: dict, db_path: str = None) -> dict:
 
 def run_llm_process(db_path: str = None, preview: bool = False,
                     debug: bool = False, reprocess_wiki_updates: bool = False,
-                    batch_size: int = 20):
+                    batch_size: int = 8):
     global _DEBUG
     _DEBUG = debug
 
