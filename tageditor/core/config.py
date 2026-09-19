@@ -4,6 +4,11 @@ import re
 from pathlib import Path
 
 
+# 项目根目录。config.py 位于 tageditor/core/ 下，需上溯三层才能定位到
+# 存放 .env / prompts/ / models/ / data/ 的项目根（重组前是 Path(__file__).parent）。
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
 _env_mtime = None
 
 _prompts_cache = None  # (签名, prompts dict)；签名变化时重新读取
@@ -40,7 +45,7 @@ def load_prompts(prompts_dir='prompts'):
     目录不存在时返回空 dict，由调用方回退内置默认提示词。
     """
     global _prompts_cache
-    pdir = Path(__file__).parent / prompts_dir
+    pdir = _PROJECT_ROOT / prompts_dir
     try:
         dir_mtime = pdir.stat().st_mtime
     except OSError:
@@ -77,7 +82,7 @@ def get_prompt(key, default=''):
 def load_env(env_path='.env'):
     """读取 .env 到 os.environ。通过 mtime 检测避免每次调用都读磁盘（API 热更新仍生效）。"""
     global _env_mtime
-    env_file = Path(__file__).parent / env_path
+    env_file = _PROJECT_ROOT / env_path
     try:
         mtime = env_file.stat().st_mtime
     except OSError:
@@ -203,7 +208,7 @@ def get_wd14_config():
     load_env()
     model_path = os.environ.get('TAGGER_MODEL_PATH', 'models/wd-eva02-large-tagger-v3')
     if not os.path.isabs(model_path):
-        model_path = str(Path(__file__).parent / model_path)
+        model_path = str(_PROJECT_ROOT / model_path)
     return {
         'model_path': model_path,
         'general_threshold': float(os.environ.get('TAGGER_GENERAL_THRESHOLD', '0.3')),
@@ -218,7 +223,7 @@ def get_realesrgan_config():
     load_env()
     model_path = os.environ.get('REALESRGAN_MODEL_PATH', 'models/RealESRGAN_x4plus_anime_6B.pth')
     if not os.path.isabs(model_path):
-        model_path = str(Path(__file__).parent / model_path)
+        model_path = str(_PROJECT_ROOT / model_path)
     return {
         'model_path': model_path,
         'tile': int(os.environ.get('REALESRGAN_TILE', '0')),
@@ -234,10 +239,10 @@ def get_birefnet_config():
     load_env()
     base_model_dir = os.environ.get('BIREFNET_BASE_DIR', 'models/birefnet-base')
     if not os.path.isabs(base_model_dir):
-        base_model_dir = str(Path(__file__).parent / base_model_dir)
+        base_model_dir = str(_PROJECT_ROOT / base_model_dir)
     toonout_weights = os.environ.get('BIREFNET_WEIGHTS', 'models/toonout.pth')
     if not os.path.isabs(toonout_weights):
-        toonout_weights = str(Path(__file__).parent / toonout_weights)
+        toonout_weights = str(_PROJECT_ROOT / toonout_weights)
     return {
         'base_model_dir': base_model_dir,
         'toonout_weights': toonout_weights,
@@ -277,7 +282,7 @@ def get_tag_db_config():
     load_env()
     db_path = os.environ.get('TAG_DB_PATH', 'data/danbooru_tags.db')
     if not os.path.isabs(db_path):
-        db_path = str(Path(__file__).parent / db_path)
+        db_path = str(_PROJECT_ROOT / db_path)
     return {
         'db_path': db_path,
         # Danbooru 账号（认证用户有更高 API 配额，匿名受限）。留空则匿名抓取

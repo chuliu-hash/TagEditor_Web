@@ -7,7 +7,7 @@
 import os
 from flask import Blueprint, request, jsonify, current_app
 
-from config import write_text_atomic
+from tageditor.core.config import write_text_atomic
 import logging
 
 

@@ -3,8 +3,8 @@ import os
 import numpy as np
 from io import BytesIO
 from flask import Blueprint, request, jsonify, Response, current_app, send_file, stream_with_context
-from config import safe_filename, is_within_directory, get_realesrgan_config, get_birefnet_config
-from sse_utils import sse_event
+from tageditor.core.config import safe_filename, is_within_directory, get_realesrgan_config, get_birefnet_config
+from tageditor.core.sse_utils import sse_event
 import logging
 
 
@@ -155,7 +155,7 @@ def batch_alpha_to_white():
             return jsonify({'success': False, 'error': str(e)}), 500
 
     # 全部处理：先筛选有 alpha 通道的图片（只存文件名，避免内存占用）
-    from config import get_image_files
+    from tageditor.core.config import get_image_files
     images = get_image_files(upload_dir)
     alpha_images = []
     for fname in images:
@@ -229,7 +229,7 @@ def _load_realesrgan_upsampler(cfg):
     import torch
     # 先 import realesrgan_utils：它会注入 torchvision.transforms.functional_tensor
     # 兼容垫片，使后续 import basicsr 不报 ModuleNotFoundError（basicsr 1.4.2 兼容性问题）
-    from realesrgan_utils import RealESRGANer
+    from tageditor.image.realesrgan_utils import RealESRGANer
     from basicsr.archs.rrdbnet_arch import RRDBNet
 
     if not os.path.isfile(cfg['model_path']):
@@ -328,7 +328,7 @@ def upscale_realesrgan():
 def _load_birefnet_model(cfg):
     """加载 BiRefNet（ToonOut 权重），结果缓存到模块级全局变量。
     重依赖（torch/transformers）在 birefnet_utils 内懒加载。"""
-    from birefnet_utils import load_birefnet_model
+    from tageditor.image.birefnet_utils import load_birefnet_model
     return load_birefnet_model(cfg['base_model_dir'], cfg['toonout_weights'])
 
 
@@ -384,7 +384,7 @@ def remove_background():
 
     # 背景移除推理
     try:
-        from birefnet_utils import remove_background as _remove_bg
+        from tageditor.image.birefnet_utils import remove_background as _remove_bg
         output = _remove_bg(model, img, bg_color=bg_color)
     except Exception as e:
         return jsonify({'success': False, 'error': f'背景移除失败: {str(e)}'}), 500

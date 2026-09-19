@@ -3,9 +3,8 @@ import os
 import base64
 import numpy as np
 from flask import Blueprint, jsonify, current_app, Response
-from config import (get_vision_config, get_wd14_config, get_image_files, get_prompt,
-                    write_text_atomic)
-from sse_utils import sse_event
+from tageditor.core.config import get_vision_config, get_wd14_config, get_image_files, get_prompt, write_text_atomic
+from tageditor.core.sse_utils import sse_event
 import logging
 
 

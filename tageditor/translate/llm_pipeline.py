@@ -11,7 +11,7 @@
 import json
 import os
 import re
-from config import get_prompt
+from tageditor.core.config import get_prompt
 import sys
 import time
 import random
@@ -20,8 +20,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests as req
 import urllib3
 from pathlib import Path
-from config import get_tag_db_config, resolve_api_key
-from build_tag_db import normalize_tag_key
+from tageditor.core.config import get_tag_db_config, resolve_api_key
+from tageditor.db.build_tag_db import normalize_tag_key
 import logging
 
 # 抑制 verify=False 时的 SSL 警告（Bangumi API 偶发 TLS 兼容性问题）

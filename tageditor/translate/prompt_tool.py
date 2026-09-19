@@ -33,9 +33,8 @@ import time
 
 from flask import Blueprint, Response, current_app, jsonify, request
 
-from config import (get_prompt, get_prompt_tool_config, get_tag_db_config,
-                    is_within_directory, safe_filename)
-from sse_utils import sse_event
+from tageditor.core.config import get_prompt, get_prompt_tool_config, get_tag_db_config, is_within_directory, safe_filename
+from tageditor.core.sse_utils import sse_event
 import logging
 
 
@@ -359,7 +358,7 @@ def _tag_suggestions(conn, name, limit=3):
     if _CJK_RE.search(norm) and len(norm) > 12:
         return []
     try:
-        from build_tag_db import search_tags
+        from tageditor.db.build_tag_db import search_tags
         return [{'name': r['name'], 'cn_name': r.get('cn_name') or ''}
                 for r in search_tags(conn, norm, limit)]
     except Exception:
@@ -374,7 +373,7 @@ def classify_tags(conn, names, cfg, with_wiki=False):
     """
     if not names:
         return {}
-    from build_tag_db import lookup_tags, lookup_user_tags, normalize_tag_key
+    from tageditor.db.build_tag_db import lookup_tags, lookup_user_tags, normalize_tag_key
 
     norm_list = []
     for n in names:
@@ -397,7 +396,7 @@ def classify_tags(conn, names, cfg, with_wiki=False):
             }
             hint = ''
             try:
-                from llm_pipeline import _extract_chinese_hint
+                from tageditor.translate.llm_pipeline import _extract_chinese_hint
                 hint = _extract_chinese_hint(info.get('other_names'))
             except Exception:
                 hint = ''
@@ -443,7 +442,7 @@ def build_input_knowledge(conn, entries, cfg):
       模型据此产出 op:'modify' 的中文转英文（用户可拒绝）
     - 未收录的英文输入 → 给近似真实标签（同 validate_tags 口径）
     """
-    from build_tag_db import normalize_tag_key
+    from tageditor.db.build_tag_db import normalize_tag_key
     names = [e['tag'] for e in entries]
     knowledge = classify_tags(conn, names, cfg, with_wiki=True)
 
@@ -516,10 +515,10 @@ def cooc_recommendations(conn, seeds, exclude, cfg, warnings):
     - 候选自身 post_count < cfg['cooc_min_post']（config._PROMPT_COOC_MIN_POST，500）的冷门标签，
       lift 天然虚高。该常量只是这条防线的下限，**不是**可在 .env 里调的口径开关。
     """
-    from build_tag_db import normalize_tag_key
+    from tageditor.db.build_tag_db import normalize_tag_key
     db_path = get_tag_db_config()['db_path']
     try:
-        from llm_pipeline import _load_cooc_data
+        from tageditor.translate.llm_pipeline import _load_cooc_data
         cooc = _load_cooc_data(db_path, top_k=cfg['cooc_topk'])
     except Exception as e:
         warnings.append(f'共现数据加载失败，已跳过推荐：{e}')
@@ -640,7 +639,7 @@ def _tool_search_tags(conn, keywords, exclude, cfg):
     排序沿用原 retrieve_candidates 的口径：(被几个关键词命中 DESC, post_count DESC)。
     纯 post_count 会让 1girl/long_hair 这类巨物霸榜。
     """
-    from build_tag_db import search_tags as fts_search
+    from tageditor.db.build_tag_db import search_tags as fts_search
     if not keywords:
         return []
 
@@ -710,7 +709,7 @@ def _tool_tag_groups(names):
     注意：tag_to_groups 只覆盖一万多个标签，`groups` 为空**只说明库里没收录它的分组**，
     不是「它有冗余」—— 这条口径同时写进了 prompts/prompt_adjust.txt，别在这里补猜测。
     """
-    from translation import _load_tag_groups_cache
+    from tageditor.translate.translation import _load_tag_groups_cache
     tg = _load_tag_groups_cache()
     tag_to_groups = tg.get('tag_to_groups') or {}
     group_to_tags = tg.get('group_to_tags') or {}
@@ -1052,7 +1051,7 @@ def _normalize_diff(parsed, entries, conn, cfg, warnings):
     3. op 非法 / tag 为空 → 丢弃并记 warnings
     4. 返回 (diff, uncollected_targets) —— 后者非空时触发第 2 轮修补
     """
-    from build_tag_db import normalize_tag_key
+    from tageditor.db.build_tag_db import normalize_tag_key
 
     raw_diff = parsed.get('diff')
     if not isinstance(raw_diff, list):
@@ -1136,7 +1135,7 @@ def _normalize_diff(parsed, entries, conn, cfg, warnings):
 
 def _repair_key(item):
     """修补轮 diff 条目的匹配键：modify 用 from 对齐，其余用 tag。"""
-    from build_tag_db import normalize_tag_key
+    from tageditor.db.build_tag_db import normalize_tag_key
     op = (item.get('op') or '').strip().lower()
     name = (item.get('from') if op == 'modify' else item.get('tag')) or ''
     return normalize_tag_key(name)
@@ -1148,7 +1147,7 @@ def _apply_repair(base_diff, repair_parsed, uncollected):
     刻意不做"整体替换"：模型若没把未裁决的条目带全，整体替换会把第 1 轮的 remove/keep
     悄悄退回成 keep（等于什么都没改）。这里只应用被裁决标签的结论。
     """
-    from build_tag_db import normalize_tag_key
+    from tageditor.db.build_tag_db import normalize_tag_key
     uc = {u['key']: u for u in uncollected}
     by_tag = {}
     for d in base_diff:
@@ -1235,7 +1234,7 @@ def prompt_adjust():
     except _PromptFatal as e:
         return jsonify({'error': str(e)}), 400
 
-    from translation import _register_cancel, _unregister_cancel
+    from tageditor.translate.translation import _register_cancel, _unregister_cancel
 
     def generate():
         cancel_evt = _register_cancel('prompt_tool')
@@ -1297,7 +1296,7 @@ def prompt_adjust():
 
         conn = None
         if options.get('use_db', True):
-            from translation import _get_tag_db_conn
+            from tageditor.translate.translation import _get_tag_db_conn
             conn = _get_tag_db_conn()
         if conn is None:
             warnings.append('标签库不可用，本次未做检索与校验（新增标签无法保证真实）')
@@ -1447,7 +1446,7 @@ def prompt_adjust():
                     # 修补后重新校验一遍，仍未收录的留在 diff 里标红，由用户决定
                     targets = [d['tag'] for d in diff if d['op'] in ('add', 'modify')]
                     knowledge = validate_tags(conn, targets, cfg) if targets else {}
-                    from build_tag_db import normalize_tag_key
+                    from tageditor.db.build_tag_db import normalize_tag_key
                     for d in diff:
                         if d['op'] in ('add', 'modify'):
                             info = knowledge.get(normalize_tag_key(d['tag']))

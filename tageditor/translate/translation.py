@@ -7,7 +7,7 @@
 import os
 import json
 from flask import Blueprint, request, jsonify, current_app, Response
-from sse_utils import sse_event
+from tageditor.core.sse_utils import sse_event
 import logging
 
 
@@ -38,8 +38,8 @@ def _get_tag_db_conn():
         return _tag_db_conn
     try:
         import sqlite3
-        from build_tag_db import SCHEMA, _ensure_fts_index, _rebuild_fts_index, _table_exists, _migrate_to_target_schema
-        from config import get_tag_db_config
+        from tageditor.db.build_tag_db import SCHEMA, _ensure_fts_index, _rebuild_fts_index, _table_exists, _migrate_to_target_schema
+        from tageditor.core.config import get_tag_db_config
         db_path = get_tag_db_config()['db_path']
 
         # sqlite3.connect 会自动创建不存在的文件，所以不需要提前检查 os.path.isfile
@@ -84,7 +84,7 @@ def _lookup_cn_from_db(tags):
     if conn is None or not tags:
         return {}
     try:
-        from build_tag_db import lookup_tags, lookup_user_tags
+        from tageditor.db.build_tag_db import lookup_tags, lookup_user_tags
         rows = lookup_tags(conn, tags)  # 返回 {normalized_name: info}
         result = {}
         norm_of = {}   # 原始 tag -> 规范化 name
@@ -126,7 +126,7 @@ def _lookup_en_from_db(cn_names):
     if conn is None or not cn_names:
         return {}
     try:
-        from build_tag_db import lookup_tag_by_cn
+        from tageditor.db.build_tag_db import lookup_tag_by_cn
         result = {}
         for cn in cn_names:
             en = lookup_tag_by_cn(conn, cn)
@@ -188,8 +188,8 @@ def lookup_cache():
 def sync_tags_db():
     """从上游 GitHub 同步新标签到本地数据库（SSE 流式）。
     下载 tag.sqlite，筛选 post_count≥100 且 category∈{0,3,4} 的新标签写入。"""
-    from config import get_tag_db_config
-    from sync_tags import _download_sqlite
+    from tageditor.core.config import get_tag_db_config
+    from tageditor.db.sync_tags import _download_sqlite
     from pathlib import Path
     db_path = get_tag_db_config()['db_path']
 
@@ -314,7 +314,7 @@ def sync_tags_db():
             # 同步会新增标签，tags 总行数变了 → prompt_tool 计算 lift 的分母 N 失效
             if new_tags:
                 try:
-                    import prompt_tool as pt
+                    import tageditor.translate.prompt_tool as pt
                     pt._invalidate_tags_total()
                 except Exception:
                     pass
@@ -344,8 +344,8 @@ def sync_tags_db():
 @translation_bp.route('/crawl_tag_groups', methods=['POST'])
 def crawl_tag_groups():
     """爬取 Danbooru 标签组体系（SSE 流式）。"""
-    from config import get_tag_db_config
-    from tag_groups import run as groups_run
+    from tageditor.core.config import get_tag_db_config
+    from tageditor.db.tag_groups import run as groups_run
     db_path = get_tag_db_config()['db_path']
 
     def generate():
@@ -443,7 +443,7 @@ def llm_process_db():
     data = request.get_json() or {}
     reprocess = data.get('reprocess', False)
 
-    from config import get_tag_db_config
+    from tageditor.core.config import get_tag_db_config
     db_path = get_tag_db_config()['db_path']
 
     cancel_evt = _register_cancel("llm_process_db")
@@ -471,7 +471,7 @@ def llm_process_db():
 
             # 本地部署（Ollama 等）无需 API Key，只要求端点地址；
             # 空 key 由 resolve_api_key 归一化为占位串（SDK 2.x 对空串也会抛 OpenAIError）
-            from config import resolve_api_key
+            from tageditor.core.config import resolve_api_key
             base_url = os.environ.get('LLM_TEXT_API_URL', '')
             model = os.environ.get('LLM_TEXT_MODEL', 'default')
             if not base_url:
@@ -495,7 +495,7 @@ def llm_process_db():
                 return
 
             yield sse_event('progress', {'current': 1, 'total': 5, 'item': '加载标签数据...'})
-            import llm_pipeline as lp
+            import tageditor.translate.llm_pipeline as lp
             tags = lp._load_tags(conn)
             history = lp._load_history(db_path)
             tag_to_groups, group_cn_names = lp._load_tag_groups(db_path)
@@ -648,7 +648,7 @@ def tag_detail(tag):
     if conn is None:
         return jsonify({'error': '标签数据库未配置'}), 500
     try:
-        from build_tag_db import lookup_tags, lookup_user_tags
+        from tageditor.db.build_tag_db import lookup_tags, lookup_user_tags
         rows = lookup_tags(conn, [tag])
         norm = tag.strip().replace(' ', '_').lower()
 
@@ -697,7 +697,7 @@ def _load_tag_groups_cache():
     global _tag_groups_cache
     if _tag_groups_cache is not None:
         return _tag_groups_cache
-    from config import get_tag_db_config
+    from tageditor.core.config import get_tag_db_config
     tg_path = os.path.join(os.path.dirname(get_tag_db_config()['db_path']), 'tag_groups.json')
     try:
         with open(tg_path, 'r', encoding='utf-8') as f:
@@ -740,8 +740,8 @@ def tag_cooc(tag):
     if not norm:
         return jsonify({'cooc': []})
     try:
-        import llm_pipeline as lp
-        from config import get_tag_db_config
+        import tageditor.translate.llm_pipeline as lp
+        from tageditor.core.config import get_tag_db_config
         db_path = get_tag_db_config()['db_path']
         # 用 _cooc_is_a 而不是 _load_cooc_data：后者要按 top_k 重建整张 5.2 万条的表
         # （实测 98ms/次），而这里只需要一个标签的切片。
@@ -780,7 +780,7 @@ def update_tag_wiki():
     if not conn.execute("SELECT 1 FROM tags WHERE name = ?", (norm,)).fetchone():
         return jsonify({'error': f'标签 {tag} 未收录于主标签库，不能在此编辑'}), 404
     try:
-        from build_tag_db import update_cn_wiki
+        from tageditor.db.build_tag_db import update_cn_wiki
         update_cn_wiki(conn, tag, content)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -814,7 +814,7 @@ def update_cn_name():
     if not conn.execute("SELECT 1 FROM tags WHERE name = ?", (norm,)).fetchone():
         return jsonify({'error': f'标签 {tag} 未收录于主标签库，不能在此编辑'}), 404
     try:
-        from build_tag_db import update_translation
+        from tageditor.db.build_tag_db import update_translation
         update_translation(conn, tag, cn_name)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -876,7 +876,7 @@ def translate_single_tag():
     if conn is None:
         return jsonify({'error': '标签数据库未配置'}), 500
 
-    from build_tag_db import lookup_tags
+    from tageditor.db.build_tag_db import lookup_tags
     norm = tag.strip().replace(' ', '_').lower()
     info = lookup_tags(conn, [tag]).get(norm)
     if not info:
@@ -891,8 +891,8 @@ def translate_single_tag():
         'other_names': info.get('other_names', '[]'),
     }
 
-    from llm_pipeline import translate_one_tag, _update_tag
-    from config import get_tag_db_config
+    from tageditor.translate.llm_pipeline import translate_one_tag, _update_tag
+    from tageditor.core.config import get_tag_db_config
     try:
         result = translate_one_tag(tag_data, get_tag_db_config()['db_path'])
     except ValueError as e:
@@ -924,7 +924,7 @@ def list_user_tags_api():
     if conn is None:
         return jsonify({'error': '标签数据库未配置'}), 500
     try:
-        from build_tag_db import list_user_tags, lookup_tags
+        from tageditor.db.build_tag_db import list_user_tags, lookup_tags
         rows = list_user_tags(conn)
         main = lookup_tags(conn, [r['name'] for r in rows]) if rows else {}
         for r in rows:
@@ -944,7 +944,7 @@ def upsert_user_tag_api():
     """新增/更新用户新标签。body: {name, cn_name?, cn_wiki?}。
     新增时若主表已收录同名标签则拒绝（两表同名时以主表为准）；
     编辑已存在的行不受此限制（主库后续收录不影响已有记录）。"""
-    from build_tag_db import lookup_tags, normalize_tag_key, upsert_user_tag
+    from tageditor.db.build_tag_db import lookup_tags, normalize_tag_key, upsert_user_tag
     data = request.get_json(silent=True) or {}
     name_key = normalize_tag_key(data.get('name') or '')
     if not name_key:
@@ -973,7 +973,7 @@ def upsert_user_tag_api():
 @translation_bp.route('/user_tags/delete', methods=['POST'])
 def delete_user_tag_api():
     """删除用户新标签。body: {name}。"""
-    from build_tag_db import normalize_tag_key, delete_user_tag
+    from tageditor.db.build_tag_db import normalize_tag_key, delete_user_tag
     data = request.get_json(silent=True) or {}
     name_key = normalize_tag_key(data.get('name') or '')
     if not name_key:
@@ -993,7 +993,7 @@ def translate_user_tag():
     """LLM 深度翻译单个用户新标签，结果写入 user_tags 自己的字段（不碰主表）。
     body: {name}。主表已收录且有中文名时直接返回主表数据（以主表为准）。
     返回 {cn_name, cn_wiki, source}，source 为 'main_db' 或 'llm'。"""
-    from build_tag_db import lookup_tags, normalize_tag_key, upsert_user_tag
+    from tageditor.db.build_tag_db import lookup_tags, normalize_tag_key, upsert_user_tag
     data = request.get_json() or {}
     name_key = normalize_tag_key(data.get('name') or '')
     if not name_key:
@@ -1014,8 +1014,8 @@ def translate_user_tag():
 
     # LLM 翻译：复用深度翻译管线（translate_one_tag 按 tag_data 自动判层级，
     # 新标签无 en_wiki/category → 走 fallback 层，temperature=0.5）
-    from llm_pipeline import translate_one_tag
-    from config import get_tag_db_config
+    from tageditor.translate.llm_pipeline import translate_one_tag
+    from tageditor.core.config import get_tag_db_config
     tag_data = {'name': name_key, 'cn_name': '', 'en_wiki': '', 'category': -1, 'other_names': '[]'}
     try:
         result = translate_one_tag(tag_data, get_tag_db_config()['db_path'])
@@ -1056,7 +1056,7 @@ def danbooru_search():
     if conn is None:
         return jsonify({'error': '标签数据库未配置'}), 500
     try:
-        from build_tag_db import search_tags
+        from tageditor.db.build_tag_db import search_tags
         results = search_tags(conn, keyword, limit, light=bool(data.get('light')))
         return jsonify({'results': results})
     except Exception as e:
@@ -1081,8 +1081,8 @@ def danbooru_random():
 @translation_bp.route('/danbooru_update', methods=['POST'])
 def danbooru_update():
     """触发增量更新（SSE 流式）。包装 update_from_danbooru 的 progress_callback 为 SSE 事件。"""
-    from config import get_tag_db_config
-    from build_tag_db import update_from_danbooru
+    from tageditor.core.config import get_tag_db_config
+    from tageditor.db.build_tag_db import update_from_danbooru
     db_path = get_tag_db_config()['db_path']
 
     def generate():
@@ -1182,7 +1182,7 @@ def _cancel_all():
 @translation_bp.route('/fetch_cooc', methods=['POST'])
 def fetch_cooc():
     """增量抓取标签共现数据（SSE 流式）。只抓新标签的共现。"""
-    from config import get_tag_db_config
+    from tageditor.core.config import get_tag_db_config
     db_path = get_tag_db_config()['db_path']
 
     def generate():
@@ -1195,7 +1195,7 @@ def fetch_cooc():
         cancel_evt = _register_cancel("fetch_cooc")
         try:
             yield sse_event('progress', {'current': 0, 'total': '?', 'item': '开始增量抓取共现...'})
-            from cooc_pipeline import run_fetch_cooc
+            from tageditor.db.cooc_pipeline import run_fetch_cooc
             import threading
             import time as _time
 
@@ -1218,7 +1218,7 @@ def fetch_cooc():
                     run_fetch_cooc(db_path=db_path, progress_callback=cb_fetch,
                                    cancel_check=cancel_evt.is_set)
                     if not cancel_evt.is_set() and not worker_failed:
-                        from cooc_pipeline import run_trim_cooc
+                        from tageditor.db.cooc_pipeline import run_trim_cooc
                         run_trim_cooc(db_path=db_path, progress_callback=cb,
                                       cancel_check=cancel_evt.is_set)
                 except Exception as e:
@@ -1280,7 +1280,7 @@ def fetch_cooc():
 @translation_bp.route('/trim_cooc', methods=['POST'])
 def trim_cooc():
     """PMI 降维裁剪共现数据（SSE 流式），支持中断。"""
-    from config import get_tag_db_config
+    from tageditor.core.config import get_tag_db_config
     db_path = get_tag_db_config()['db_path']
 
     def generate():
@@ -1293,7 +1293,7 @@ def trim_cooc():
         cancel_evt = _register_cancel("trim_cooc")
         try:
             yield sse_event('progress', {'current': 0, 'total': '?', 'item': '开始 PMI 裁剪...'})
-            from cooc_pipeline import run_trim_cooc
+            from tageditor.db.cooc_pipeline import run_trim_cooc
             import threading
             import time as _time
 
@@ -1357,7 +1357,7 @@ def trim_cooc():
             #  缓存键也要一起清，否则 key 仍是旧的、新文件 mtime 对不上虽然也能重建，
             #  但留着不一致的状态容易误判。）
             if not worker_failed:
-                import llm_pipeline as lp
+                import tageditor.translate.llm_pipeline as lp
                 lp._invalidate_cooc_cache()
         except GeneratorExit:
             cancel_evt.set()

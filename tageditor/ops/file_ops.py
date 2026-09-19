@@ -3,8 +3,7 @@ import os
 import struct
 import uuid
 from flask import Blueprint, request, redirect, url_for, jsonify, send_from_directory, current_app
-from config import (allowed_file, safe_filename, is_within_directory, get_image_files,
-                    write_text_atomic)
+from tageditor.core.config import allowed_file, safe_filename, is_within_directory, get_image_files, write_text_atomic
 import logging
 
 
@@ -151,7 +150,7 @@ def upload_files():
 @file_ops_bp.route('/get_caption/<image_name>')
 def get_caption(image_name):
     """获取图片对应的标签，同时从 SQLite 查翻译返回"""
-    from translation import _lookup_cn_from_db
+    from tageditor.translate.translation import _lookup_cn_from_db
     filename = safe_filename(image_name)
     upload_dir = os.path.abspath(current_app.config['UPLOAD_FOLDER'])
     file_path = os.path.abspath(os.path.join(upload_dir, filename))
@@ -296,7 +295,7 @@ def filter_images():
 def tag_stats():
     """统计所有标签出现次数，附翻译（从 SQLite 查）。排除 .nl.txt 描述文件"""
     from collections import Counter
-    from translation import _lookup_cn_from_db
+    from tageditor.translate.translation import _lookup_cn_from_db
     upload_dir = current_app.config['UPLOAD_FOLDER']
     counter = Counter()
     for filename in os.listdir(upload_dir):
@@ -420,7 +419,7 @@ def rename_files():
     图片扩展名保留原图后缀（jpg/jpeg/gif/webp/png 均原样保留，仅改主干名），
     同名 .txt 标签随之联动。
     """
-    from config import get_image_files
+    from tageditor.core.config import get_image_files
 
     data = request.get_json() or {}
     name = _sanitize_rename_name(data.get('name', ''))
@@ -536,7 +535,7 @@ def export_zip():
     """
     import io
     import zipfile
-    from config import get_image_files
+    from tageditor.core.config import get_image_files
 
     data = request.get_json() or {}
     txt_ext = data.get('txt_ext', 'txt')

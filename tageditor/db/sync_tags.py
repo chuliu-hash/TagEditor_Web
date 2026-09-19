@@ -9,7 +9,7 @@ import sqlite3
 import requests
 import time
 from pathlib import Path
-from config import get_tag_db_config
+from tageditor.core.config import get_tag_db_config
 import logging
 
 
@@ -137,7 +137,7 @@ def run(db_path: str = None, download: bool = True, cancel_check=None):
     # 走 build_tag_db.get_conn 而不是裸 sqlite3.connect：后者不带 journal_mode=WAL、
     # 不跑 SCHEMA、不做旧库迁移，也无法与 translation.py 的进程级连接共享锁语义
     # ——本函数与 Web 进程同时运行时裸连接更容易撞 database is locked。
-    from build_tag_db import get_conn
+    from tageditor.db.build_tag_db import get_conn
     conn = get_conn(db_path)
 
     try:

@@ -65,7 +65,7 @@ def _load_tags_from_db(db_path: str) -> list[dict]:
 def run_fetch_cooc(db_path: str = None, full_update: bool = False,
                    progress_callback=None, cancel_check=None):
     if db_path is None:
-        from config import get_tag_db_config
+        from tageditor.core.config import get_tag_db_config
         db_path = get_tag_db_config()['db_path']
 
     def _emit(event):
@@ -283,7 +283,7 @@ def run_trim_cooc(db_path: str = None, top_k: int = 50,
                   min_pmi: float = 1.0, dry_run: bool = False,
                   progress_callback=None, cancel_check=None):
     if db_path is None:
-        from config import get_tag_db_config
+        from tageditor.core.config import get_tag_db_config
         db_path = get_tag_db_config()['db_path']
 
     def _emit(event):
@@ -442,7 +442,7 @@ def _fold_undirected(df) -> int:
 def run_trim_artist_cooc(db_path: str = None, top_k: int = 50,
                          min_npmi: float = 0.15, dry_run: bool = False):
     if db_path is None:
-        from config import get_tag_db_config
+        from tageditor.core.config import get_tag_db_config
         db_path = get_tag_db_config()['db_path']
 
     cdir = _cooc_dir(db_path)

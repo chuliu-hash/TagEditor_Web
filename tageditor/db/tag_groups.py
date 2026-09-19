@@ -11,7 +11,7 @@ import requests
 import time
 import os
 from pathlib import Path
-from config import get_tag_db_config, get_danbooru_config
+from tageditor.core.config import get_tag_db_config, get_danbooru_config
 import logging
 
 

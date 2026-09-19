@@ -283,32 +283,42 @@ LOG_LEVEL=WARNING python app.py
 ```
 .
 ├── app.py                  # 入口，注册 Blueprint + 页面路由 + 共现预热
-├── config.py               # .env 热加载、prompts/ 读取、各模型配置、文件工具函数
-├── translation.py          # 翻译 + 标签数据库读写 + 标签详情/wiki 编辑 + SSE 管线路由
-├── build_tag_db.py         # 标签数据库构建与查询（init/update/merge/sync-tags/FTS5）
-├── sync_tags.py            # 从上游 GitHub SQLite 同步新标签
-├── cooc_pipeline.py        # 共现矩阵管线（抓取 / PMI 裁剪 / 画师共现）
-├── llm_pipeline.py         # LLM 三层深度翻译管线（entity/general/fallback）
-├── tag_groups.py           # 爬取 Danbooru 标签组体系
-├── tagger.py               # WD14 预处理/加载/过滤 + 自动打标 + VLM 描述生成
-├── prompt_tool.py          # 提示词优化器（规划轮 + 本地工具 + 带图改写 + 未收录修补）
-├── file_ops.py             # 上传/删除/清空/标签读写/静态文件/标签统计/批量重命名/ZIP 导出
-├── tag_operations.py       # 触发词/查找替换路由
-├── image_editor.py         # 图片编辑路由
-├── realesrgan_utils.py     # RealESRGANer 推理类
-├── birefnet_utils.py       # BiRefNet/ToonOut 背景移除推理
-├── sse_utils.py            # SSE 事件格式化工具
+├── build_tag_db.py         # 兼容薄壳：`python build_tag_db.py <子命令>` 仍可用
+├── run.bat / setup.bat     # 一键启动 / 一键安装
+├── setup_check.py          # 环境自检
+├── test_invariants.py      # 关键不变量测试
+├── tageditor/              # 后端代码（按功能分层）
+│   ├── core/               基础：配置、日志、SSE 格式化
+│   │   ├── config.py       #   .env 热加载、prompts/ 读取、各模型配置、路径工具
+│   │   ├── logging_setup.py
+│   │   └── sse_utils.py
+│   ├── db/                 数据：标签库与爬取
+│   │   ├── build_tag_db.py #   构建/查询/FTS5（init/update/merge/sync-tags…）
+│   │   ├── sync_tags.py    #   从上游 GitHub SQLite 同步
+│   │   ├── cooc_pipeline.py#   共现矩阵（抓取 / PMI 裁剪 / 画师共现）
+│   │   └── tag_groups.py   #   标签组体系爬取
+│   ├── translate/          翻译：查询、管线、提示词优化
+│   │   ├── translation.py  #   翻译查询/回写 + 标签详情/wiki 编辑路由
+│   │   ├── llm_pipeline.py #   三层深度翻译（entity/general/fallback）
+│   │   └── prompt_tool.py  #   提示词优化器
+│   ├── image/              图像：打标与编辑
+│   │   ├── tagger.py       #   WD14 打标 + VLM 描述生成
+│   │   ├── image_editor.py #   图片编辑路由
+│   │   ├── realesrgan_utils.py
+│   │   └── birefnet_utils.py
+│   └── ops/                运维：文件与标签批量操作
+│       ├── file_ops.py     #   上传/删除/读写/统计/重命名/ZIP 导出
+│       └── tag_operations.py # 触发词/查找替换
 ├── prompts/                # LLM/VLM 提示词（.txt，热更新）
-├── templates/
-│   ├── tag_editor.html     # 标签编辑主页（三栏布局）
-│   ├── image_editor.html   # 图片编辑器
-│   ├── danbooru_wiki.html  # Danbooru 标签查询页
-│   └── prompt_tool.html    # 提示词优化器
-├── data/                   # 标签数据库 + 共现数据（运行时生成）
-├── uploads/                # 图片 + 标签（运行时生成）
-├── models/                 # 模型权重（需自行下载）
+├── templates/              # 四个页面
+├── data/ uploads/ models/ logs/ dump/    # 运行时数据（不入库）
 └── .env                    # 配置文件（不入库）
 ```
+
+> **`config.py` 的项目根锚点**：它现在位于 `tageditor/core/`，用
+> `_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent` 定位项目根
+> （`.env` / `prompts/` / `models/` / `data/` 都在那儿）。重组前是 `Path(__file__).parent`。
+> 移动 `config.py` 时必须同步改这一行，否则所有配置与提示词都读不到。
 
 ## 架构要点
 

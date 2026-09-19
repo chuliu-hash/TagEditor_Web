@@ -1,19 +1,19 @@
 # -*- coding: utf-8 -*-
 import os
 from flask import Flask, render_template
-from config import load_env, get_image_files
-from translation import translation_bp
-from tagger import tagger_bp
-from file_ops import file_ops_bp
-from tag_operations import tag_ops_bp
-from image_editor import image_editor_bp
-from prompt_tool import prompt_tool_bp
+from tageditor.core.config import load_env, get_image_files
+from tageditor.translate.translation import translation_bp
+from tageditor.image.tagger import tagger_bp
+from tageditor.ops.file_ops import file_ops_bp
+from tageditor.ops.tag_operations import tag_ops_bp
+from tageditor.image.image_editor import image_editor_bp
+from tageditor.translate.prompt_tool import prompt_tool_bp
 import logging
 
 # 日志必须在其它模块开始打日志之前配好。放在这里（import 之后、建 app 之前）：
 # 各模块的 logger 是模块级 `logging.getLogger(__name__)`，本身不触发输出，
 # 所以只要在第一次真正写日志（下面 load_env / 预热线程）之前配置即可。
-from logging_setup import setup_logging
+from tageditor.core.logging_setup import setup_logging
 setup_logging()
 
 log = logging.getLogger(__name__)
@@ -73,8 +73,8 @@ def _preheat_cooc():
     def warmup():
         time.sleep(2)
         try:
-            from config import get_tag_db_config
-            from llm_pipeline import _load_cooc_data
+            from tageditor.core.config import get_tag_db_config
+            from tageditor.translate.llm_pipeline import _load_cooc_data
             log.info("[预热] 后台加载共现数据...")
             data = _load_cooc_data(get_tag_db_config()['db_path'], top_k=8)
             log.info(f"[预热] 共现数据预热完成（{len(data)} 个标签有共现关系）")
@@ -98,8 +98,8 @@ def _preheat_models():
         # 略等 Flask 起来，避免预热与首次请求竞争 GPU/IO
         time.sleep(2)
         try:
-            from config import get_wd14_config
-            from tagger import wd14_load_model
+            from tageditor.core.config import get_wd14_config
+            from tageditor.image.tagger import wd14_load_model
             cfg = get_wd14_config()
             onnx_path = os.path.join(cfg['model_path'], 'model.onnx')
             if not os.path.exists(onnx_path):

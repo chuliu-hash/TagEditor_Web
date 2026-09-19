@@ -33,7 +33,7 @@ def has(mod):
     """
     try:
         if mod == 'basicsr':
-            import realesrgan_utils  # noqa: F401  （注入 functional_tensor 垫片）
+            import tageditor.image.realesrgan_utils
         __import__(mod)
         return True
     except Exception:
