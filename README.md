@@ -1,68 +1,22 @@
 # TagEditor Web
 
-标签批量编辑工具 — 基于 Flask 的 Web 应用，用于批量上传图片及对应文本标签，支持中英文双向翻译（OpenAI 兼容大模型 API）、自动打标、在线编辑保存，并内置图片编辑器（裁剪、旋转、缩放、透明转色底、Real-ESRGAN 超清放大、ToonOut 背景移除）、本地 WD14 自动打标、VLM 自然语言描述生成，以及以本地标签库为词表的提示词优化器。
+标签批量编辑工具 — 基于 Flask 的 Web 应用，用于批量上传图片及对应文本标签，支持中英文双向翻译（OpenAI 兼容大模型 API）、在线编辑保存，并内置图片编辑器（裁剪、旋转、透明转色底、Real-ESRGAN 超清放大、ToonOut 背景移除）、WD14 本地自动打标、VLM 自然语言描述生成，以及以本地标签库为词表的提示词优化器。
 
-## 功能
-
-### 标签编辑（`/tag_editor`）
-
-- **批量上传**：支持上传图片（PNG/JPG/JPEG/GIF/WEBP）及同名 txt 标签文件，总上传上限 256MB
-- **在线编辑**：三栏布局（文件列表 / 图片预览 / 标签编辑器），标签可上下移动排序
-- **键盘快捷键**（页内按 `?` 查看）：`A` 新增标签、`S` 保存、`J`/`K` 或 `←`/`→` 切图、`↑`/`↓` 在标签行间移动（输入框内也能用）、输入框内 `Enter` 另起一条、输入框为空时 `Backspace` 删掉该行并退回上一条
-- **翻译列可点击**：无翻译的行显示「无翻译，点击处理」，点开标签详情；主库未收录的标签会说明原因并给出一键跳转到「新标签」录入入口
-- **在线翻译**：通过 OpenAI 兼容 API 进行英文→中文标签翻译，结果持久化到 SQLite 显示为只读
-- **自动打标**：
-  - WD14 本地打标：使用 ONNX 模型离线推理（CUDA 优先）
-  - VLM 自然语言描述：将结构化标签"翻译"为连贯英文描述，存为 `.nl.txt`
-- **批量操作**：全局查找替换、触发词添加（开头/末尾）、批量重命名（`{名称}-{宽}x{高}-{编号}`）、标签统计、按模式清空
-
-每张图片关联两个文本文件：
-
-- `{name}.txt` — WD14 标签（结构化标签，逗号分隔）
-- `{name}.nl.txt` — VLM 自然语言描述（连贯英文句子）
-
-### 图片编辑器（`/img_editor`）
-
-- **图片导航**：`←`/`→` 或 `K`/`J` 切换图片（有未保存编辑时会先确认）
-- **Canvas 裁剪**：锁定宽高比的裁剪框，拖角缩放、拖体移动，框大小即输出分辨率
-- **旋转**：顺时针旋转，自动保存覆盖原图
-- **整图缩放**：保持宽高比缩放（宽高联动 + 长边预设）
-- **透明转色底**：将透明背景转为指定纯色（单张或全部，自定义底色）
-- **超清放大**：基于 Real-ESRGAN（anime_6B 模型）4x 超分，支持 1~4x 自定义尺寸，前端暂存→保存覆盖
-- **背景移除**：基于 ToonOut（BiRefNet 动漫微调）移除背景，输出透明 PNG 或合成纯色底，前端暂存→保存覆盖
-
-> 旋转与透明转色底会自动落盘，与「暂存→保存」冲突，因此在有暂存修改时被禁用。
-
-### Danbooru 标签查询（`/`）
-
-- **标签搜索**：FTS5 全文索引（trigram），支持空格/下划线/连字符兼容搜索；下拉结果支持 `↑`/`↓` 选择、`Enter` 打开、`Esc` 关闭
-- **标签详情**：中文名/英文名/别名/分组/使用次数、英文 wiki（只读）、中文 wiki（内联编辑）
-- **深度翻译**：单条标签的 LLM 三层深度翻译（中文名 + 中文 wiki + NSFW 标记）
-- **锁定保护**：中文名和中文 wiki 可独立锁定，锁定后深度翻译和手动编辑均无法覆盖
-- **共现推荐**：显示与当前标签关联度高的其他标签
-- **标签组**：爬取并浏览 Danbooru 标签组体系
-- **浏览记录**：纯前端（`localStorage`），新→旧最多 200 条
-- **增量同步**：从 Danbooru 上游同步新标签和 wiki 更新
-- **随机推荐**：首页显示约 60 条随机热门标签，可点击查看详情
-- **用户新标签**：打标中遇到、主库未收录的标签在此手动维护与翻译
-
-### 提示词优化器（`/prompt_tool`）
-
-图片（可空）+ 当前提示词（可空）+ 中文优化要求（必填）→ 标签 diff + 改写后的自然语言描述。
-
-- **意图由模型自决**：用户的要求可能是精炼、清理假标签、按图校正、调整动作等，不写死关键词表去猜
-- **本地标签库当词表与校验器**：四工具零 LLM 检索（`search_tags` / `tag_detail` / `cooc` / `tag_groups`），压住模型编造标签的倾向
-- **只产出到页面**，不写入任何文件
-
-## 测试
-
-```bash
-python test_invariants.py
-```
-
-25 个用例，只用标准库、不需要网络或标签库。覆盖的是**静默失败**类的不变量（翻译合并去重/拆全角、提示词切分不炸假标签、API Key 归一化、`lookup_tags` 只查主表、原子写、批量操作幂等与精确匹配、`clear_all` 危险默认值防线，以及若干源码级约定）。改动相关模块后跑一遍即可。
+---
 
 ## 快速开始
+
+```bash
+# 1. 装依赖（Windows 一键；也可按下方「手动安装」逐步来）
+setup.bat
+
+# 2. 配好 .env（没有会自动从 .env.example 复制一份并打开）
+
+# 3. 启动
+run.bat
+```
+
+访问 http://127.0.0.1:8001。开发调试用 `FLASK_DEBUG=1 python app.py` 开启热重载。
 
 ### 环境要求
 
@@ -71,18 +25,13 @@ python test_invariants.py
 
 ### 一键脚本（Windows）
 
-```
-setup.bat    安装依赖（可重复执行，已装的会跳过）
-run.bat      启动服务并自动打开浏览器
-```
+| 脚本 | 作用 |
+|------|------|
+| `setup.bat` | 装依赖，可重复执行（已装的跳过）。除 `pip install -r requirements.txt` 外，单独处理三个 pip 搞不定的包：`torch`（CUDA 专用源）、`basicsr`（依赖已下架的 `tb-nightly`，需 `--no-deps` 再补运行时依赖）、`onnxruntime-gpu`（需额外 index-url）。**不会降级**已装好的包 |
+| `run.bat` | 启动 + 自动开浏览器。缺 `.env` 时从 `.env.example` 复制并打开记事本；检测端口占用；异常退出时打印日志末尾 |
+| `setup_check.py` | 环境自检，逐项报告哪个功能可用、哪个会降级，**只报告不修改环境** |
 
-`setup.bat` 除了跑 `pip install -r requirements.txt`，还处理三个 pip 单独搞不定的包：`torch`（走 CUDA 专用源）、`basicsr`（依赖已下架的 `tb-nightly`，需 `--no-deps` 再补运行时依赖）、`onnxruntime-gpu`（需要额外的 index-url）。它**不会降级**你已经装好的包 —— 比如 `requirements.txt` 钉的是 `onnxruntime-gpu==1.18.0`，若你装的更高版本且能用，脚本会跳过而不是为了对齐版本降级。
-
-装完会跑一次 `setup_check.py` 自检，逐项报告哪个功能可用、哪个会降级（例如 onnxruntime 拿不到 cuDNN 时会回落到 CPU，WD14 会慢约 10 倍）。自检**只报告不修改环境**：
-
-```bash
-python setup_check.py
-```
+> 两个 `.bat` 是**纯 ASCII**（英文输出 + 英文注释），请勿把中文加回去。`cmd.exe` 按 GBK 逐字节解析批处理文件，UTF-8 的中文（3 字节）会让解码错位，最终吞掉一个 ASCII 字母当尾字节、把该行剩下的部分**当命令执行**——不是显示问题，是安全问题。
 
 ### 手动安装
 
@@ -91,23 +40,15 @@ conda activate tageditor
 pip install -r requirements.txt
 ```
 
-> Real-ESRGAN / BiRefNet 依赖 `torch`/`torchvision`（GPU 版需按 CUDA 版本从 [PyTorch 官方源](https://pytorch.org/) 安装）：
+> `torch` 的 GPU 版需按 CUDA 版本从 [PyTorch 官方源](https://pytorch.org/) 安装：
 > ```bash
-> # CUDA 12.1 示例
 > pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
 > ```
-> `basicsr==1.4.2` 因依赖已下架的 `tb-nightly`，需用 `--no-deps` 安装并手动补齐运行时依赖（addict/future/lmdb/scipy/scikit-image/tqdm/yapf）。
-> 装完后 `import basicsr` 仍可能报 `No module named 'torchvision.transforms.functional_tensor'` —— 这是 basicsr 1.4.2 与 torchvision 0.20+ 的已知不兼容，应用侧已在 `realesrgan_utils.py` 顶部注入兼容垫片，**不影响运行**（自检脚本也复现了同样的导入顺序，所以不会误报）。
+> `basicsr==1.4.2` 需用 `--no-deps` 装再补运行时依赖（addict/future/lmdb/scipy/scikit-image/tqdm/yapf）。装完 `import basicsr` 仍可能报 `No module named 'torchvision.transforms.functional_tensor'` —— 那是它与 torchvision 0.20+ 的已知不兼容，**应用侧已在 `realesrgan_utils.py` 注入垫片，不影响运行**。
 
-### 配置
+### 需要自行准备的文件
 
-复制 `.env.example` 为 `.env` 并填入实际值：
-
-```bash
-cp .env.example .env      # Windows: copy .env.example .env
-```
-
-模型文件需自行准备：
+**模型**（下载后放到 `.env` 对应变量指定的路径，默认在 `models/` 下）：
 
 | 功能 | 模型 | 下载地址 |
 |------|------|----------|
@@ -116,9 +57,7 @@ cp .env.example .env      # Windows: copy .env.example .env
 | BiRefNet 背景移除 base | `birefnet.py` + `config.json` + 权重 | https://huggingface.co/ZhengPeng7/BiRefNet |
 | ToonOut 微调权重 | `.pth` | https://huggingface.co/joelseytre/toonout |
 
-下载后放到 `.env` 对应变量指定的路径（默认在 `models/` 下）。
-
-提示词统一放在 `prompts/` 目录，每个提示词一个 `.txt` 文件，**缺失即报错、无内置默认**：
+**提示词**（放在 `prompts/`，每个一个 `.txt`，**缺失即报错、无内置默认**）：
 
 | 文件 | 用途 |
 |------|------|
@@ -126,20 +65,6 @@ cp .env.example .env      # Windows: copy .env.example .env
 | `llm_entity.txt` / `llm_general.txt` / `llm_fallback.txt` | LLM 深度翻译三层系统提示词 |
 | `rules_tag_groups.txt` / `rules_cooc.txt` | 注入的规则片段 |
 | `prompt_planner.txt` / `prompt_adjust.txt` / `prompt_repair.txt` | 提示词优化器三轮调用 |
-
-### 启动
-
-```
-run.bat              # Windows 一键启动（自动开浏览器）
-```
-
-或手动：
-
-```bash
-python app.py
-```
-
-访问 http://127.0.0.1:8001 即可使用。开发调试时可用 `FLASK_DEBUG=1 python app.py` 开启热重载。第一次启动若没有 `.env`，`run.bat` 会从 `.env.example` 复制一份并打开记事本让你填。
 
 ### 构建标签数据库
 
@@ -157,77 +82,94 @@ python build_tag_db.py update
 python build_tag_db.py stats
 ```
 
-## 配置说明
+---
 
-所有配置通过 `.env` 文件管理，修改后**无需重启**（按 mtime 热更新）。完整清单见 `.env.example`，以下是分组摘要。
+## 配置
 
-### 翻译模型（LLM）
+所有配置通过 `.env` 管理，修改后**无需重启**（按 mtime 热更新）。
 
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
+**两种查法**：
+- **`.env.example`** —— 照着填就能跑，只列必填/常改的项
+- **下面的表格** —— 完整参考，连「有默认值、不必配」的也列出来并给出默认值
+
+> `.env` 与 `.env.example` 的一致性由 `test_invariants.py` 自动校验（含「有没有写了却不生效的死配置」）。
+
+### 纯文本模型（`LLM_TEXT_*`）
+
+用途：标签翻译、批量深度翻译。
+
+| 变量 | 说明 | 默认 |
+|------|------|------|
 | `LLM_TEXT_API_URL` | API 地址 | — |
 | `LLM_TEXT_API_KEY` | API 密钥（本地部署可留空） | — |
 | `LLM_TEXT_MODEL` | 模型名称 | — |
-| `LLM_TEXT_MAX_TOKENS` | 单次输出上限 | `8192` |
+| `LLM_TEXT_MAX_TOKENS` | 单次输出上限（思考与正式回答**共享**该额度） | `8192` |
+| `LLM_TEXT_THINKING` | 思考模式开关。**建议 off**：思考会吃掉大部分额度（实测一条请求 444 个输出 token 里思考占 410、正式回答只有 30），额度吃光就返回空内容。翻译是结构化任务，不需要推理 | `off` |
+| `LLM_TEXT_TIMEOUT` | 单次请求超时（秒）。**必须大于一批的真实生成时间**，否则每次都超时；而远端在客户端断开后仍会把那批跑完，重试纯属白烧并堆队列。实测 batch=8 每批约 94 秒，240 秒有 2.6 倍余量。**换模型或换硬件后要重算** | `240` |
 
-### 视觉模型（VLM 描述生成 / 提示词优化器）
+### 视觉模型（`LLM_VISION_*`）
 
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
+用途：VLM 自然语言描述生成、提示词优化器（复用这一组端点）。
+
+| 变量 | 说明 | 默认 |
+|------|------|------|
 | `LLM_VISION_API_URL` | API 地址 | — |
 | `LLM_VISION_API_KEY` | API 密钥（本地部署可留空） | — |
 | `LLM_VISION_MODEL` | 模型名称 | — |
-| `LLM_VISION_MAX_TOKENS` | 单次输出上限（思考与正式回答共享） | `1024` |
-| `LLM_VISION_THINKING` | 思考模式开关 | `off` |
-| `LLM_VISION_TIMEOUT` | 单次请求超时（秒） | `180` |
+| `LLM_VISION_MAX_TOKENS` | 单次输出上限（只需 2~3 句描述，额度可小） | `1024` |
+| `LLM_VISION_THINKING` | 思考模式开关。思考模式下服务端会**静默忽略 `temperature`** | `off` |
+| `LLM_VISION_TIMEOUT` | 单次请求超时（秒）。不配则 SDK 默认 600 秒，端点卡住会挂很久 | `180` |
+
+**提示词优化器自己的三项**（`/prompt_tool`，端点复用上面的 `LLM_VISION_*`）：`PROMPT_TOOL_MAX_TOKENS`（`8192`）、`PROMPT_TOOL_THINKING`（`off`）、`PROMPT_TOOL_TIMEOUT`（`180`）。它一轮跑三次调用（规划 / 带图改写 / 未收录修补），输出是逐条 diff，条目多、额度要大。其余检索口径与图片编码上限写死在 `config.py` 的 `_PROMPT_*` 常量。
 
 > **API Key 可空**：本地部署的 OpenAI 兼容端点（Ollama / LM Studio / vLLM / llama.cpp）不校验 Key，留空即可 —— 空值由 `config.resolve_api_key()` 归一化为占位串。缺 `API_URL` 仍会报错。
 
-### 提示词优化器（`/prompt_tool`）
-
-端点复用上面的 `LLM_VISION_*`。只有三个会真的按需调整：`PROMPT_TOOL_MAX_TOKENS`（`8192`）、`PROMPT_TOOL_THINKING`（`off`）、`PROMPT_TOOL_TIMEOUT`（`180`）。其余检索口径与图片编码上限是写死在 `config.py` 的 `_PROMPT_*` 常量。
-
-### WD14 / Real-ESRGAN / BiRefNet
-
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `TAGGER_MODEL_PATH` | 模型目录（需含 `model.onnx` + `selected_tags.csv`） | `models/wd-eva02-large-tagger-v3` |
-| `TAGGER_GENERAL_THRESHOLD` | general 标签置信度阈值（调高更准更少，调低更多更全） | `0.3` |
-| `TAGGER_CHARACTER_THRESHOLD` | character 标签置信度阈值（同上；角色标签通常比 general 给得低） | `0.1` |
-| `REALESRGAN_MODEL_PATH` | 模型权重 `.pth` 路径 | `models/RealESRGAN_x4plus_anime_6B.pth` |
-| `REALESRGAN_TILE` | 分块推理尺寸（显存不足时设置，如 `400`） | — |
-| `BIREFNET_BASE_DIR` | base 模型目录 | `models/birefnet-base` |
-| `BIREFNET_WEIGHTS` | ToonOut 微调权重 `.pth` | `models/toonout.pth` |
-
 ### Danbooru 抓取
 
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `DANBOORU_USER_NAME` / `DANBOORU_API_KEY` | API 凭证 | — |
-| `DANBOORU_PROXY` | 代理地址（网络问题时用） | — |
+| 变量 | 说明 | 默认 |
+|------|------|------|
+| `DANBOORU_USER_NAME` / `DANBOORU_API_KEY` | API 凭证（[申请](https://danbooru.donmai.us/wiki_pages/help:api)） | — |
+| `DANBOORU_PROXY` | 代理地址，访问不通时才填。**Bangumi 查证也复用这个代理** | — |
 | `DANBOORU_API_URL` | API 基址 | `https://danbooru.donmai.us` |
 | `DANBOORU_ENABLED` | 抓取总开关 | `true` |
-| `DANBOORU_USER_AGENT` | 自定义 UA | `TagEditorWeb/1.0` |
+| `DANBOORU_USER_AGENT` | 自定义 UA。默认值是**合规格式**（含开发者 ID + 应用名 + 项目主页）——公开 API 普遍要求 UA 可识别身份，`应用名/版本号` 这种形态会被限流甚至封禁 | 见 `config.USER_AGENT` |
 | `DANBOORU_DELAY` / `DANBOORU_DELAY_JITTER` | 请求间隔与抖动（秒） | `0.15` / `0.3` |
-| `DANBOORU_PAGE_LIMIT` | 每页条数（上限 200） | `200` |
+| `DANBOORU_PAGE_LIMIT` | 每页条数（服务端上限 200） | `200` |
 | `DANBOORU_TIMEOUT` | 请求超时（秒） | `15` |
 | `DANBOORU_PAUSE_EVERY_PAGES` / `DANBOORU_PAUSE_SECONDS` | 每 N 页暂停 M 秒 | `100` / `5` |
+| `BANGUMI_ACCESS_TOKEN` | Bangumi API 令牌（[申请](https://next.bgm.tv/demo/access-token)），深度翻译「角色/作品」时查证中文名用。**留空不会跳过查询**——请求照样会发（只是不带认证头），必然失败还白等一次超时。不做角色/作品翻译就把整行删掉 | — |
+
+### 本地模型
+
+| 变量 | 说明 | 默认 |
+|------|------|------|
+| `TAGGER_MODEL_PATH` | WD14 模型目录（需含 `model.onnx` + `selected_tags.csv`） | `models/wd-eva02-large-tagger-v3` |
+| `TAGGER_GENERAL_THRESHOLD` | general 标签置信度阈值（调高更准更少，调低更多更全） | `0.3` |
+| `TAGGER_CHARACTER_THRESHOLD` | character 标签置信度阈值（同上；角色标签通常比 general 给得低） | `0.1` |
+| `REALESRGAN_MODEL_PATH` | 超分模型权重 `.pth` | `models/RealESRGAN_x4plus_anime_6B.pth` |
+| `REALESRGAN_TILE` | 分块推理尺寸（显存不足时设置，如 `400`） | `0`（不分块） |
+| `REALESRGAN_TILE_PAD` | 分块推理边距 | `10` |
+| `BIREFNET_BASE_DIR` | 背景移除 base 模型目录 | `models/birefnet-base` |
+| `BIREFNET_WEIGHTS` | ToonOut 微调权重 `.pth` | `models/toonout.pth` |
+| `PRELOAD_MODELS` | 启动时预热轻量模型（占内存，默认关） | `false` |
 
 ### 其它
 
-| 变量 | 说明 |
-|------|------|
+| 变量 | 说明 | 默认 |
+|------|------|------|
 | `TAG_DB_PATH` | 标签数据库路径 | `data/danbooru_tags.db` |
-| `BANGUMI_ACCESS_TOKEN` | Bangumi API 令牌，深度翻译「角色/作品」时查证中文名用。**留空不会跳过查询**，只是不带认证头发请求、必然失败并白等超时；不做这类翻译就不用配 | — |
-| `CAPTION_USE_TAGS_AS_HINT` | VLM 描述是否参考已有 `.txt` 标签 | `true` |
-| `CAPTION_SAVE_AS` | `txt` 覆盖标签 / `separate` 另存 `.caption.txt` | `txt` |
-| `REALESRGAN_TILE_PAD` | 分块推理边距 | `10` |
-| `PRELOAD_MODELS` | 启动时预热轻量模型 | `false` |
 | `FLASK_DEBUG` | 设为 `1` 开启调试热重载 | `0` |
 
-## 日志
+### 日志
 
-运行日志写到 `logs/tageditor.log`（单文件 5MB，自动轮转保留 5 份），同时输出到控制台。排查抓取/翻译这类长任务的失败原因时看这个文件。
+| 变量 | 说明 | 默认 |
+|------|------|------|
+| `LOG_LEVEL` | 控制台级别 | `INFO` |
+| `LOG_FILE_LEVEL` | 文件级别 | `INFO` |
+| `LOG_DIR` | 日志目录 | `logs` |
+| `LOG_TO_FILE` | 设为 `false` 则只输出控制台 | `true` |
+
+运行日志写到 `logs/tageditor.log`（单文件 5MB，自动轮转保留 5 份），同时输出到控制台。排查抓取/翻译这类长任务的失败原因时看这个文件：
 
 ```bash
 # 只看错误和警告
@@ -237,28 +179,80 @@ grep -E '\[(ERROR|WARNING)\]' logs/tageditor.log
 LOG_LEVEL=WARNING python app.py
 ```
 
-| 变量 | 说明 | 默认 |
-|------|------|------|
-| `LOG_LEVEL` | 控制台级别 | `INFO` |
-| `LOG_FILE_LEVEL` | 文件级别 | `INFO` |
-| `LOG_DIR` | 日志目录 | `logs` |
-| `LOG_TO_FILE` | 设为 `false` 则只输出控制台 | `true` |
-
 `build_tag_db.py stats` 这类命令的**统计表格仍直接打印到终端**，不写日志文件——那是命令的输出结果，不是诊断信息。
+
+---
+
+## 测试
+
+```bash
+python test_invariants.py        # 31 个用例，只用标准库
+python test_invariants.py -v     # 失败时打印 traceback
+```
+
+不需要网络或标签库。覆盖的是**静默失败**类的不变量（翻译合并去重/拆全角、提示词切分不炸假标签、API Key 归一化、`lookup_tags` 只查主表、原子写、批量操作幂等与精确匹配、`clear_all` 危险默认值防线、Bangumi 熔断、`.env` 与代码的配置一致性，以及若干源码级约定）。改动相关模块后跑一遍。
+
+---
+
+## 功能
+
+### 标签编辑（`/tag_editor`）
+
+- **批量上传**：图片（PNG/JPG/JPEG/GIF/WEBP）及同名 txt 标签文件，总上限 256MB
+- **在线编辑**：三栏布局（文件列表 / 图片预览 / 标签编辑器），标签可上下移动排序
+- **键盘快捷键**（页内按 `?` 查看）：`A` 新增、`S` 保存、`J`/`K` 或 `←`/`→` 切图、`↑`/`↓` 在标签行间移动（输入框内也能用）、输入框内 `Enter` 另起一条、输入框为空时 `Backspace` 删掉该行并退回上一条
+- **翻译列可点击**：无翻译的行显示「无翻译，点击处理」，点开标签详情；主库未收录的标签会说明原因并给出一键跳转到「新标签」录入入口
+- **自动打标**：WD14 本地打标（ONNX，CUDA 优先）、VLM 自然语言描述（存 `.nl.txt`）
+- **批量操作**：全局查找替换、触发词添加、批量重命名（`{名称}-{宽}x{高}-{编号}`）、标签统计、按模式清空
+
+每张图片关联两个文本文件：`{name}.txt`（结构化标签，逗号分隔）与 `{name}.nl.txt`（VLM 自然语言描述）。
+
+### 图片编辑器（`/img_editor`）
+
+- **导航**：`←`/`→` 或 `K`/`J` 切换图片（有未保存编辑时会先确认）
+- **Canvas 裁剪**：锁定宽高比，拖角缩放、拖体移动，框大小即输出分辨率
+- **旋转**：顺时针旋转，自动保存覆盖原图
+- **整图缩放**：保持宽高比（宽高联动 + 长边预设）
+- **透明转色底**：将透明背景转为指定纯色（单张或全部）
+- **超清放大**：Real-ESRGAN（anime_6B）4x 超分，支持 1~4x 自定义尺寸
+- **背景移除**：ToonOut（BiRefNet 动漫微调），输出透明 PNG 或合成纯色底
+
+> 旋转与透明转色底会自动落盘，与「暂存→保存」冲突，因此在有暂存修改时被禁用。
+
+### Danbooru 标签查询（`/`）
+
+- **标签搜索**：FTS5 全文索引（trigram），空格/下划线/连字符兼容；下拉支持 `↑`/`↓` 选择、`Enter` 打开、`Esc` 关闭
+- **标签详情**：中文名/英文名/别名/分组/使用次数、英文 wiki（只读）、中文 wiki（内联编辑）
+- **深度翻译**：单条标签的 LLM 三层深度翻译（中文名 + 中文 wiki + NSFW 标记）
+- **锁定保护**：中文名和中文 wiki 可独立锁定，锁定后深度翻译和手动编辑均无法覆盖
+- **共现推荐** / **标签组** / **浏览记录**（纯前端 `localStorage`，最多 200 条）/ **随机推荐**
+- **增量同步**：从 Danbooru 上游同步新标签和 wiki 更新
+- **用户新标签**：打标中遇到、主库未收录的标签在此手动维护与翻译
+
+### 提示词优化器（`/prompt_tool`）
+
+图片（可空）+ 当前提示词（可空）+ 中文优化要求（必填）→ 标签 diff + 改写后的自然语言描述。
+
+- **意图由模型自决**：用户的要求可能是精炼、清理假标签、按图校正、调整动作等，不写死关键词表去猜
+- **本地标签库当词表与校验器**：四工具零 LLM 检索（`search_tags` / `tag_detail` / `cooc` / `tag_groups`），压住模型编造标签的倾向
+- **只产出到页面**，不写入任何文件
+
+---
 
 ## 数据存储
 
 - `uploads/` — 图片及对应 txt / nl.txt 文件
-- `data/danbooru_tags.db` — Danbooru 标签本地数据库（SQLite）
+- `data/danbooru_tags.db` — 标签本地数据库（SQLite）
 - `data/cooc/` — 共现矩阵（parquet）
 - `data/tag_groups.json` — 标签组体系
-- `models/` — WD14、Real-ESRGAN、BiRefNet 模型文件（需自行准备，不入库）
+- `logs/` — 运行日志
+- `models/` — 模型权重（需自行准备，不入库）
 
 图片与标签通过文件名关联，标签以**逗号分隔**存储在 txt 中（如 `1girl, blue_hair, smile`）。保存时自动统一为小写并去重。
 
 ### 标签数据库（SQLite）
 
-`data/danbooru_tags.db`，主表 `tags` 为 11 列：
+主表 `tags` 为 11 列：
 
 | 列 | 含义 | 来源 |
 |----|------|------|
@@ -274,9 +268,11 @@ LOG_LEVEL=WARNING python app.py
 | `cn_name_locked` | 中文名锁定（0=未锁定 1=锁定） | 手动设置 |
 | `cn_wiki_locked` | 中文 wiki 锁定（0=未锁定 1=锁定） | 手动设置 |
 
-外加 FTS5 全文索引表 `tags_fts`（contentless，trigram 分词）、抓取状态表 `fetch_state`，以及**独立的**用户新标签表 `user_tags`（`name/cn_name/cn_wiki/created_at/updated_at`，同步或重建 `tags` 不影响它）。
+外加 FTS5 全文索引表 `tags_fts`（contentless，trigram 分词）、抓取状态表 `fetch_state`，以及**独立的**用户新标签表 `user_tags`（同步或重建 `tags` 不影响它）。
 
 翻译查询优先级：**SQLite（cn_name）→ LLM（未命中时）→ 回写 SQLite**。
+
+---
 
 ## 项目结构
 
@@ -289,44 +285,32 @@ LOG_LEVEL=WARNING python app.py
 ├── test_invariants.py      # 关键不变量测试
 ├── tageditor/              # 后端代码（按功能分层）
 │   ├── core/               基础：配置、日志、SSE 格式化
-│   │   ├── config.py       #   .env 热加载、prompts/ 读取、各模型配置、路径工具
-│   │   ├── logging_setup.py
-│   │   └── sse_utils.py
-│   ├── db/                 数据：标签库与爬取
-│   │   ├── build_tag_db.py #   构建/查询/FTS5（init/update/merge/sync-tags…）
-│   │   ├── sync_tags.py    #   从上游 GitHub SQLite 同步
-│   │   ├── cooc_pipeline.py#   共现矩阵（抓取 / PMI 裁剪 / 画师共现）
-│   │   └── tag_groups.py   #   标签组体系爬取
-│   ├── translate/          翻译：查询、管线、提示词优化
-│   │   ├── translation.py  #   翻译查询/回写 + 标签详情/wiki 编辑路由
-│   │   ├── llm_pipeline.py #   三层深度翻译（entity/general/fallback）
-│   │   └── prompt_tool.py  #   提示词优化器
-│   ├── image/              图像：打标与编辑
-│   │   ├── tagger.py       #   WD14 打标 + VLM 描述生成
-│   │   ├── image_editor.py #   图片编辑路由
-│   │   ├── realesrgan_utils.py
-│   │   └── birefnet_utils.py
-│   └── ops/                运维：文件与标签批量操作
-│       ├── file_ops.py     #   上传/删除/读写/统计/重命名/ZIP 导出
-│       └── tag_operations.py # 触发词/查找替换
+│   ├── db/                 数据：标签库构建与爬取
+│   ├── translate/          翻译：查询、三层管线、提示词优化器
+│   ├── image/              图像：打标、图片编辑、超分、抠图
+│   └── ops/                运维：上传/删除/统计/批量标签操作
 ├── prompts/                # LLM/VLM 提示词（.txt，热更新）
 ├── templates/              # 四个页面
 ├── data/ uploads/ models/ logs/ dump/    # 运行时数据（不入库）
 └── .env                    # 配置文件（不入库）
 ```
 
-> **`config.py` 的项目根锚点**：它现在位于 `tageditor/core/`，用
+> **`config.py` 的项目根锚点**：它位于 `tageditor/core/`，用
 > `_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent` 定位项目根
-> （`.env` / `prompts/` / `models/` / `data/` 都在那儿）。重组前是 `Path(__file__).parent`。
-> 移动 `config.py` 时必须同步改这一行，否则所有配置与提示词都读不到。
+> （`.env` / `prompts/` / `models/` / `data/` 都在那儿）。移动它必须同步改这一行。
+>
+> **包内一律用完整包路径 import**，不要写 `import llm_pipeline` 这类短名 ——
+> Python 3 是绝对导入，短名在调用时才炸（`ModuleNotFoundError`），导入期完全不报。
+
+---
 
 ## 架构要点
 
 - **Blueprint 拆分**：6 个 Blueprint、46 条路由；所有 Blueprint 通过 `current_app.config['UPLOAD_FOLDER']` 获取上传目录
 - **SSE 流式**：打标 / 描述生成 / 批量翻译 / 同步 / 爬取等长任务用 SSE 推送进度。后端 `Response(generator(), mimetype='text/event-stream')`，前端 `fetch()` + `ReadableStream` 消费 POST 流（因需 POST，不能用 EventSource）。事件类型 `progress` / `error` / `complete` / `fatal`
-- **取消机制**：`GeneratorExit` 继承 `BaseException`，绕过 `except Exception`，所以每个 SSE generator 必须显式 `except GeneratorExit: cancel_evt.set(); raise` 否则取消标志永不置位
+- **取消机制**：`GeneratorExit` 继承 `BaseException`，绕过 `except Exception`，所以每个 SSE generator 必须显式 `except GeneratorExit: cancel_evt.set(); raise`，否则取消标志永不置位
 - **进程级连接**：SQLite 单例连接（`check_same_thread=False` + `busy_timeout=5000` + `journal_mode=WAL`）；单 worker 运行时无并发竞争
-- **原子写入**：parquet / PNG / 数据库迁移一律「写临时文件 → `os.replace`」，避免中途失败留下截断文件
+- **原子写入**：parquet / PNG / 数据库迁移 / 用户标签文件一律「写临时文件 → `os.replace`」，避免中途失败留下截断文件
 - **懒加载**：WD14（onnxruntime/cv2/pandas）、Real-ESRGAN（torch/basicsr）、BiRefNet（torch/transformers）在函数内按需 import，未安装时仅禁用对应功能
 - **模型缓存**：三套模型首次加载后常驻内存，按各自配置 key 失效
 
