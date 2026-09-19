@@ -9,7 +9,7 @@ import sqlite3
 import requests
 import time
 from pathlib import Path
-from tageditor.core.config import get_tag_db_config
+from tageditor.core.config import get_tag_db_config, USER_AGENT
 import logging
 
 
@@ -45,11 +45,23 @@ def _download_sqlite(save_path: str, cancel_check=None) -> bool:
         return False
 
     try:
-        resp = requests.get(url, stream=True, timeout=120, proxies=proxies)
+        # 带统一 UA：GitHub 对 UA 宽松，但原先这里完全不带（走 requests 默认的
+        # python-requests/x.y.z），与项目其它对外请求口径不一致，统一起来。
+        resp = requests.get(url, stream=True, timeout=120, proxies=proxies,
+                            headers={'User-Agent': USER_AGENT})
         resp.raise_for_status()
         total = int(resp.headers.get('content-length', 0))
         downloaded = 0
         _dl_cancelled = False
+        # 进度按 10% 一档记录，不是每个 chunk 一条。
+        # 原先这里是 `print(f"\r...", end='')` —— 用 \r 让终端进度原地刷新。
+        # 迁移到 logging 时只换了函数名，参数 `end=`/空调用都留了下来，导致：
+        #   1) log.info(..., end='') → TypeError: Logger._log() got an unexpected
+        #      keyword argument 'end'，整个下载被判为失败
+        #   2) log.info() → 缺 msg 参数，同样 TypeError
+        #   3) 即使改对，logging 不支持原地刷新，8KB 一块会让 100MB 下载往日志里
+        #      灌约 12800 行。所以改成按档位记录。
+        _next_pct = 10
         with open(tmp_path, 'wb') as f:
             for chunk in resp.iter_content(chunk_size=8192):
                 if cancel_check and cancel_check():
@@ -60,12 +72,14 @@ def _download_sqlite(save_path: str, cancel_check=None) -> bool:
                     downloaded += len(chunk)
                     if total:
                         pct = downloaded / total * 100
-                        log.info(f"\r[SyncTags] 下载: {pct:.1f}% ({downloaded}/{total})", end='')
+                        if pct >= _next_pct:
+                            log.info("[SyncTags] 下载: %.1f%% (%d/%d)",
+                                     pct, downloaded, total)
+                            _next_pct += 10
         if _dl_cancelled:
-            log.info("\n[SyncTags] 取消下载（下载中）")
+            log.info("[SyncTags] 取消下载（下载中）")
             _cleanup()
             return False
-        log.info()
         # 下载完成，重命名覆盖
         import os as _os
         if _os.path.exists(save_path):

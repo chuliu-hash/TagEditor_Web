@@ -17,6 +17,8 @@ import requests
 import numpy as np
 import logging
 
+from tageditor.core.config import USER_AGENT
+
 
 # ── 工具 ───────────────────────────────────────────────────────────────────
 
@@ -82,7 +84,7 @@ def run_fetch_cooc(db_path: str = None, full_update: bool = False,
         return
 
     proxies = _get_proxies()
-    headers = {"User-Agent": "TagEditorWeb/1.0", "Accept": "application/json"}
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
     auth_params = {'login': user, 'api_key': key}
 
     cdir = _cooc_dir(db_path)

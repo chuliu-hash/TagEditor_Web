@@ -11,7 +11,7 @@ import requests
 import time
 import os
 from pathlib import Path
-from tageditor.core.config import get_tag_db_config, get_danbooru_config
+from tageditor.core.config import get_tag_db_config, get_danbooru_config, USER_AGENT
 import logging
 
 
@@ -130,7 +130,7 @@ def run(db_path: str = None, progress_callback=None, cancel_check=None):
         return
 
     auth = {'login': USER_NAME, 'api_key': API_KEY}
-    headers = {"User-Agent": "TagEditorWeb/1.0", "Accept": "application/json"}
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
 
     base_dir = Path(db_path).parent
     out_path = base_dir / 'tag_groups.json'

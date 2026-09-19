@@ -108,6 +108,15 @@ def load_env(env_path='.env'):
 # .env 里填 LLM_TEXT_API_KEY / LLM_VISION_API_KEY。
 API_KEY_PLACEHOLDER = 'not-needed'
 
+# 对外 HTTP 请求统一使用的 User-Agent（Bangumi / Danbooru 等公开 API）。
+#
+# **不要退回 `TagEditorWeb/1.0` 这种形态**：Bangumi 官方文档明确点名禁用
+# 「应用名/版本号」写法（原文举例 `Bangumi/1.0`、`database`），要求带**开发者 ID**
+# 与**应用名**，开源项目还应附项目主页，否则可能被限流或封禁。
+#   文档：https://github.com/bangumi/api/blob/master/docs-raw/user%20agent.md
+# Danbooru 同样有 UA 要求（https://danbooru.donmai.us/wiki_pages/help:api）。
+USER_AGENT = 'chuliu-hash/TagEditorWeb (https://github.com/chuliu-hash/TagEditor_Web)'
+
 
 def resolve_api_key(raw_key):
     """把空 API Key 归一化为占位串。本地端点无需配置 key，云端端点照旧透传。"""
@@ -148,13 +157,17 @@ def get_vision_config():
     }
 
 
-def get_caption_config():
-    """每次调用时重新读取 VLM 自然语言描述生成配置"""
-    load_env()
-    return {
-        'reference_tags': os.environ.get('CAPTION_USE_TAGS_AS_HINT', 'true').strip().lower() in ('true', '1', 'yes'),
-        'save_format': os.environ.get('CAPTION_SAVE_AS', 'txt'),  # txt 覆盖标签 / separate 另存 .caption.txt
-    }
+# 注：曾有一个 get_caption_config()（对应 .env 的 CAPTION_USE_TAGS_AS_HINT /
+# CAPTION_SAVE_AS），但**从来没有调用方** —— tagger.py 的 VLM 路径是写死的：
+# 总是把已有 .txt 作为参考标签送出，总是写 .nl.txt。配置改了不生效，
+# 属于「看起来能调、实际是死的」负债，已删除（连同 .env 里那两行）。
+
+
+# `LLM_TEXT_TIMEOUT` / `LLM_TEXT_THINKING`（批量翻译的超时与思考开关）
+# 由 llm_pipeline.py 直接读 os.environ（见 `_llm_timeout` / `_llm_thinking_on`），
+# 与同文件的 `_llm_max_tokens()` 一致 —— 这三项都是「调用行为」而非端点配置，
+# 不放进 `get_llm_config()`（那个只管 api_url/model/key）。
+# **注意别再新增零调用方的 `get_*_config()`**：CAPTION_* 那对就是这么变成死配置的。
 
 
 # ── 提示词优化器（/prompt_tool）的内置参数 ──────────────────────────────────
@@ -265,7 +278,8 @@ def get_danbooru_config():
         'enabled': os.environ.get('DANBOORU_ENABLED', 'true').strip().lower() in ('true', '1', 'yes'),
         'api_url': os.environ.get('DANBOORU_API_URL', 'https://danbooru.donmai.us'),
         'proxy': os.environ.get('DANBOORU_PROXY', ''),  # 如 http://127.0.0.1:7897，空表示直连
-        'user_agent': os.environ.get('DANBOORU_USER_AGENT', 'TagEditorWeb/1.0'),
+        # 默认用统一的合规 UA；可用 .env 的 DANBOORU_USER_AGENT 覆盖
+        'user_agent': os.environ.get('DANBOORU_USER_AGENT', '') or USER_AGENT,
         'timeout': int(os.environ.get('DANBOORU_TIMEOUT', '15')),
         'delay': float(os.environ.get('DANBOORU_DELAY', '0.15')),  # 主请求间隔（秒），默认 0.15
         'delay_jitter': float(os.environ.get('DANBOORU_DELAY_JITTER', '0.3')),  # 随机抖动上限（秒）
