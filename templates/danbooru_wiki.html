@@ -1529,6 +1529,53 @@
             var controller = new AbortController();
             _progressController = controller;
 
+            // 计时器：显示「本次操作已耗时 / 当前步骤已耗时」。
+            // 作用见 _renderProgress 里带 stage 的说明 —— 批次内部的
+            // Bangumi/LLM 调用可能几分钟没有新事件，秒数在动才不像卡死。
+            var _opStart = 0, _stageStart = 0, _timer = null;
+            function _fmtSecs(ms) {
+                var s = Math.floor(ms / 1000);
+                return s < 60 ? (s + 's') : (Math.floor(s / 60) + 'm' + (s % 60) + 's');
+            }
+            function _tick() {
+                if (!_opStart) return;
+                var op = _fmtSecs(Date.now() - _opStart);
+                var st = _stageStart ? '，本步 ' + _fmtSecs(Date.now() - _stageStart) : '';
+                // 百分比 + 耗时都要有：百分比会立刻被秒数覆盖，所以放在同一句里。
+                // 进度条宽度本身也反映百分比，但用户习惯读数字。
+                var pctTxt = '';
+                if (_lastProgress && _lastProgress.total
+                        && _lastProgress.total !== '?') {
+                    pctTxt = Math.round(_lastProgress.current / _lastProgress.total * 100) + '% · ';
+                }
+                pct.textContent = pctTxt + '已用 ' + op + st;
+            }
+            function _startOpTimer() {
+                _opStart = Date.now(); _stageStart = 0;
+                if (_timer) clearInterval(_timer);
+                _timer = setInterval(_tick, 1000);
+            }
+            function _stopOpTimer() {
+                if (_timer) { clearInterval(_timer); _timer = null; }
+                _opStart = 0;
+            }
+            // 单个 progress 事件的渲染。抽出来是因为「阶段态」与「完成态」都要走它。
+            function _renderProgress(data) {
+                _lastProgress = data;
+                itemEl.textContent = data.item || '';
+                var t = data.total;
+                if (t && t !== '?') {
+                    var percent = Math.round((data.current / t) * 100);
+                    bar.style.width = percent + '%';
+                    count.textContent = data.current + ' / ' + t;
+                    // 注意：这里**不**直接写 pct.textContent，交给计时器 ——
+                    // 否则秒数会被百分比立刻覆盖掉。百分比本身已经在进度条上。
+                } else {
+                    count.textContent = data.current || '';
+                }
+                _tick();
+            }
+
             function openModal() {
                 document.getElementById('progress-title').textContent = title;
                 document.getElementById('progress-subtitle').textContent = subtitle;
@@ -1540,10 +1587,16 @@
                 closeBtn.classList.add('hidden');
                 cancelBtn.classList.remove('hidden');
                 modal.classList.remove('hidden');
+                // _lastProgress 是模块级的，跨操作残留：本操作还没发 progress 时，
+                // 计时器会拿上一次的 current/total 算出百分比显示出来（明显是错的）。
+                // 每次开弹窗清掉，让它在收到第一条 progress 前只显示耗时、不显示百分比。
+                _lastProgress = null;
+                _startOpTimer();
             }
 
             function finalize(success, subtitleText) {
                 if (seq !== _progressSeq) return;  // 旧操作的 finalize 不执行
+                _stopOpTimer();                     // 结束后停止计时，避免秒数继续涨
                 if (!success) {
                     bar.style.width = '100%';
                     bar.classList.remove('bg-primary'); bar.classList.add('bg-red-500');
@@ -1597,17 +1650,12 @@
                                 var data = JSON.parse(line.slice(6));
                             } catch(e) { currentEventType = ''; continue; }
                             if (currentEventType === 'progress') {
-                                _lastProgress = data;
-                                itemEl.textContent = data.item || '';
-                                if (data.total && data.total !== '?') {
-                                    var percent = Math.round((data.current / data.total) * 100);
-                                    bar.style.width = percent + '%';
-                                    count.textContent = data.current + ' / ' + data.total;
-                                    pct.textContent = percent + '%';
-                                } else {
-                                    count.textContent = data.current || '';
-                                    pct.textContent = '';
+                                // 阶段态（current 与上次相同）重置「本步」计时，
+                                // 让用户看出进度推进到了哪一步
+                                if (data.stage || (data.item || '').indexOf('批 ·') >= 0) {
+                                    _stageStart = Date.now();
                                 }
+                                _renderProgress(data);
                             } else if (currentEventType === 'error') {
                                 errBox.classList.remove('hidden');
                                 var div = document.createElement('div');
@@ -1615,6 +1663,7 @@
                                 errBox.appendChild(div);
                             } else if (currentEventType === 'complete') {
                                 streamFinished = true;
+                                _stopOpTimer();
                                 bar.style.width = '100%';
                                 pct.textContent = '100%';
                                 itemEl.textContent = '';
@@ -1626,6 +1675,7 @@
                                 if (onComplete) onComplete(data);
                             } else if (currentEventType === 'fatal') {
                                 streamFinished = true;
+                                _stopOpTimer();
                                 bar.style.width = '100%';
                                 bar.classList.remove('bg-primary'); bar.classList.add('bg-red-500');
                                 itemEl.textContent = data.error;
