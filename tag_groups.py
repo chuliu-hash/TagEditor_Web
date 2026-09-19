@@ -12,7 +12,11 @@ import time
 import os
 from pathlib import Path
 from config import get_tag_db_config, get_danbooru_config
+import logging
 
+
+
+log = logging.getLogger(__name__)
 
 def _fetch_wiki_page(title: str, auth: dict, proxies: dict | None, headers: dict) -> dict | None:
     """请求 wiki_pages.json 精确查询单页。"""
@@ -27,17 +31,25 @@ def _fetch_wiki_page(title: str, auth: dict, proxies: dict | None, headers: dict
                 timeout=30
             )
             if resp.status_code == 429:
-                print(f"[TagGroups] 429 限流，休眠 30 秒...")
+                log.warning(f"[TagGroups] 429 限流，休眠 30 秒...")
                 time.sleep(30)
                 continue
             resp.raise_for_status()
             data = resp.json()
             return data[0] if data else None
+        except ValueError as e:
+            # resp.json() 在响应不是 JSON 时抛 json.JSONDecodeError（ValueError 子类），
+            # 它**不是** RequestException，原先会直接穿透整个重试循环把爬取打断。
+            # 5xx 维护页/限流页返回 HTML 是常态，按「本次请求失败」重试即可。
+            if attempt < 2:
+                time.sleep(1)
+            else:
+                log.info(f"[TagGroups] 响应不是合法 JSON ({title}): {e}")
         except requests.exceptions.RequestException as e:
             if attempt < 2:
                 time.sleep(1)
             else:
-                print(f"[TagGroups] 请求失败 ({title}): {e}")
+                log.error(f"[TagGroups] 请求失败 ({title}): {e}")
     return None
 
 
@@ -66,7 +78,11 @@ def _parse_group_members(body: str) -> list[str]:
 
 
 def _save_checkpoint(path: Path, completed_titles: set, tag_to_groups: dict, group_to_tags: dict):
-    """保存断点到临时文件后重命名覆盖，保证不写坏。"""
+    """保存断点到临时文件后原子覆盖，保证不写坏。
+
+    每 5 个组全量 json.dump 一次（标签组数据最终可达数万标签 × 多个组），
+    调用方应逐组更新内存态；本函数不负责增量。
+    """
     tmp = str(path) + '.tmp'
     try:
         with open(tmp, 'w', encoding='utf-8') as f:
@@ -75,11 +91,12 @@ def _save_checkpoint(path: Path, completed_titles: set, tag_to_groups: dict, gro
                 'tag_to_groups': tag_to_groups,
                 'group_to_tags': group_to_tags,
             }, f, ensure_ascii=False)
-        if path.exists():
-            os.remove(str(path))
-        os.rename(tmp, str(path))
+        # 直接 os.replace：先 os.remove(path) 再 rename 的话，中间崩溃会连
+        # 上一份可用断点一起丢掉，下次只能从头爬。replace 在 Windows/POSIX
+        # 上都是原子覆盖，不需要先删。
+        os.replace(tmp, str(path))
     except Exception as e:
-        print(f"[TagGroups] 保存断点失败: {e}")
+        log.error(f"[TagGroups] 保存断点失败: {e}")
 
 
 def run(db_path: str = None, progress_callback=None, cancel_check=None):
@@ -108,7 +125,7 @@ def run(db_path: str = None, progress_callback=None, cancel_check=None):
     API_KEY = os.environ.get('DANBOORU_API_KEY', '')
     if not USER_NAME or not API_KEY:
         msg = "[TagGroups] 未配置 DANBOORU_USER_NAME 或 DANBOORU_API_KEY"
-        print(msg)
+        log.info(msg)
         _emit({'type': 'fatal', 'error': msg})
         return
 
@@ -123,22 +140,22 @@ def run(db_path: str = None, progress_callback=None, cancel_check=None):
     if _cancelled():
         _emit({'type': 'cancelled', 'item': '已取消'})
         return
-    print("[TagGroups] 正在抓取主目录页 tag_groups...")
+    log.info("[TagGroups] 正在抓取主目录页 tag_groups...")
     _emit({'type': 'progress', 'page': 0, 'total': '?', 'item': '正在抓取主目录页 tag_groups...'})
     index_page = _fetch_wiki_page('tag_groups', auth, proxies, headers)
     if not index_page:
         msg = "[TagGroups] 无法获取主目录页"
-        print(msg)
+        log.info(msg)
         _emit({'type': 'fatal', 'error': msg})
         return
 
     group_titles = _parse_group_titles(index_page.get('body', ''))
     msg = f"[TagGroups] 目录页解析到 {len(group_titles)} 个 group"
-    print(msg)
+    log.info(msg)
     _emit({'type': 'progress', 'page': 0, 'total': len(group_titles), 'item': msg})
     if not group_titles:
         msg = "[TagGroups] 未解析到任何 group，终止"
-        print(msg)
+        log.info(msg)
         _emit({'type': 'fatal', 'error': msg})
         return
 
@@ -152,13 +169,14 @@ def run(db_path: str = None, progress_callback=None, cancel_check=None):
             completed_titles = set(saved.get('completed_titles', []))
             tag_to_groups = saved.get('tag_to_groups', {})
             group_to_tags = saved.get('group_to_tags', {})
-            print(f"[TagGroups] 从断点恢复：跳过 {len(completed_titles)} 个已爬取的 group")
+            log.warning(f"[TagGroups] 从断点恢复：跳过 {len(completed_titles)} 个已爬取的 group")
             _emit({'type': 'progress', 'page': len(completed_titles), 'total': len(group_titles),
                    'item': f'断点恢复，跳过 {len(completed_titles)} 个已爬取的 group'})
         except Exception as e:
-            print(f"[TagGroups] 断点文件读取失败，从头开始: {e}")
+            log.error(f"[TagGroups] 断点文件读取失败，从头开始: {e}")
 
     # Step 3: 逐个查询每个 tag group 页，提取成员
+    since_checkpoint = 0
     for i, title in enumerate(group_titles):
         if title in completed_titles:
             continue
@@ -171,7 +189,7 @@ def run(db_path: str = None, progress_callback=None, cancel_check=None):
         _emit({'type': 'progress', 'page': i + 1, 'total': len(group_titles), 'item': item_text})
         page = _fetch_wiki_page(title, auth, proxies, headers)
         if not page:
-            print(f"  跳过（页面不存在或请求失败）")
+            log.error(f"  跳过（页面不存在或请求失败）")
             time.sleep(0.3)
             continue
         members = _parse_group_members(page.get('body', ''))
@@ -180,9 +198,14 @@ def run(db_path: str = None, progress_callback=None, cancel_check=None):
             tag_to_groups.setdefault(tag, []).append(title)
         completed_titles.add(title)
         time.sleep(0.3)
-        # 每爬 5 个 group 存一次断点
-        if len(completed_titles) % 5 == 0:
+        # 每爬 5 个 group 存一次断点。用「本次新增计数」而非 len(completed_titles) % 5：
+        # 断点续跑时 completed_titles 的基数会让取模永远落不到 0（例如已存 3 个、
+        # 本次又新爬 5 个 → len 为 8,9,10… 只在恰好凑齐 5 的倍数时才落盘），
+        # 用户看到的进度和实际持久化的进度会长期脱节。
+        since_checkpoint += 1
+        if since_checkpoint >= 5:
             _save_checkpoint(progress_file, completed_titles, tag_to_groups, group_to_tags)
+            since_checkpoint = 0
 
     # Step 4: 全部完成，合并中文名后写入最终文件
     existing_cn_names: dict[str, str] = {}
@@ -218,5 +241,5 @@ def run(db_path: str = None, progress_callback=None, cancel_check=None):
 
     msg = (f"[TagGroups] 完成：{len(group_to_tags)} 个 group，覆盖 {len(tag_to_groups)} 个标签，"
            f"{sum(1 for v in group_cn_names.values() if v)} 个已有中文名")
-    print(msg)
+    log.info(msg)
     _emit({'type': 'complete', 'groups': len(group_to_tags), 'tags': len(tag_to_groups), 'item': msg})

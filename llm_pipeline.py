@@ -20,9 +20,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests as req
 import urllib3
 from pathlib import Path
-from config import get_tag_db_config
+from config import get_tag_db_config, resolve_api_key
+from build_tag_db import normalize_tag_key
+import logging
 
 # 抑制 verify=False 时的 SSL 警告（Bangumi API 偶发 TLS 兼容性问题）
+
+log = logging.getLogger(__name__)
+
 warnings.filterwarnings('ignore', category=urllib3.exceptions.InsecureRequestWarning)
 
 
@@ -38,12 +43,12 @@ _HANZI_RE = re.compile(
 def _dbg(label: str, content=None):
     if not _DEBUG:
         return
-    print(f"[LLM Pipe DEBUG] {label}")
+    log.info(f"[LLM Pipe DEBUG] {label}")
     if content is not None:
         if isinstance(content, (dict, list)):
-            print(json.dumps(content, ensure_ascii=False, indent=2)[:500])
+            log.info(json.dumps(content, ensure_ascii=False, indent=2)[:500])
         else:
-            print(str(content)[:500])
+            log.info(str(content)[:500])
 
 
 # ── 数据库工具 ─────────────────────────────────────────────────────────────
@@ -172,14 +177,14 @@ def _fetch_bangumi_entity(tag_name: str, category: int, token: str) -> dict:
                 if attempt < 2:
                     time.sleep(2)
                 else:
-                    print(f"[LLM] Bangumi 网络失败 ({tag_name}): {e}")
+                    log.error(f"[LLM] Bangumi 网络失败 ({tag_name}): {e}")
             except req.exceptions.RequestException as e:
                 if attempt < 2:
                     time.sleep(2)
                 else:
-                    print(f"[LLM] Bangumi 网络失败 ({tag_name}): {e}")
+                    log.error(f"[LLM] Bangumi 网络失败 ({tag_name}): {e}")
             except Exception as e:
-                print(f"[LLM] Bangumi 解析异常 ({tag_name}): {e}")
+                log.error(f"[LLM] Bangumi 解析异常 ({tag_name}): {e}")
                 break
         sess.close()
     return result
@@ -255,47 +260,119 @@ def _load_tag_groups(db_path: str) -> tuple[dict, dict]:
             data = json.load(f)
         return data.get('tag_to_groups', {}), data.get('group_cn_names', {})
     except Exception as e:
-        print(f"[LLM] 加载 tag_groups.json 失败: {e}")
+        log.error(f"[LLM] 加载 tag_groups.json 失败: {e}")
         return {}, {}
 
 
 # ── 共现数据 ────────────────────────────────────────────────────────────────
 
-_cooc_cache = None  # 进程级缓存 {tag: [(related, count), ...]}
+# 进程级缓存 {tag: [(related, count), ...]}，每个标签固定保留 _COOC_CACHE_DEPTH 条。
+# 各调用方的 top_k 不同（prompt_tool 8 / /tag_cooc 20），若把 top_k 写进缓存键，
+# 两个调用方交替访问就会每次命中失败、反复付 3.8s 的重载成本。故一次按最大深度建好，
+# 调用方各自切片（切片是 O(top_k)，可忽略）。
+_COOC_CACHE_DEPTH = 20
+_cooc_cache = None
+# 缓存键：(parquet 路径, mtime_ns, 大小)。文件被 /trim_cooc 重写后自动失效。
+_cooc_cache_key = None
+_cooc_file_missing = False  # 只用于日志抑制，不参与缓存判定
+
+
+def _cooc_parquet_path(db_path: str) -> Path:
+    return Path(db_path).parent / 'cooc' / 'cooccurrence_clean.parquet'
+
+
+def _ensure_cooc_loaded(db_path: str) -> dict:
+    """确保 _cooc_cache 已按 _COOC_CACHE_DEPTH 建好，返回**原始缓存对象**（勿改）。
+
+    返回的就是 `_cooc_cache` 本身，不做任何复制/裁剪——这是热点路径：
+    缓存里约 5.2 万个标签，`{t: v[:top_k] for ...}` 这种"顺手的"拷贝实测要 98ms
+    **每次请求都付一遍**。/tag_cooc 是 Danbooru 页每点一个标签就打一次的接口，
+    因此需要单标签查询的调用方请直接用 `_cooc_is_a` 取该标签的切片。
+    """
+    global _cooc_cache, _cooc_cache_key, _cooc_file_missing
+    cooc_path = _cooc_parquet_path(db_path)
+    try:
+        st = cooc_path.stat()
+        key = (str(cooc_path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        if not _cooc_file_missing:
+            log.warning("[LLM] 共现数据不存在，跳过（跑 fetch-cooc 后自动生效，无需重启）")
+            _cooc_file_missing = True
+        return {}
+    _cooc_file_missing = False
+    if _cooc_cache is not None and _cooc_cache_key == key:
+        return _cooc_cache
+    try:
+        import numpy as np
+        import pandas as pd
+        df = pd.read_parquet(cooc_path)
+        a, b, c = df['tag_a'].to_numpy(), df['tag_b'].to_numpy(), df['count'].to_numpy()
+        n = a.size
+        # 双向展开：a→b / b→a 交替，与旧实现的追加顺序一致
+        src = np.empty(n * 2, dtype=a.dtype); src[0::2] = a; src[1::2] = b
+        tgt = np.empty(n * 2, dtype=a.dtype); tgt[0::2] = b; tgt[1::2] = a
+        cnt = np.repeat(c, 2)
+        codes, names = pd.factorize(np.concatenate([src, tgt]))
+        src_c, tgt_c = codes[:n * 2], codes[n * 2:]
+        # 复合键 = 标签码 * 步长 - count，一次排序即得「按标签分组、组内 count 降序」
+        sort_key = src_c.astype(np.int64) * (int(cnt.max()) + 1) - cnt.astype(np.int64)
+        order = np.argsort(sort_key, kind='stable')
+        src_c, tgt_c, cnt = src_c[order], tgt_c[order], cnt[order]
+        uniq, starts = np.unique(src_c, return_index=True)
+        # 每行在其所属标签组内的位次，位次 < 深度即入选
+        pos = np.arange(src_c.size) - starts[np.searchsorted(uniq, src_c)]
+        keep = pos < _COOC_CACHE_DEPTH
+        lookup = {}
+        for tag, related, count in zip(src_c[keep].tolist(),
+                                       tgt_c[keep].tolist(),
+                                       cnt[keep].tolist()):
+            lookup.setdefault(names[tag], []).append((names[related], int(count)))
+        _cooc_cache = lookup
+        _cooc_cache_key = key
+        log.info(f"[LLM] 共现数据加载完成: {len(lookup)} 个标签有共现关系 "
+              f"(深度 {_COOC_CACHE_DEPTH})")
+        return lookup
+    except Exception as e:
+        # 不写缓存：parquet 可能正在被 /trim_cooc 原子替换，一次读失败不该钉死整个进程
+        log.error(f"[LLM] 加载共现数据失败（不缓存，下次请求重试）: {e}")
+        return {}
+
+
+def _cooc_is_a(db_path: str, tag: str, top_k: int = 10) -> list:
+    """单标签共现查询（O(top_k)，不复制整张缓存表）。命中返回 [(related, count), ...]。"""
+    top_k = max(1, min(int(top_k or 0) or 10, _COOC_CACHE_DEPTH))
+    cache = _ensure_cooc_loaded(db_path)
+    if not cache:
+        return []
+    return cache.get(tag, [])[:top_k]
 
 
 def _load_cooc_data(db_path: str, top_k: int = 10) -> dict:
-    """加载共现数据，返回 {tag: [(related_tag, count), ...]}，每个标签最多 top_k 条。"""
-    global _cooc_cache
-    if _cooc_cache is not None:
-        return _cooc_cache
-    cooc_path = Path(db_path).parent / 'cooc' / 'cooccurrence_clean.parquet'
-    if not cooc_path.exists():
-        print("[LLM] 共现数据不存在，跳过")
-        _cooc_cache = {}
-        return _cooc_cache
-    try:
-        import pandas as pd
-        df = pd.read_parquet(cooc_path)
-        # tag_a / tag_b / count 三列
-        lookup = {}
-        for _, row in df.iterrows():
-            a, b, c = row['tag_a'], row['tag_b'], row['count']
-            for src, tgt in [(a, b), (b, a)]:
-                if src not in lookup:
-                    lookup[src] = []
-                lookup[src].append((tgt, c))
-        # 按 count 降序，取 top_k
-        for tag in lookup:
-            lookup[tag].sort(key=lambda x: -x[1])
-            lookup[tag] = lookup[tag][:top_k]
-        _cooc_cache = lookup
-        print(f"[LLM] 共现数据加载完成: {len(lookup)} 个标签有共现关系")
-        return lookup
-    except Exception as e:
-        print(f"[LLM] 加载共现数据失败: {e}")
-        _cooc_cache = {}
-        return _cooc_cache
+    """加载共现数据，返回 {tag: [(related_tag, count), ...]}，每个标签最多 top_k 条。
+
+    实现说明（性能敏感，勿改回逐行写法）：旧实现用 df.iterrows() 逐行累积，
+    133 万行需 ~52s；此处先把标签 factorize 成整数码（字符串排序比整数慢约 4 倍），
+    再用复合键一次稳定排序，实测 ~3.8s。稳定排序保证并列 count 的次序与旧实现一致。
+
+    缓存按 (路径, mtime, 大小) 失效，**不缓存「文件不存在」和「加载异常」**——
+    旧实现把它们永久写成 {}，用户随后 `fetch-cooc` 跑出数据，不重启进程就一直是空的。
+
+    返回的是按 top_k 裁剪后的**新 dict**（约 98ms，5.2 万条）。
+    只查单个标签的调用方请用 `_cooc_is_a`，别为了取一条而在这里付全量复制的成本。
+    真正需要遍历多标签的批量管线（llm_pipeline 的 payload 构建）用这个接口是对的。
+    """
+    top_k = max(1, min(int(top_k or 0) or 10, _COOC_CACHE_DEPTH))
+    cache = _ensure_cooc_loaded(db_path)
+    if not cache:
+        return {}
+    return {t: v[:top_k] for t, v in cache.items()}
+
+
+def _invalidate_cooc_cache():
+    """让下次 _load_cooc_data 重新读盘。文件被外部重写时用。"""
+    global _cooc_cache, _cooc_cache_key
+    _cooc_cache = None
+    _cooc_cache_key = None
 
 
 # ── LLM Prompt ─────────────────────────────────────────────────────────────
@@ -330,17 +407,32 @@ _CONTEXT_OVERFLOW_KEYWORDS = [
 ]
 
 
+class _OutputTruncated(ValueError):
+    """输出被 max_tokens 截断（思考模式占满额度、content 为空）。
+
+    继承 ValueError：调用方现有的 `except ValueError` 分支（单条翻译路由等）
+    能直接把它转成可见的错误消息，而不是 500。"""
+
+
+def _llm_max_tokens() -> int:
+    """LLM 单次输出上限。与思考模式的 reasoning_content 共享额度——太小会把
+    content 挤成空串，且返回空列表让调用方以为「这批本来就没结果」。"""
+    return int(os.environ.get('LLM_TEXT_MAX_TOKENS', '8192'))
+
+
 def _call_llm(client, model: str, system_prompt: str,
               batch_data: list, temperature: float) -> list:
     """调用 LLM，返回 items 列表。
 
-    上下文超限时自动将 batch_data 拆半递归重试，不再继续用原大小重试。
+    上下文超限 / 输出被 max_tokens 截断时自动将 batch_data 拆半递归重试，
+    不再继续用原大小重试。
     """
     max_attempts = 5
     last_error = None
     for attempt in range(max_attempts):
         try:
             current_timeout = 60 + 30 * attempt
+            max_tokens = _llm_max_tokens()
             response = client.chat.completions.create(
                 model=model,
                 messages=[
@@ -349,9 +441,21 @@ def _call_llm(client, model: str, system_prompt: str,
                 ],
                 temperature=temperature,
                 response_format={"type": "json_object"},
+                max_tokens=max_tokens,
                 timeout=current_timeout,
             )
+            finish = response.choices[0].finish_reason
             raw = response.choices[0].message.content
+            # content 为空且被截断 = 额度被思考占满，正式回答一个字没出。
+            # 必须显式抛错：静默返回 [] 会让调用方以为「这批没有结果」，
+            # 整批白跑、不记历史、一轮轮重试，且日志里看不出异常。
+            if not (raw or '').strip() and finish == 'length':
+                reasoning = getattr(response.choices[0].message, 'reasoning_content', '') or ''
+                raise _OutputTruncated(
+                    f"输出被 max_tokens({max_tokens}) 截断，content 为空"
+                    + (f"（思考占满额度，reasoning 长度 {len(reasoning)}）" if reasoning else '')
+                    + "；请调大 .env 的 LLM_TEXT_MAX_TOKENS"
+                )
             # 去除 markdown 代码块包裹
             if raw:
                 stripped = raw.strip()
@@ -367,7 +471,7 @@ def _call_llm(client, model: str, system_prompt: str,
                     import json_repair
                     parsed = json_repair.loads(raw) if raw else {}
                 except ImportError:
-                    print(f"[LLM] JSON 解析失败（未安装 json_repair），尝试宽松匹配")
+                    log.error(f"[LLM] JSON 解析失败（未安装 json_repair），尝试宽松匹配")
                     match = re.search(r'\{"items":.*?\}\]\}', raw or '', re.DOTALL)
                     if match:
                         parsed = json.loads(match.group())
@@ -394,26 +498,54 @@ def _call_llm(client, model: str, system_prompt: str,
                         results = [parsed]
                     if results is None:
                         results = []
-            # 用原始输入名称覆盖 LLM 可能写错的 name
-            for i, item in enumerate(results):
-                if i < len(batch_data) and isinstance(batch_data[i], dict) and "name" in batch_data[i]:
-                    item["name"] = batch_data[i]["name"]
-            return results
+            # 用原始输入名称覆盖 LLM 可能写错的 name。
+            # 必须按名字匹配而非按下标：一批 8 条模型只返 5 条或调换顺序时，
+            # 按下标会把 A 的中文名写到 B 上——静默错库，且事后无从分辨。
+            by_key = {}
+            for entry in batch_data:
+                if isinstance(entry, dict) and entry.get("name"):
+                    by_key.setdefault(normalize_tag_key(entry["name"]), entry["name"])
+            matched, unmatched = [], []
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                canonical = by_key.get(normalize_tag_key(str(item.get("name") or "")))
+                if canonical is None:
+                    unmatched.append(item)
+                else:
+                    item["name"] = canonical
+                    matched.append(item)
+            # 一条都没对上但条数吻合 → 模型可能整批省略/改写了 name，按输入顺序对齐
+            # （batch_size=1 时必然走这里：只有一条，位置无歧义）
+            if not matched and unmatched and len(unmatched) == len(batch_data):
+                for entry, item in zip(batch_data, unmatched):
+                    if isinstance(entry, dict) and entry.get("name"):
+                        item["name"] = entry["name"]
+                        matched.append(item)
+            # 剩余对不上的直接丢弃：调用方按 results 里的 name 记历史，
+            # 丢掉即该标签不进历史，下轮重试，不会静默错配
+            dropped = len(results) - len(matched)
+            if dropped:
+                log.warning(f"[LLM] 警告：{dropped} 条结果的名字不在本批输入中，已丢弃（不进历史，下轮重试）")
+            return matched
         except Exception as e:
             err_msg = str(e).lower()
+            is_truncated = isinstance(e, _OutputTruncated)
             is_overflow = any(kw in err_msg for kw in _CONTEXT_OVERFLOW_KEYWORDS)
-            if is_overflow and len(batch_data) > 1:
+            # 截断同样靠「拆小批次」缓解：条目少 → 正式输出短 → 给思考留的余量更大
+            if (is_truncated or is_overflow) and len(batch_data) > 1:
+                reason = '输出被 max_tokens 截断' if is_truncated else '上下文超限'
                 mid = len(batch_data) // 2
-                print(f"[LLM] 上下文超限（batch_size={len(batch_data)} 过大），拆分为 {mid}+{len(batch_data)-mid} 两批递归重试")
+                log.warning(f"[LLM] {reason}（batch_size={len(batch_data)} 过大），拆分为 {mid}+{len(batch_data)-mid} 两批递归重试")
                 left = _call_llm(client, model, system_prompt, batch_data[:mid], temperature)
                 right = _call_llm(client, model, system_prompt, batch_data[mid:], temperature)
                 return left + right
             last_error = e
             if attempt == max_attempts - 1:
-                print(f"[LLM] 请求失败，已重试 {max_attempts} 次: {e}")
+                log.error(f"[LLM] 请求失败，已重试 {max_attempts} 次: {e}")
                 raise
             wait = min(2 ** attempt + random.uniform(0, 1), 60)
-            print(f"[LLM] 请求出错 (尝试 {attempt + 1}/{max_attempts})，{wait:.1f}s 后重试: {e}")
+            log.warning(f"[LLM] 请求出错 (尝试 {attempt + 1}/{max_attempts})，{wait:.1f}s 后重试: {e}")
             time.sleep(wait)
     raise last_error or RuntimeError("LLM 调用异常")
 
@@ -516,7 +648,7 @@ def _build_entity_payload(tag: dict, tag_to_groups: dict,
         if ext_info["cn_name"]:
             ref_cn = ext_info["cn_name"]
             bangumi_summary = ext_info["summary"]
-            print(f"  [Bangumi] {tag['name']} → {ref_cn}")
+            log.info(f"  [Bangumi] {tag['name']} → {ref_cn}")
 
     if not ref_wiki and bangumi_summary:
         ref_wiki = bangumi_summary
@@ -562,7 +694,7 @@ def _build_entity_payloads_batch(batch, tag_to_groups, group_cn_names,
                 payloads[idx] = f.result()
             except Exception as e:
                 name = batch[idx].get('name', '?')
-                print(f"[LLM] 并行 Bangumi 查询失败 ({name}): {e}")
+                log.error(f"[LLM] 并行 Bangumi 查询失败 ({name}): {e}")
                 payloads[idx] = _build_general_payload(
                     batch[idx], tag_to_groups, group_cn_names, cooc_data)
     return payloads
@@ -570,8 +702,23 @@ def _build_entity_payloads_batch(batch, tag_to_groups, group_cn_names,
 
 # ── 结果应用 ───────────────────────────────────────────────────────────────
 
+_CN_SEP_RE = re.compile(r"[,，]")
+
+
 def _combine_cn(base_cn: str, ext_cn: str) -> str:
-    return re.sub(r",+", ",", ",".join(filter(None, [base_cn, ext_cn])).strip(","))
+    """合并基础中文名与扩展中文名：去重 + 统一半角逗号分隔。
+
+    去重的必要性：LLM 常把 base 在 extended_cn_name 里重复一遍（base=透明衣物 /
+    ext=透明衣物,透视装），直接拼接会得到「透明衣物,透明衣物,透视装」。
+    全角逗号也当分隔符——LLM 两种混用，而前端 cn_name.split(',') 只认半角，
+    不拆全角会把「彩虹社，Anycolor」粘成一段显示。保留首次出现顺序。"""
+    seen, out = set(), []
+    for part in _CN_SEP_RE.split(f"{base_cn or ''},{ext_cn or ''}"):
+        part = part.strip()
+        if part and part not in seen:
+            seen.add(part)
+            out.append(part)
+    return ','.join(out)
 
 
 def _apply_results(conn, results: list):
@@ -598,6 +745,68 @@ def _apply_results(conn, results: list):
     return updated
 
 
+def translate_one_tag(tag_data: dict, db_path: str = None) -> dict:
+    """深度翻译单个标签，复用三层管线逻辑（entity/general/fallback）。
+
+    供主表标签（translation.translate_single_tag）与用户新标签
+    （translation.translate_user_tag）共用：层级判定、payload 构建、
+    提示词、温度、LLM 调用完全一致。层级由 tag_data 自动决定——
+    user_tags 的标签无 en_wiki/category，自然走 fallback 层。
+
+    tag_data: {name, cn_name, en_wiki, category, other_names}（与 _load_tags 返回结构一致）
+    返回 {'cn_name': 合并后中文名, 'cn_wiki': 中文 wiki, 'nsfw': int 或 None}。
+    LLM_TEXT_API_URL 未配置时抛 ValueError（API Key 可空，本地部署无需配置）；
+    提示词缺失由 get_system_prompt 抛 ValueError。
+    """
+    if db_path is None:
+        db_path = get_tag_db_config()['db_path']
+    tag_to_groups, group_cn_names = _load_tag_groups(db_path)
+    cooc_data = _load_cooc_data(db_path)
+
+    cat = int(tag_data.get('category', -1))
+    has_wiki = bool((tag_data.get('en_wiki') or '').strip())
+    if cat in (3, 4):
+        payload = [_build_entity_payload(
+            tag_data, tag_to_groups, group_cn_names,
+            os.environ.get('BANGUMI_ACCESS_TOKEN', ''), cooc_data
+        )]
+        system_prompt = get_system_prompt('llm_entity')
+        temperature = 0.1
+    elif has_wiki:
+        payload = [_build_general_payload(tag_data, tag_to_groups, group_cn_names, cooc_data)]
+        system_prompt = get_system_prompt('llm_general')
+        temperature = 0.4
+    else:
+        payload = [_build_general_payload(tag_data, tag_to_groups, group_cn_names, cooc_data)]
+        system_prompt = get_system_prompt('llm_fallback')
+        temperature = 0.5
+
+    # 本地部署（Ollama / LM Studio / vLLM 等）无需 API Key：空值由 resolve_api_key
+    # 归一化为占位串（SDK 2.x 对空串同样抛 OpenAIError）。真正要守的是端点地址。
+    base_url = os.environ.get('LLM_TEXT_API_URL', '')
+    if not base_url:
+        raise ValueError('未配置 LLM_TEXT_API_URL')
+    from openai import OpenAI
+    client = OpenAI(base_url=base_url,
+                    api_key=resolve_api_key(os.environ.get('LLM_TEXT_API_KEY', '')))
+    results = _call_llm(client, os.environ.get('LLM_TEXT_MODEL', 'default'),
+                        system_prompt, payload, temperature=temperature)
+
+    if not results:
+        return {'cn_name': '', 'cn_wiki': '', 'nsfw': None}
+    item = results[0]
+    cn_name = _combine_cn(str(item.get('cn_name', '')).strip(),
+                          str(item.get('extended_cn_name', '')).strip())
+    cn_wiki = str(item.get('chinese_wiki', '')).strip()
+    nsfw = item.get('nsfw')
+    if nsfw is not None:
+        try:
+            nsfw = int(nsfw)
+        except (ValueError, TypeError):
+            nsfw = 0
+    return {'cn_name': cn_name, 'cn_wiki': cn_wiki, 'nsfw': nsfw}
+
+
 # ── 主入口 ─────────────────────────────────────────────────────────────────
 
 def run_llm_process(db_path: str = None, preview: bool = False,
@@ -609,14 +818,14 @@ def run_llm_process(db_path: str = None, preview: bool = False,
     if db_path is None:
         db_path = get_tag_db_config()['db_path']
 
-    # LLM 客户端
-    api_key = os.environ.get('LLM_API_KEY', '')
-    base_url = os.environ.get('LLM_API_URL', '')
-    model = os.environ.get('LLM_MODEL', 'default')
+    # LLM 客户端（本地部署无需 API Key，空值经 resolve_api_key 归一化为占位串）
+    base_url = os.environ.get('LLM_TEXT_API_URL', '')
+    api_key = resolve_api_key(os.environ.get('LLM_TEXT_API_KEY', ''))
+    model = os.environ.get('LLM_TEXT_MODEL', 'default')
     bangumi_token = os.environ.get('BANGUMI_ACCESS_TOKEN', '')
 
-    if not preview and not api_key:
-        print("[LLM] 错误：未配置 LLM_API_KEY")
+    if not preview and not base_url:
+        log.error("[LLM] 错误：未配置 LLM_TEXT_API_URL")
         return
 
     from openai import OpenAI
@@ -624,11 +833,11 @@ def run_llm_process(db_path: str = None, preview: bool = False,
 
     conn = _get_conn(db_path)
     tags = _load_tags(conn)
-    print(f"[LLM] 本地共 {len(tags)} 条标签")
+    log.info(f"[LLM] 本地共 {len(tags)} 条标签")
 
     # 历史豁免
     history = _load_history(db_path)
-    print(f"[LLM] 历史已处理: {len(history)} 条")
+    log.info(f"[LLM] 历史已处理: {len(history)} 条")
 
     # 加载标签组
     tag_to_groups, group_cn_names = _load_tag_groups(db_path)
@@ -661,11 +870,11 @@ def run_llm_process(db_path: str = None, preview: bool = False,
             fallback_tags.append(tag)
 
     if preview:
-        print(f"\n[LLM] 预览 - 待处理统计:")
-        print(f"  entity（角色/作品）: {len(entity_tags)} 条")
-        print(f"  general（有 Wiki）: {len(general_tags)} 条")
-        print(f"  fallback（无 Wiki）: {len(fallback_tags)} 条")
-        print(f"  总计: {len(entity_tags) + len(general_tags) + len(fallback_tags)} 条")
+        log.info(f"\n[LLM] 预览 - 待处理统计:")
+        log.info(f"  entity（角色/作品）: {len(entity_tags)} 条")
+        log.info(f"  general（有 Wiki）: {len(general_tags)} 条")
+        log.info(f"  fallback（无 Wiki）: {len(fallback_tags)} 条")
+        log.info(f"  总计: {len(entity_tags) + len(general_tags) + len(fallback_tags)} 条")
         conn.close()
         return
 
@@ -673,35 +882,35 @@ def run_llm_process(db_path: str = None, preview: bool = False,
 
     # ── Entity 处理 ──────────────────────────────────────────────────────
     if entity_tags:
-        print(f"\n[LLM] 开始实体处理（{len(entity_tags)} 条）...")
+        log.info(f"\n[LLM] 开始实体处理（{len(entity_tags)} 条）...")
         for i in range(0, len(entity_tags), batch_size):
             batch = entity_tags[i:i + batch_size]
             payload = _build_entity_payloads_batch(batch, tag_to_groups, group_cn_names, bangumi_token, cooc_data)
-            print(f"[LLM] Entity 进度: {min(i + batch_size, len(entity_tags))}/{len(entity_tags)}")
+            log.info(f"[LLM] Entity 进度: {min(i + batch_size, len(entity_tags))}/{len(entity_tags)}")
             results = _call_llm(client, model, get_system_prompt('llm_entity'), payload, temperature=0.1)
             n = _apply_results(conn, results)
             current_run.update(item["name"] for item in results if item.get("name"))
 
     # ── General 处理 ─────────────────────────────────────────────────────
     if general_tags:
-        print(f"\n[LLM] 开始常规翻译（{len(general_tags)} 条）...")
+        log.info(f"\n[LLM] 开始常规翻译（{len(general_tags)} 条）...")
         for i in range(0, len(general_tags), batch_size):
             batch = general_tags[i:i + batch_size]
             payload = [_build_general_payload(t, tag_to_groups, group_cn_names, cooc_data)
                        for t in batch]
-            print(f"[LLM] General 进度: {min(i + batch_size, len(general_tags))}/{len(general_tags)}")
+            log.info(f"[LLM] General 进度: {min(i + batch_size, len(general_tags))}/{len(general_tags)}")
             results = _call_llm(client, model, get_system_prompt('llm_general'), payload, temperature=0.4)
             _apply_results(conn, results)
             current_run.update(item["name"] for item in results if item.get("name"))
 
     # ── Fallback 处理 ────────────────────────────────────────────────────
     if fallback_tags:
-        print(f"\n[LLM] 开始无 Wiki 兜底（{len(fallback_tags)} 条）...")
+        log.info(f"\n[LLM] 开始无 Wiki 兜底（{len(fallback_tags)} 条）...")
         for i in range(0, len(fallback_tags), batch_size):
             batch = fallback_tags[i:i + batch_size]
             payload = [_build_general_payload(t, tag_to_groups, group_cn_names, cooc_data)
                        for t in batch]
-            print(f"[LLM] Fallback 进度: {min(i + batch_size, len(fallback_tags))}/{len(fallback_tags)}")
+            log.info(f"[LLM] Fallback 进度: {min(i + batch_size, len(fallback_tags))}/{len(fallback_tags)}")
             results = _call_llm(client, model, get_system_prompt('llm_fallback'), payload, temperature=0.5)
             _apply_results(conn, results)
             current_run.update(item["name"] for item in results if item.get("name"))
@@ -710,9 +919,9 @@ def run_llm_process(db_path: str = None, preview: bool = False,
     if current_run:
         history.update(current_run)
         _save_history(db_path, history)
-        print(f"[LLM] 已完成 {len(current_run)} 条，历史总计 {len(history)} 条")
+        log.info(f"[LLM] 已完成 {len(current_run)} 条，历史总计 {len(history)} 条")
     else:
-        print("[LLM] 没有需要处理的数据")
+        log.info("[LLM] 没有需要处理的数据")
 
     conn.close()
-    print("[LLM] LLM 处理完成")
+    log.info("[LLM] LLM 处理完成")

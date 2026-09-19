@@ -13,9 +13,13 @@ kornia/einops/timm（模型类 birefnet.py 的 import 依赖，推理路径不�
 3. 后处理：mask resize 回原图尺寸 → putalpha 合成透明 PNG；或与底色 alpha 混合
 """
 import numpy as np
+import logging
 
 
 # 模块级缓存：首次加载后常驻内存（模型加载耗时数秒，需复用）。按 base_dir+weights 失效。
+
+log = logging.getLogger(__name__)
+
 _birefnet_cache = {'model': None, 'model_key': None}
 
 # 预处理常量（官方数值，不能改）
@@ -89,7 +93,7 @@ def load_birefnet_model(base_model_dir, toonout_weights_path):
     model.to(device).eval()
 
     _birefnet_cache = {'model': model, 'model_key': model_key}
-    print(f"[BiRefNet] 模型加载完成: base={base_model_dir}, weights={toonout_weights_path}, "
+    log.info(f"[BiRefNet] 模型加载完成: base={base_model_dir}, weights={toonout_weights_path}, "
           f"device={device}, dtype=float32")
     return model
 

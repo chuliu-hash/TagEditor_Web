@@ -74,6 +74,9 @@
                 <a id="link-to-tags" href="/tag_editor" class="flex items-center justify-center bg-white hover:bg-gray-50 text-gray-600 font-medium py-1.5 px-3 rounded-lg transition-all text-xs border border-gray-300" onclick="return navigateToTags()">
                     <i class="fa fa-tags mr-1.5"></i> 标签编辑
                 </a>
+                <a id="link-to-prompt-tool" href="/prompt_tool" class="flex items-center justify-center bg-white hover:bg-gray-50 text-gray-600 font-medium py-1.5 px-3 rounded-lg transition-all text-xs border border-gray-300" onclick="navigateAway('/prompt_tool'); return false;">
+                    <i class="fa fa-magic mr-1.5"></i> 提示词优化
+                </a>
             </div>
         </div>
     </header>
@@ -117,11 +120,11 @@
                     </div>
                 </div>
                 <div class="flex border-t border-gray-200">
-                    <button id="btn-prev" class="flex-1 py-2 text-center hover:bg-primary/5 transition-colors text-gray-500 hover:text-primary" onclick="navigatePrev()">
+                    <button id="btn-prev" class="flex-1 py-2 text-center hover:bg-primary/5 transition-colors text-gray-500 hover:text-primary" onclick="navigatePrev()" title="上一张 (← 或 K)">
                         <i class="fa fa-chevron-left"></i>
                     </button>
                     <div class="w-px bg-gray-200 self-stretch"></div>
-                    <button id="btn-next" class="flex-1 py-2 text-center hover:bg-primary/5 transition-colors text-gray-500 hover:text-primary" onclick="navigateNext()">
+                    <button id="btn-next" class="flex-1 py-2 text-center hover:bg-primary/5 transition-colors text-gray-500 hover:text-primary" onclick="navigateNext()" title="下一张 (→ 或 J)">
                         <i class="fa fa-chevron-right"></i>
                     </button>
                 </div>
@@ -507,10 +510,29 @@
         function navigatePrev() { navigateTo(currentIndex - 1); }
         function navigateNext() { navigateTo(currentIndex + 1); }
 
+        // 弹窗是否打开：所有弹窗都是「fixed inset-0 ... hidden」的遮罩层。
+        // 旧版的箭头键处理不看弹窗状态，于是「未保存修改」确认框弹出时按 →，
+        // 图片会在遮罩底下真的被切走（而确认框还停在屏幕上问你要不要放弃），
+        // 用户点「取消」也没用了——那张图的编辑已经丢了。
+        function _anyModalOpen() {
+            const overlays = document.querySelectorAll('div.fixed.inset-0');
+            for (let i = 0; i < overlays.length; i++) {
+                if (!overlays[i].classList.contains('hidden')) return true;
+            }
+            return false;
+        }
+
         document.addEventListener('keydown', function(e) {
-            if (e.target.tagName === 'INPUT') return;
-            if (e.key === 'ArrowLeft') navigatePrev();
-            if (e.key === 'ArrowRight') navigateNext();
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+            if (e.ctrlKey || e.metaKey || e.altKey) return;
+            if (_anyModalOpen()) return;   // 弹窗打开时不接管按键
+
+            // ←/→ 与 J/K 都能切图（J/K 与标签编辑页保持一致，两边手不用换）
+            if (e.key === 'ArrowLeft' || e.key === 'k' || e.key === 'K') {
+                e.preventDefault(); navigatePrev();
+            } else if (e.key === 'ArrowRight' || e.key === 'j' || e.key === 'J') {
+                e.preventDefault(); navigateNext();
+            }
         });
 
         // === 图片加载 ===

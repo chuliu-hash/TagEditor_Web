@@ -3,8 +3,13 @@ import os
 import base64
 import numpy as np
 from flask import Blueprint, jsonify, current_app, Response
-from config import get_vision_config, get_wd14_config, get_image_files, get_prompt
+from config import (get_vision_config, get_wd14_config, get_image_files, get_prompt,
+                    write_text_atomic)
 from sse_utils import sse_event
+import logging
+
+
+log = logging.getLogger(__name__)
 
 tagger_bp = Blueprint('tagger', __name__)
 
@@ -63,7 +68,7 @@ def wd14_load_model(model_path):
     label_df = pd.read_csv(csv_path)
 
     _wd14_model_cache = {'session': session, 'label_df': label_df, 'model_name': model_path}
-    print(f"[WD14] 模型加载完成: {model_path}, providers: {session.get_providers()}")
+    log.info(f"[WD14] 模型加载完成: {model_path}, providers: {session.get_providers()}")
     return _wd14_model_cache
 
 
@@ -107,7 +112,7 @@ def auto_tag_wd14():
         return jsonify({'tagged': 0, 'skipped': skipped, 'errors': [], 'message': '所有图片已有标签'})
 
     total = len(to_tag)
-    print(f"\n[WD14] 开始自动打标: 共 {total} 张待处理, {skipped} 张已有标签跳过")
+    log.warning(f"\n[WD14] 开始自动打标: 共 {total} 张待处理, {skipped} 张已有标签跳过")
 
     def generate():
         tagged = 0
@@ -131,7 +136,7 @@ def auto_tag_wd14():
                 batch_files = to_tag[batch_start:batch_start + WD14_BATCH_SIZE]
                 batch_idx = batch_start // WD14_BATCH_SIZE + 1
                 total_batches = (total + WD14_BATCH_SIZE - 1) // WD14_BATCH_SIZE
-                print(f"[WD14] 批次 {batch_idx}/{total_batches} ({len(batch_files)} 张)")
+                log.info(f"[WD14] 批次 {batch_idx}/{total_batches} ({len(batch_files)} 张)")
 
                 # 预处理阶段：逐张解码+缩放，失败的单独记错并跳过（不进 batch）
                 imgs = []
@@ -143,22 +148,22 @@ def auto_tag_wd14():
                     except Exception as e:
                         done += 1
                         error_count += 1
-                        print(f"[WD14] ✗ {filename}: 预处理失败 — {e}")
+                        log.error(f"[WD14] ✗ {filename}: 预处理失败 — {e}")
                         yield sse_event('progress', {'current': done, 'total': total, 'item': filename})
                         yield sse_event('error', {'item': filename, 'error': str(e)})
 
                 if not imgs:
-                    print(f"[WD14] 批次 {batch_idx}: 全部预处理失败，跳过")
+                    log.error(f"[WD14] 批次 {batch_idx}: 全部预处理失败，跳过")
                     continue
 
                 # 批量推理：(N,448,448,3) -> (N, num_tags)
                 try:
                     batch_input = np.concatenate(imgs, axis=0)
                     probs_batch = session.run(None, {input_name: batch_input})[0]
-                    print(f"[WD14] 批次 {batch_idx}: 推理完成 ({len(ok_files)} 张)")
+                    log.info(f"[WD14] 批次 {batch_idx}: 推理完成 ({len(ok_files)} 张)")
                 except Exception as e:
                     # 整批推理失败，逐张报错
-                    print(f"[WD14] 批次 {batch_idx}: 批量推理失败 — {e}")
+                    log.error(f"[WD14] 批次 {batch_idx}: 批量推理失败 — {e}")
                     for filename in ok_files:
                         done += 1
                         error_count += 1
@@ -177,21 +182,22 @@ def auto_tag_wd14():
                         )
                         if tags:
                             txt_path = os.path.join(upload_dir, f"{os.path.splitext(filename)[0]}.txt")
-                            with open(txt_path, 'w', encoding='utf-8') as f:
-                                f.write(tags)
+                            # 原子写：批处理中途被中断/磁盘满时，不会把某张图的标签文件
+                            # 截断成半截（原先的 open('w') 会先清空再写）
+                            write_text_atomic(txt_path, tags)
                             tag_count = len([t for t in tags.split(',') if t.strip()])
-                            print(f"[WD14] ✓ {filename} → {tag_count} 个标签")
+                            log.info(f"[WD14] ✓ {filename} → {tag_count} 个标签")
                             tagged += 1
                         else:
                             error_count += 1
-                            print(f"[WD14] ✗ {filename}: 未产生有效标签")
+                            log.error(f"[WD14] ✗ {filename}: 未产生有效标签")
                             yield sse_event('error', {'item': filename, 'error': '未产生有效标签'})
                     except Exception as e:
                         error_count += 1
-                        print(f"[WD14] ✗ {filename}: {e}")
+                        log.error(f"[WD14] ✗ {filename}: {e}")
                         yield sse_event('error', {'item': filename, 'error': str(e)})
 
-            print(f"[WD14] 完成: {tagged} 张成功, {skipped} 张跳过, {error_count} 张失败")
+            log.error(f"[WD14] 完成: {tagged} 张成功, {skipped} 张跳过, {error_count} 张失败")
             yield sse_event('complete', {'tagged': tagged, 'skipped': skipped, 'errors': error_count})
         except Exception as e:
             # 生成器级别的未预期异常：发 fatal，前端能正常收尾
@@ -211,7 +217,7 @@ def auto_caption_vlm():
     """
     vcfg = get_vision_config()
     if not vcfg['api_url'] or not vcfg['model']:
-        return jsonify({'error': '未配置视觉模型（VISION_API_URL / VISION_MODEL）'}), 400
+        return jsonify({'error': '未配置视觉模型（LLM_VISION_API_URL / LLM_VISION_MODEL）'}), 400
 
     # 描述提示词：统一从 prompts/ 目录读取（vlm_caption.txt），必填
     caption_prompt = get_prompt('vlm_caption')
@@ -236,14 +242,17 @@ def auto_caption_vlm():
                         'message': '所有图片已有自然语言描述'})
 
     total = len(to_process)
-    print(f"\n[VLM] 开始生成自然语言描述: 共 {total} 张待处理, {skipped} 张已有描述跳过")
+    log.warning(f"\n[VLM] 开始生成自然语言描述: 共 {total} 张待处理, {skipped} 张已有描述跳过")
 
     from openai import OpenAI
     client = OpenAI(base_url=vcfg['api_url'], api_key=vcfg['api_key'])
 
     def generate():
         tagged = 0
-        skipped = 0
+        # 刻意**不**在这里重置 skipped：上面按「已有 .nl.txt」算出的预跳过数才是
+        # 「跳过」的语义（与开头的提示语一致）。旧实现在此处 skipped = 0 把外层变量
+        # 遮蔽掉，于是「跳过」在 complete 事件里变成了「模型返回空描述的张数」——
+        # 用户看到「跳过 3 张」，实际一张都没有 .nl.txt 需要跳过，无法据此判断问题。
         error_count = 0
         try:
             yield sse_event('progress', {'current': 0, 'total': total,
@@ -279,6 +288,13 @@ def auto_caption_vlm():
                             'text': 'Reference tags:\n' + ref_tags
                         })
 
+                    # 思考模式与正式回答共享 max_tokens：推理模型（DeepSeek 等）默认开启思考，
+                    # 额度被 reasoning_content 吃光后 content 为空、finish_reason=length。
+                    # 本任务只要 2~3 个短句（约 40 token），思考纯属浪费，默认关闭。
+                    extra = {}
+                    if vcfg['thinking'] not in ('on', 'true', '1', 'enabled'):
+                        extra['extra_body'] = {'thinking': {'type': 'disabled'}}
+
                     response = client.chat.completions.create(
                         model=vcfg['model'],
                         messages=[
@@ -286,7 +302,12 @@ def auto_caption_vlm():
                             {'role': 'user', 'content': user_content}
                         ],
                         temperature=0.7,
-                        max_tokens=512,
+                        max_tokens=vcfg['max_tokens'],
+                        # 必须显式传 timeout：openai SDK 默认是 600s（10 分钟），
+                        # 一个卡死的端点会把这批任务整体挂住十分钟且没有任何日志。
+                        # 与 prompt_tool.py 的 PROMPT_TOOL_TIMEOUT 同口径（config.py 的 LLM_VISION_TIMEOUT）。
+                        timeout=vcfg.get('timeout') or 180,
+                        **extra,
                     )
 
                     description = (response.choices[0].message.content or '').strip()
@@ -295,25 +316,26 @@ def auto_caption_vlm():
                         # 推理模型（如 Qwen3.5 Vision）可能把 token 全花在思考上，未输出正式回答
                         has_reasoning = hasattr(response.choices[0].message, 'reasoning_content') and response.choices[0].message.reasoning_content
                         if has_reasoning:
-                            print(f"[VLM] △ {filename}: 模型在思考中，未生成正式描述, finish={finish}")
+                            log.warning(f"[VLM] △ {filename}: 模型在思考中，未生成正式描述, finish={finish}, "
+                                  f"max_tokens={vcfg['max_tokens']}（LLM_VISION_THINKING={vcfg['thinking']}，"
+                                  f"调大 LLM_VISION_MAX_TOKENS 或关闭思考）")
                         else:
-                            print(f"[VLM] △ {filename}: 描述为空, finish={finish}")
+                            log.warning(f"[VLM] △ {filename}: 描述为空, finish={finish}")
                         skipped += 1
                         continue
 
                     # 保存到新的 .nl.txt，不覆盖原标签
                     out_path = os.path.join(upload_dir, f"{base}.nl.txt")
-                    with open(out_path, 'w', encoding='utf-8') as f:
-                        f.write(description)
-                    print(f"[VLM] ✓ {filename} → {len(description)} 字符")
+                    write_text_atomic(out_path, description)
+                    log.info(f"[VLM] ✓ {filename} → {len(description)} 字符")
                     tagged += 1
 
                 except Exception as e:
                     error_count += 1
-                    print(f"[VLM] ✗ {filename}: {e}")
+                    log.error(f"[VLM] ✗ {filename}: {e}")
                     yield sse_event('error', {'item': filename, 'error': str(e)})
 
-            print(f"[VLM] 完成: {tagged} 张成功, {skipped} 张跳过, {error_count} 张失败")
+            log.error(f"[VLM] 完成: {tagged} 张成功, {skipped} 张跳过, {error_count} 张失败")
             yield sse_event('complete', {'tagged': tagged, 'skipped': skipped,
                             'errors': error_count})
         except Exception as e:

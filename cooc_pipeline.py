@@ -15,9 +15,13 @@ from pathlib import Path
 
 import requests
 import numpy as np
+import logging
 
 
 # ── 工具 ───────────────────────────────────────────────────────────────────
+
+
+log = logging.getLogger(__name__)
 
 def _get_auth():
     """从环境变量读取 Danbooru 认证。"""
@@ -73,7 +77,7 @@ def run_fetch_cooc(db_path: str = None, full_update: bool = False,
 
     user, key = _get_auth()
     if not user or not key:
-        print("[Cooc] 未配置 DANBOORU_USER_NAME 或 DANBOORU_API_KEY")
+        log.warning("[Cooc] 未配置 DANBOORU_USER_NAME 或 DANBOORU_API_KEY")
         _emit({'type': 'fatal', 'error': '未配置 Danbooru 凭证'})
         return
 
@@ -94,7 +98,7 @@ def run_fetch_cooc(db_path: str = None, full_update: bool = False,
     tag_pc = {t['name']: int(t['post_count']) for t in tags}
 
     if not valid_names:
-        print("[Cooc] 数据库中无标签")
+        log.info("[Cooc] 数据库中无标签")
         _emit({'type': 'fatal', 'error': '数据库中无标签'})
         return
 
@@ -115,10 +119,12 @@ def run_fetch_cooc(db_path: str = None, full_update: bool = False,
 
     if full_update:
         target_list = sorted(valid_names)
-        # 全量清空状态（从断点恢复的情况除外）
+        # 全量清空状态（从断点恢复的情况除外）。
+        # 注意：raw_parquet 必须留到新数据原子落盘成功后再删（见本函数末尾），
+        # 否则中途被取消/403/kill 会旧数据已删、新数据未成，共现功能整体失效且无备份。
         if start_idx == 0:
             history = set()
-            for p in [raw_parquet, raw_csv_legacy, temp_csv, history_file, progress_file]:
+            for p in [raw_csv_legacy, temp_csv, history_file, progress_file]:
                 if p.exists():
                     p.unlink()
     else:
@@ -127,11 +133,11 @@ def run_fetch_cooc(db_path: str = None, full_update: bool = False,
 
     total = len(target_list)
     if total == 0:
-        print("[Cooc] 无需抓取")
+        log.info("[Cooc] 无需抓取")
         _emit({'type': 'complete', 'new_count': 0})
         return
 
-    print(f"[Cooc] 待处理 {total} 个标签{'（全量模式）' if full_update else '（增量模式）'}")
+    log.info(f"[Cooc] 待处理 {total} 个标签{'（全量模式）' if full_update else '（增量模式）'}")
     _emit({'type': 'progress', 'page': 1, 'total': total, 'item': f'共需处理 {total} 个标签'})
 
     session = requests.Session()
@@ -147,23 +153,23 @@ def run_fetch_cooc(db_path: str = None, full_update: bool = False,
 
     for i in range(start_idx, total):
         if _cancelled():
-            print(f"[Cooc] 用户中断（已保存 {saved_count} 个）")
+            log.info(f"[Cooc] 用户中断（已保存 {saved_count} 个）")
             _emit({'type': 'cancelled', 'new_count': saved_count})
             return
         tag_a = target_list[i]
         item_text = f"[{i + 1}/{total}] {tag_a}"
-        print(item_text)
+        log.info(item_text)
         _emit({'type': 'progress', 'page': i + 1, 'total': total, 'item': item_text})
 
         for attempt in range(3):
             try:
                 resp = session.get(api_url, params={'query': tag_a}, timeout=30)
                 if resp.status_code == 429:
-                    print("    429 限流，休眠 30 秒...")
+                    log.warning("    429 限流，休眠 30 秒...")
                     time.sleep(30)
                     continue
                 if resp.status_code == 403:
-                    print("    403 凭证失效，终止")
+                    log.info("    403 凭证失效，终止")
                     _emit({'type': 'fatal', 'error': 'Danbooru 凭证失效'})
                     return
                 resp.raise_for_status()
@@ -176,7 +182,7 @@ def run_fetch_cooc(db_path: str = None, full_update: bool = False,
                 if attempt < 2:
                     time.sleep(2)
                 else:
-                    print(f"    请求失败: {e}")
+                    log.error(f"    请求失败: {e}")
 
         time.sleep(0.2 + random.random() * 0.2)
 
@@ -193,7 +199,7 @@ def run_fetch_cooc(db_path: str = None, full_update: bool = False,
             history.update(target_list[start_idx:saved_count])
             history_file.write_text(json.dumps(sorted(history), ensure_ascii=False))
             if (i + 1) % 20 == 0:
-                print(f"  [Checkpoint] 已处理 {saved_count} 个")
+                log.info(f"  [Checkpoint] 已处理 {saved_count} 个")
 
     # 合并到主文件
     if temp_csv.exists():
@@ -206,7 +212,9 @@ def run_fetch_cooc(db_path: str = None, full_update: bool = False,
             # 兼容旧 CSV 格式：首次读取旧文件并转存为 parquet 后删除
             if raw_csv_legacy.exists() and not raw_parquet.exists():
                 df_old = pd.read_csv(raw_csv_legacy, low_memory=False, encoding='utf-8')
-                df_old.to_parquet(raw_parquet, index=False, compression='snappy')
+                tmp_parquet = raw_parquet.with_suffix('.parquet.tmp')
+                df_old.to_parquet(tmp_parquet, index=False, compression='snappy')
+                os.replace(tmp_parquet, raw_parquet)
                 raw_csv_legacy.unlink(missing_ok=True)
             df_old = pd.read_parquet(raw_parquet)
             df_all = pd.concat([df_old, df_new], ignore_index=True)
@@ -214,15 +222,20 @@ def run_fetch_cooc(db_path: str = None, full_update: bool = False,
         else:
             df_all = df_new
 
-        df_all.to_parquet(raw_parquet, index=False, compression='snappy')
+        # 原子落盘：先写临时文件、成功后再 os.replace 覆盖目标。
+        # 直接 to_parquet(目标) 一旦中途 OOM/磁盘满/被 kill，会留下截断的半截 parquet，
+        # 下次 read_parquet 抛 ArrowInvalid，用户只能重新全量拉取。
+        tmp_parquet = raw_parquet.with_suffix('.parquet.tmp')
+        df_all.to_parquet(tmp_parquet, index=False, compression='snappy')
+        os.replace(tmp_parquet, raw_parquet)
         # 清理旧 CSV（如有残留）
         raw_csv_legacy.unlink(missing_ok=True)
-        print(f"[Cooc] 共现矩阵已保存: {raw_parquet} ({len(df_all)} 条边)")
+        log.info(f"[Cooc] 共现矩阵已保存: {raw_parquet} ({len(df_all)} 条边)")
         temp_csv.unlink(missing_ok=True)
         progress_file.unlink(missing_ok=True)
         _emit({'type': 'complete', 'new_count': done})
     else:
-        print("[Cooc] 没有新数据")
+        log.info("[Cooc] 没有新数据")
         _emit({'type': 'complete', 'new_count': 0})
 
 
@@ -289,13 +302,15 @@ def run_trim_cooc(db_path: str = None, top_k: int = 50,
         if raw_csv_legacy.exists():
             # 旧 CSV 格式自动迁移
             import pandas as _pd
+            _tmp = raw_parquet.with_suffix('.parquet.tmp')
             _pd.read_csv(raw_csv_legacy, low_memory=False, encoding='utf-8') \
-              .to_parquet(raw_parquet, index=False, compression='snappy')
+              .to_parquet(_tmp, index=False, compression='snappy')
+            os.replace(_tmp, raw_parquet)
             raw_csv_legacy.unlink(missing_ok=True)
-            print(f"[TrimCooc] 旧 CSV 已迁移到 Parquet: {raw_parquet}")
+            log.info(f"[TrimCooc] 旧 CSV 已迁移到 Parquet: {raw_parquet}")
         else:
             msg = "[TrimCooc] 找不到原始共现文件，先运行 fetch-cooc"
-            print(msg)
+            log.info(msg)
             _emit({'type': 'error', 'message': msg})
             return
 
@@ -318,7 +333,7 @@ def run_trim_cooc(db_path: str = None, top_k: int = 50,
     df = pd.read_parquet(raw_parquet)
     if 'source' not in df.columns:
         msg = "[TrimCooc] 格式错误"
-        print(msg)
+        log.info(msg)
         _emit({'type': 'error', 'message': msg})
         return
 
@@ -328,7 +343,7 @@ def run_trim_cooc(db_path: str = None, top_k: int = 50,
 
     df["frequency"] = pd.to_numeric(df["frequency"], errors="coerce").fillna(0.0)
     orig_len = len(df)
-    print(f"[TrimCooc] 原始有向边: {orig_len:,}, D={D:,.0f}")
+    log.info(f"[TrimCooc] 原始有向边: {orig_len:,}, D={D:,.0f}")
     _trim_emit(f'原始有向边: {orig_len:,}')
 
     # 过滤有效行
@@ -340,7 +355,7 @@ def run_trim_cooc(db_path: str = None, top_k: int = 50,
     # 过滤后重新取 post_count（确保长度一致）
     count_target = df["target"].map(tag_pc).to_numpy()
     count_source = df["source"].map(tag_pc).to_numpy()
-    print(f"[TrimCooc] 过滤后: {len(df):,}")
+    log.info(f"[TrimCooc] 过滤后: {len(df):,}")
     _trim_emit(f'过滤后: {len(df):,} 条边')
 
     if _cancelled():
@@ -353,7 +368,7 @@ def run_trim_cooc(db_path: str = None, top_k: int = 50,
     df["count"] = (df["frequency"] * count_source).round().astype(int)
 
     if dry_run:
-        print(f"\n[TrimCooc] Dry-Run (Top-K={top_k})")
+        log.info(f"\n[TrimCooc] Dry-Run (Top-K={top_k})")
         print(f"  {'PMI ≥':<8} {'过滤后边数':<12} {'Top-K后':<12}")
         for t in range(1, 6):
             ft = df[df["pmi"] >= t].copy()
@@ -373,7 +388,7 @@ def run_trim_cooc(db_path: str = None, top_k: int = 50,
     df = df[df["pmi"] >= min_pmi].copy()
     if df.empty:
         msg = "[TrimCooc] PMI 过滤后无数据"
-        print(msg)
+        log.info(msg)
         _emit({'type': 'error', 'message': msg})
         return
 
@@ -401,9 +416,12 @@ def run_trim_cooc(db_path: str = None, top_k: int = 50,
               .reset_index(drop=True))
     result.sort_values("pmi", ascending=False, inplace=True)
     _trim_emit(f'折叠为无向边: {len(result):,} 条')
-    result[["tag_a", "tag_b", "count"]].to_parquet(out_path, index=False, compression="snappy")
+    # 原子落盘：/tag_cooc 每次请求直接读这个文件，截断的半截 parquet 会让共现推荐整体 500
+    _tmp_out = out_path.with_suffix('.parquet.tmp')
+    result[["tag_a", "tag_b", "count"]].to_parquet(_tmp_out, index=False, compression="snappy")
+    os.replace(_tmp_out, out_path)
     msg = f"完成: {len(result):,} 条无向边"
-    print(f"[TrimCooc] {msg} → {out_path}")
+    log.info(f"[TrimCooc] {msg} → {out_path}")
     _emit({'type': 'complete', 'item': msg})
 
 
@@ -430,7 +448,7 @@ def run_trim_artist_cooc(db_path: str = None, top_k: int = 50,
     cdir = _cooc_dir(db_path)
     cooc_path = cdir / 'tag_artist_cooc.parquet'
     if not cooc_path.exists():
-        print("[TrimArtistCooc] 找不到文件，先运行 fetch-artist-cooc")
+        log.info("[TrimArtistCooc] 找不到文件，先运行 fetch-artist-cooc")
         return
 
     import pandas as pd
@@ -441,7 +459,7 @@ def run_trim_artist_cooc(db_path: str = None, top_k: int = 50,
     df = pd.read_parquet(cooc_path)
     required = {"tag", "artist", "artist_post_count", "cooc_count", "frequency"}
     if not required.issubset(set(df.columns)):
-        print(f"[TrimArtistCooc] 缺少列: {required - set(df.columns)}")
+        log.info(f"[TrimArtistCooc] 缺少列: {required - set(df.columns)}")
         return
 
     # 清除旧 PMI/NPMI 列
@@ -459,7 +477,7 @@ def run_trim_artist_cooc(db_path: str = None, top_k: int = 50,
     df = df[valid].copy()
 
     orig_len = len(df)
-    print(f"[TrimArtistCooc] 原始边数: {orig_len:,}")
+    log.info(f"[TrimArtistCooc] 原始边数: {orig_len:,}")
 
     # PMI
     pmi_ratio = (df["frequency"].to_numpy() * D) / df["tag_post_count"].to_numpy()
@@ -473,7 +491,7 @@ def run_trim_artist_cooc(db_path: str = None, top_k: int = 50,
     df["npmi"] = df["npmi"].clip(-1.0, 1.0)
 
     if dry_run:
-        print(f"\n[TrimArtistCooc] Dry-Run (Top-K={top_k})")
+        log.info(f"\n[TrimArtistCooc] Dry-Run (Top-K={top_k})")
         print(f"  {'NPMI ≥':<8} {'过滤后':<12} {'Top-K后':<12} {'画师数':<8}")
         for t in [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]:
             ft = df[df["npmi"] >= t].copy()
@@ -490,7 +508,7 @@ def run_trim_artist_cooc(db_path: str = None, top_k: int = 50,
 
     df = df[df["npmi"] >= min_npmi].copy()
     if df.empty:
-        print("[TrimArtistCooc] NPMI 过滤后无数据")
+        log.warning("[TrimArtistCooc] NPMI 过滤后无数据")
         return
 
     df.sort_values(["artist", "npmi", "cooc_count"], ascending=[True, False, False], inplace=True)
@@ -499,9 +517,11 @@ def run_trim_artist_cooc(db_path: str = None, top_k: int = 50,
     out_cols = ["tag", "artist", "artist_post_count", "cooc_count", "frequency", "pmi", "npmi"]
     df_out = df[out_cols].reset_index(drop=True)
     df_out.sort_values(["tag", "npmi"], ascending=[True, False], inplace=True)
-    df_out.to_parquet(cooc_path, index=False, compression="snappy")
+    _tmp_artist = cooc_path.with_suffix('.parquet.tmp')
+    df_out.to_parquet(_tmp_artist, index=False, compression="snappy")
+    os.replace(_tmp_artist, cooc_path)
 
     n_edges = len(df_out)
     n_art = df_out["artist"].nunique()
     n_tag = df_out["tag"].nunique()
-    print(f"[TrimArtistCooc] 完成: {n_edges:,} 条边, {n_art} artists, {n_tag} tags")
+    log.info(f"[TrimArtistCooc] 完成: {n_edges:,} 条边, {n_art} artists, {n_tag} tags")

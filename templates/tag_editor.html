@@ -43,6 +43,14 @@
         }
         /* 聚焦行常驻显示操作按钮，无需 hover */
         .row-focused .opacity-0 { opacity: 1; }
+        /* 快捷键按键样式（快捷键帮助弹窗用） */
+        .kbd {
+            display: inline-block; min-width: 1.6rem; padding: 0.1rem 0.4rem;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+            line-height: 1.5; text-align: center; color: #475569;
+            background: #f8fafc; border: 1px solid #cbd5e1; border-bottom-width: 2px;
+            border-radius: 0.3rem; white-space: nowrap;
+        }
     </style>
 </head>
 <body class="bg-gray-50 font-sans text-gray-800 min-h-screen flex flex-col">
@@ -70,6 +78,9 @@
                     </a>
                     <a id="link-to-editor" href="/img_editor" class="flex items-center justify-center bg-white hover:bg-gray-50 text-gray-600 font-medium py-1.5 px-3 rounded-lg transition-all text-xs border border-gray-300" onclick="return navigateToEditor()">
                         <i class="fa fa-crop mr-1.5"></i> 图片编辑
+                    </a>
+                    <a id="link-to-prompt-tool" href="/prompt_tool" class="flex items-center justify-center bg-white hover:bg-gray-50 text-gray-600 font-medium py-1.5 px-3 rounded-lg transition-all text-xs border border-gray-300" onclick="navigateAway('/prompt_tool'); return false;">
+                        <i class="fa fa-magic mr-1.5"></i> 提示词优化
                     </a>
                 </div>
             </div>
@@ -110,7 +121,7 @@
                 <div class="w-px h-5 bg-gray-200 mx-1"></div>
                 <!-- 清理组 -->
                 <button id="clear-all" class="flex items-center justify-center bg-danger hover:bg-danger/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs">
-                    <i class="fa fa-trash mr-1.5"></i> 清空所有
+                    <i class="fa fa-trash mr-1.5"></i> 清空
                 </button>
             </div>
         </div>
@@ -168,7 +179,10 @@
                         <div class="w-7 flex-shrink-0"></div>
                         <div class="flex-1 px-2 py-1.5">标签</div>
                         <div class="w-px self-stretch bg-gray-200"></div>
-                        <div class="flex-1 px-2 py-1.5">翻译</div>
+                        <div class="flex-1 px-2 py-1.5 flex items-center justify-between">
+                            <span>翻译</span>
+                            <button class="normal-case text-gray-400 hover:text-primary transition-colors font-normal" onclick="toggleShortcutHelp()" title="键盘快捷键（按 ? 也可打开）"><i class="fa fa-keyboard-o"></i></button>
+                        </div>
                         <div class="w-5 flex-shrink-0"></div>
                         <div class="w-7 flex-shrink-0"></div>
                     </div>
@@ -259,6 +273,35 @@
             <div class="flex justify-end gap-2 mt-5">
                 <button id="confirm-cancel-btn" class="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" onclick="confirmCancel()">取消</button>
                 <button id="confirm-ok-btn" class="px-4 py-2 text-sm text-white rounded-lg transition-colors bg-red-500 hover:bg-red-600" onclick="confirmOk()">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 键盘快捷键帮助弹窗（按 ? 打开）。快捷键不写出来就等于不存在。 -->
+    <div id="shortcut-modal" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center hidden" onclick="if(event.target===this)toggleShortcutHelp()">
+        <div class="bg-white rounded-xl shadow-xl w-[520px] p-6">
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="text-base font-semibold text-gray-800"><i class="fa fa-keyboard-o text-primary mr-1.5"></i>键盘快捷键</h3>
+                <button class="text-gray-400 hover:text-gray-600 transition-colors" onclick="toggleShortcutHelp()"><i class="fa fa-times"></i></button>
+            </div>
+            <div class="space-y-1.5 text-sm">
+                <p class="text-xs text-gray-400 mb-2">在标签列表里直接用，不必先点某个输入框。</p>
+                <div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 items-center">
+                    <kbd class="kbd">↑</kbd><span class="text-gray-600">上一条标签（在输入框里也能用）</span>
+                    <kbd class="kbd">↓</kbd><span class="text-gray-600">下一条标签</span>
+                    <kbd class="kbd">Enter</kbd><span class="text-gray-600">在输入框里 = 另起一条新标签</span>
+                    <kbd class="kbd">Backspace</kbd><span class="text-gray-600">输入框为空时 = 删掉这条并退回上一条</span>
+                    <kbd class="kbd">←</kbd><span class="text-gray-600">上一张图片</span>
+                    <kbd class="kbd">→</kbd><span class="text-gray-600">下一张图片</span>
+                    <kbd class="kbd">A</kbd><span class="text-gray-600">新增标签</span>
+                    <kbd class="kbd">S</kbd><span class="text-gray-600">保存当前图片的标签</span>
+                    <kbd class="kbd">J</kbd> / <kbd class="kbd">K</kbd><span class="text-gray-600">下一张 / 上一张图片</span>
+                    <kbd class="kbd">Esc</kbd><span class="text-gray-600">关闭当前弹窗</span>
+                    <kbd class="kbd">?</kbd><span class="text-gray-600">显示/隐藏本表</span>
+                </div>
+            </div>
+            <div class="flex justify-end mt-5">
+                <button class="px-4 py-2 text-sm bg-primary hover:bg-primary/90 text-white rounded-lg transition-colors" onclick="toggleShortcutHelp()">知道了</button>
             </div>
         </div>
     </div>
@@ -502,6 +545,16 @@
                     <span id="td-tag-groups" class="text-sm text-gray-700"></span>
                 </div>
             </div>
+            <!-- 未收录提示：主库没有这个标签时，翻译列空白是必然的，而不是显示故障。
+                 不给提示的话用户会反复点「翻译并保存」然后收到 404，无从判断该怎么办。 -->
+            <div id="td-not-collected" class="hidden mx-6 mt-3 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800 leading-relaxed">
+                <i class="fa fa-info-circle mr-1"></i>
+                主标签库未收录这个标签，因此没有翻译可显示，也不能在主库上翻译（会 404）。<br>
+                它不是 Danbooru 标签（自造标签、或无意义的词），可以：
+                直接删掉它 · 或者
+                <a id="td-new-tag-link" href="/" onclick="gotoNewTagEntry(); return false;" class="underline font-medium hover:text-amber-900">到 Danbooru 查询页的新标签入口</a>
+                录入它并翻译，之后这列就会显示中文名。
+            </div>
             <div class="px-6 py-3 border-b border-gray-100 flex gap-2">
                 <button id="td-tab-en" class="px-3 py-1 text-sm bg-primary text-white rounded-lg" onclick="switchDetailTab('en')">英文 Wiki</button>
                 <button id="td-tab-zh" class="px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg" onclick="switchDetailTab('zh')">中文 Wiki</button>
@@ -523,7 +576,10 @@
                 <h3 class="text-base font-semibold text-gray-800">
                     <i class="fa fa-file-text-o text-amber-500 mr-1.5"></i>自然语言描述（.nl.txt）
                 </h3>
-                <button class="text-gray-400 hover:text-gray-600 transition-colors" onclick="closeNlModal()"><i class="fa fa-times"></i></button>
+                <div class="flex items-center gap-3">
+                    <span id="nl-meta" class="text-xs text-gray-400"></span>
+                    <button class="text-gray-400 hover:text-gray-600 transition-colors" onclick="closeNlModal()"><i class="fa fa-times"></i></button>
+                </div>
             </div>
             <div class="flex-grow min-h-0 p-5">
                 <textarea id="nl-textarea" rows="8"
@@ -950,7 +1006,14 @@
                     + '<input class="flex-1 min-w-0 px-2 py-1.5 text-sm border-0 bg-transparent focus:outline-none focus:bg-blue-50/80 rounded-sm transition-colors" '
                     + 'value="' + escapeHtml(item.tag) + '" oninput="currentTags[' + i + '].tag=this.value" onchange="onTagChanged(' + i + ')" onfocus="focusRow(' + i + ')">'
                     + '<div class="w-px self-stretch bg-gray-200"></div>'
-                    + '<div class="flex-1 min-w-0 px-2 py-1.5 text-sm text-gray-500 truncate" title="' + escapeHtml(item.translation || '') + '">' + escapeHtml(item.translation || '') + '</div>'
+                    // 翻译列留空时给一个**可点击**的占位，而不是留白：
+                    // 主库未收录的标签（masterpiece 等 meta 类、非 Danbooru 标签）
+                    // 在任何地方都没有翻译可显示，纯留白会让用户以为是显示 bug。
+                    // 点一下直接开该标签的详情弹窗，那里能录入用户新标签。
+                    + (item.translation
+                        ? '<div class="flex-1 min-w-0 px-2 py-1.5 text-sm text-gray-500 truncate" title="' + escapeHtml(item.translation) + '">' + escapeHtml(item.translation) + '</div>'
+                        : '<div class="flex-1 min-w-0 px-2 py-1.5 text-sm cursor-pointer group/tr" title="无翻译 —— 点击查看详情 / 录入用户新标签" onclick="openTagDetail(' + i + ')">'
+                          + '<span class="text-gray-300 italic group-hover/tr:text-primary transition-colors">无翻译，点击处理</span></div>')
                     + '<div class="w-5 flex flex-col flex-shrink-0">'
                     + '<button class="w-5 h-3.5 p-0 border-0 text-gray-500 hover:text-primary transition-colors leading-none opacity-0 group-hover:opacity-100" onclick="moveTagAt(' + i + ', -1)" title="上移"><i class="fa fa-caret-up"></i></button>'
                     + '<button class="w-5 h-3.5 p-0 border-0 text-gray-500 hover:text-primary transition-colors leading-none opacity-0 group-hover:opacity-100" onclick="moveTagAt(' + i + ', 1)" title="下移"><i class="fa fa-caret-down"></i></button>'
@@ -1000,14 +1063,126 @@
             renderTags();
         }
 
+        function toggleShortcutHelp() {
+            document.getElementById('shortcut-modal').classList.toggle('hidden');
+        }
+
+        // === 键盘快捷键 ===
+        // 打标工作流是高度重复的：删掉几个错标签、补几个、切下一张。
+        // 全靠鼠标的话每张图都要在列表和按钮之间来回移动，几十张就明显累。
+        // 这里只加最高频的几个，并且严格避开会破坏输入的元素。
+        function _isTextEntry(el) {
+            if (!el) return false;
+            const t = el.tagName;
+            // 标签输入框本身也是 INPUT，但那里的按键要交给它自己处理（详见下方各处判断）
+            return t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT' || el.isContentEditable;
+        }
+
+        function _inTagRowInput(el) {
+            const row = el && el.closest ? el.closest('[data-row]') : null;
+            return !!(row && el.tagName === 'INPUT');
+        }
+
+        // 弹窗是否打开：不手写 id 清单——漏一个就会在被遮挡的页面上触发快捷键
+        // （比如统计弹窗开着时按 A，用户看不到却往标签列表里插了一条空标签）。
+        // 所有弹窗都是「fixed inset-0 ... hidden」的遮罩层，按这个特征统一检测。
+        function _anyModalOpen() {
+            const overlays = document.querySelectorAll('div.fixed.inset-0');
+            for (let i = 0; i < overlays.length; i++) {
+                if (!overlays[i].classList.contains('hidden')) return true;
+            }
+            return false;
+        }
+
+        document.addEventListener('keydown', function(e) {
+            // 快捷键帮助自己开着时，? 和 Esc 要能关掉它，其余按键不接管
+            const helpOpen = !document.getElementById('shortcut-modal').classList.contains('hidden');
+            if (helpOpen) {
+                if (e.key === 'Escape' || e.key === '?') {
+                    e.preventDefault();
+                    toggleShortcutHelp();
+                }
+                return;
+            }
+            // 其它弹窗打开时不接管按键（各自有自己的 Esc 处理）
+            if (_anyModalOpen()) return;
+            // 带修饰键的组合留给浏览器（Ctrl+S 之类不抢）
+            if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+            const inRowInput = _inTagRowInput(e.target);
+
+            // Ctrl/Cmd 之外的普通按键：在输入框里只处理「行内导航」，
+            // 其余（字母、数字）一律放行，否则用户没法打字。
+            if (_isTextEntry(e.target) && !inRowInput) return;
+
+            const rowIdx = inRowInput
+                ? parseInt(e.target.closest('[data-row]').getAttribute('data-row'), 10) : -1;
+
+            // ↑/↓ 在标签行之间移动焦点（在输入框里也能用，这是最关键的一个）
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                if (currentTags.length === 0) return;
+                e.preventDefault();
+                let next;
+                if (rowIdx < 0) {
+                    next = e.key === 'ArrowDown' ? 0 : currentTags.length - 1;
+                } else {
+                    next = rowIdx + (e.key === 'ArrowDown' ? 1 : -1);
+                    if (next < 0 || next >= currentTags.length) return;
+                }
+                focusRow(next);
+                const r = document.querySelector('[data-row="' + next + '"]');
+                if (r) { const inp = r.querySelector('input'); if (inp) { inp.focus(); inp.select(); } }
+                return;
+            }
+
+            // Enter 在输入框里 = 另起一行新标签（快速连打）
+            if (e.key === 'Enter' && inRowInput) {
+                e.preventDefault();
+                addTag();
+                return;
+            }
+
+            // 输入框为空时按 Backspace = 删掉这一行并回到上一行（列表编辑器的惯例）
+            if (e.key === 'Backspace' && inRowInput && e.target.value === '') {
+                e.preventDefault();
+                const target = rowIdx > 0 ? rowIdx - 1 : 0;
+                removeTag(rowIdx);
+                if (currentTags.length) {
+                    focusRow(target);
+                    const r = document.querySelector('[data-row="' + target + '"]');
+                    if (r) { const inp = r.querySelector('input'); if (inp) { inp.focus(); inp.select(); } }
+                }
+                return;
+            }
+
+            // 以下都是「不在输入框里」时的全局快捷键
+            if (inRowInput) return;
+            switch (e.key) {
+                case 'a': case 'A':          // 新增标签
+                    e.preventDefault(); addTag(); break;
+                case 'j': case 'J':          // 下一张图
+                    e.preventDefault(); navigateNext(); break;
+                case 'k': case 'K':          // 上一张图
+                    e.preventDefault(); navigatePrev(); break;
+                case 's': case 'S':          // 保存
+                    e.preventDefault(); saveCaption().catch(function(){}); break;
+                case '?':                    // 快捷键帮助
+                    e.preventDefault(); toggleShortcutHelp(); break;
+            }
+        });
+
         // 标签被修改后，自动从缓存查找新标签的翻译。
-        // 序列守卫 _tagChangeSeq：用户快速修改同一标签时（onchange 可在 blur 前被程序触发），
-        // 丢弃过期响应，避免旧查询结果覆盖新的翻译。
-        let _tagChangeSeq = 0;
+        //
+        // 序列守卫**必须按行**：早先是一个全局 _tagChangeSeq，语义是「最后一次修改获胜」，
+        // 于是快速连续编辑第 2、3 行时，第 2 行的响应因 seq 过期被丢弃，
+        // 而它的翻译列再也不会被填——那行会永久停在「无翻译」，看起来像库里没有这个词。
+        // 改成 Map<行号, seq>：只丢弃**同一行**的过期响应。
+        const _tagChangeSeq = new Map();
         function onTagChanged(index) {
             const tag = currentTags[index].tag.trim().toLowerCase();
-            if (!tag) { currentTags[index].translation = ''; return; }
-            const seq = ++_tagChangeSeq;
+            if (!tag) { currentTags[index].translation = ''; _setTranslationCell(index, ''); return; }
+            const seq = (_tagChangeSeq.get(index) || 0) + 1;
+            _tagChangeSeq.set(index, seq);
             fetch('/lookup_cache', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -1015,22 +1190,88 @@
             })
             .then(r => r.json())
             .then(data => {
-                if (seq !== _tagChangeSeq) return;  // 过期响应，丢弃
-                // 该行可能已被删除/重排，二次校验 index 仍有效
-                if (index >= currentTags.length) return;
+                if (_tagChangeSeq.get(index) !== seq) return;  // 同一行又改了，丢弃本次
+                if (index >= currentTags.length) return;       // 行已被删除
+                // 行的下标可能已被重排/删除，二次校验标签没变
+                if (currentTags[index].tag.trim().toLowerCase() !== tag) return;
                 const tr = (data.translations && data.translations[0]) || '';
                 currentTags[index].translation = tr;
-                // 更新对应的翻译显示
-                const row = document.querySelector('[data-row="' + index + '"]');
-                if (row) {
-                    const div = row.querySelector('div.flex-1');
-                    if (div) div.textContent = tr;
-                }
+                _setTranslationCell(index, tr);
             });
         }
 
+        // 翻译单元格的统一写入口。
+        // 单元格有两种结构：有翻译时是「纯文本 div」，无翻译时是「div + 占位 span」
+        // （占位可点击跳详情）。旧代码一律 `div.textContent = tr`，
+        // 那会把占位 span 连它的 onclick 一起抹掉——补出翻译后再清空标签，
+        // 这一格就永久失去点击入口。这里按有无翻译重建整格。
+        function _setTranslationCell(index, tr) {
+            const row = document.querySelector('[data-row="' + index + '"]');
+            if (!row) return;
+            const div = row.querySelector('div.flex-1');
+            if (!div) return;
+            if (tr) {
+                div.className = 'flex-1 min-w-0 px-2 py-1.5 text-sm text-gray-500 truncate';
+                div.title = tr;
+                div.textContent = tr;
+                div.removeAttribute('onclick');
+            } else {
+                div.className = 'flex-1 min-w-0 px-2 py-1.5 text-sm cursor-pointer group/tr';
+                div.title = '无翻译 —— 点击查看详情 / 录入用户新标签';
+                div.setAttribute('onclick', 'openTagDetail(' + index + ')');
+                div.innerHTML = '<span class="text-gray-300 italic group-hover/tr:text-primary transition-colors">无翻译，点击处理</span>';
+            }
+        }
+
+        // 补齐翻译列：只补「标签非空但翻译为空」的行。
+        // 场景：某些标签的翻译是在本次页面加载之后才写进库的（例如在 Danbooru 页给新标签补了翻译，
+        // 或刚手动敲进一个库里已有的标签但还没触发 onchange），翻译列会一直空着。
+        // 保存本身不刷新翻译，用户看到的就是"库里明明有翻译却不显示"。
+        // 只查库（/lookup_cache 不触发 LLM），失败静默——补齐是附加效果，不能影响保存结果。
+        let _refillSeq = 0;
+        function refillTranslations(tagsRef) {
+            if (currentTags !== tagsRef) return;  // 保存期间已切图，交给 loadCaption
+            const indexes = [], query = [];
+            currentTags.forEach((item, i) => {
+                const tag = (item.tag || '').trim();
+                if (tag && !item.translation) { indexes.push(i); query.push(tag); }
+            });
+            if (!query.length) return;
+
+            const seq = ++_refillSeq;
+            const keyOf = t => (t || '').trim().toLowerCase();
+            const sent = query.map(keyOf);
+            fetch('/lookup_cache', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({tags: query})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (seq !== _refillSeq) return;       // 有更新的一次补齐在途
+                if (currentTags !== tagsRef) return;  // 期间切了图
+                const translations = data.translations || [];
+                indexes.forEach((index, k) => {
+                    const tr = translations[k] || '';
+                    if (!tr || index >= currentTags.length) return;
+                    // 二次校验：这一行可能已被编辑或被 onTagChanged 填过，只写仍是空白的原行
+                    if (currentTags[index].translation) return;
+                    if (keyOf(currentTags[index].tag) !== sent[k]) return;
+                    currentTags[index].translation = tr;
+                    _setTranslationCell(index, tr);
+                });
+            })
+            .catch(() => {});
+        }
+
+        // 先 String(...) 归一化再替换：调用点有的是后端原样回传的字段（data.error、
+        // it.old/it.new），值为 undefined 或数字时 .replace 会抛 TypeError 并把整个
+        // 渲染流程打断（表格一片空白），比转义失败本身更难排查。
+        // & 必须第一个替换，否则后续插入的实体（&quot; 等）会被二次转义。
         function escapeHtml(str) {
-            return str.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+            return String(str == null ? '' : str)
+                .replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
+                .replace(/</g,'&lt;').replace(/>/g,'&gt;');
         }
 
         // === 标签详情（wiki 展示 + 翻译）===
@@ -1052,6 +1293,7 @@
             document.getElementById('td-tag-groups-wrap').classList.add('hidden');
             document.getElementById('tag-detail-body').innerHTML = '<i class="fa fa-spinner fa-spin mr-1"></i>加载中...';
             document.getElementById('td-translate-row').classList.add('hidden');
+            document.getElementById('td-not-collected').classList.add('hidden');  // 清掉上一个标签的残留
             document.getElementById('tag-detail-modal').classList.remove('hidden');
 
             fetch('/tag_detail/' + encodeURIComponent(tag))
@@ -1112,6 +1354,18 @@
                         tgWrap.classList.remove('hidden');
                     } else {
                         tgWrap.classList.add('hidden');
+                    }
+                    // 主库未收录：给出明确原因 + 出路。
+                    // /tag_detail 对未收录标签返回 in_main_db=false 且 post_count/category 为空，
+                    // 旧代码把这些字段一律渲染成「隐藏/暂无」，用户只看到「中文名(暂无)、无 wiki」，
+                    // 无法区分「数据库坏了」和「这个标签本来就不在库里」。
+                    const notColl = document.getElementById('td-not-collected');
+                    if (data.in_main_db === false) {
+                        document.getElementById('td-new-tag-link').href =
+                            '/#newtag=' + encodeURIComponent(_detailState.tag);
+                        notColl.classList.remove('hidden');
+                    } else {
+                        notColl.classList.add('hidden');
                     }
                     switchDetailTab('en');
                 })
@@ -1445,10 +1699,12 @@
             btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-1"></i>翻译中...';
             body.innerHTML = '<i class="fa fa-spinner fa-spin mr-1"></i>正在翻译，请稍候...';
 
-            fetch('/translate_tag_wiki', {
+            // 深度翻译（与 Danbooru 查询页的「深度翻译」同一路由）：
+            // 后端按标签自身数据判层级，翻译中文名 + 中文 wiki 并写回主库
+            fetch('/translate_single_tag', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({tag: _detailState.tag, en_wiki: _detailState.enWiki})
+                body: JSON.stringify({tag: _detailState.tag})
             })
             .then(r => r.json())
             .then(data => {
@@ -1478,6 +1734,8 @@
             const seq = ++loadSeq;
             currentTags = [];
             focusedRowIndex = -1; // 切换图片重置选中行
+            // 清掉上一张图各行的翻译序列（键是行号，跨图复用会误判「同一行」）
+            _tagChangeSeq.clear();
             renderTags();
             fetch('/get_caption/' + encodeURIComponent(imageName))
                 .then(r => r.json())
@@ -1508,12 +1766,14 @@
                     const nlBtn = document.getElementById('btn-nl');
                     nlTextarea.value = nlText;
                     nlBtn.disabled = !nlText;
+                    _updateNlMeta(nlText, name);
                 })
                 .catch(() => { if (seq === loadSeq) showNotification('加载标签文件失败', 'error'); });
         }
 
         // === 自然语言描述弹窗 ===
         function openNlModal() {
+            _updateNlMeta(document.getElementById('nl-textarea').value.trim());
             document.getElementById('nl-modal').classList.remove('hidden');
         }
         function closeNlModal() {
@@ -1542,17 +1802,34 @@
             document.getElementById('btn-nl').disabled = !nlText;
         }
 
+        // 弹窗标题右侧的元信息：文件名字 + 字数。
+        // 目的不是装饰——没有 .nl.txt 时按钮是置灰的，用户点不进来也看不到任何解释；
+        // 有了这行，从别处（如 /auto_caption_vlm 跑完后的提示）回到这张图时，
+        // 能确认「当前看的是哪张图、描述是不是真的空的」。
+        function _updateNlMeta(nlText, imageName) {
+            const el = document.getElementById('nl-meta');
+            if (!el) return;
+            const name = imageName || currentImageName || '';
+            const len = (nlText || '').length;
+            el.textContent = name
+                ? name + (len ? ' · ' + len + ' 字符' : ' · 尚无描述')
+                : (len ? len + ' 字符' : '');
+        }
+
         // === 保存自然语言描述 ===
         function saveNlCaption() {
             const textarea = document.getElementById('nl-textarea');
             const btn = document.getElementById('btn-save-nl');
             const content = textarea.value.trim();
-            if (!currentImgName) { showNotification('没有选中图片', 'warning'); return Promise.reject(); }
+            // 变量名是 currentImageName（见文件上方 let 声明）。原先写成 currentImgName，
+            // 该标识符从未声明 → 每次保存自然语言描述都直接 ReferenceError，
+            // 请求根本发不出去，用户只看到「保存请求失败」。
+            if (!currentImageName) { showNotification('没有选中图片', 'warning'); return Promise.reject(); }
 
             btn.disabled = true;
             btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> 保存中...';
 
-            return fetch('/save_nl_caption/' + encodeURIComponent(currentImgName), {
+            return fetch('/save_nl_caption/' + encodeURIComponent(currentImageName), {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({content: content})
@@ -1564,6 +1841,7 @@
                     if (data.success) {
                         savedNlCaption = content;
                         _updateNlBar();
+                        _updateNlMeta(content);
                         showNotification('自然语言描述已保存', 'success');
                         return data;
                     } else {
@@ -1573,7 +1851,7 @@
                 })
                 .catch(err => {
                     btn.disabled = false;
-                    btn.innerHTML = '<i class="fa fa-save"></i> 保存描述';
+                    btn.innerHTML = '<i class="fa fa-save"></i> 保存';
                     if (err.message !== '保存失败') showNotification('保存请求失败', 'error');
                     throw err;
                 });
@@ -1625,6 +1903,8 @@
                         // 若已导航离开，该图的保存仍会落盘（正确），但不干扰当前查看的新图。
                         if (currentIndex === saveIndex) {
                             savedTags = content;
+                            // 保存成功后补齐翻译列：库里有翻译但页面上空白的行（多为保存前后才写入的翻译）
+                            refillTranslations(savedCurrentTags);
                         }
                         showNotification('保存成功', 'success');
                         return content;  // resolve 成功
@@ -1706,7 +1986,12 @@
             .then(r => r.json())
             .then(data => {
                 if (data.error) { showNotification(data.error, 'error'); return; }
-                showNotification('已为 ' + data.updated + ' 个文件添加触发词', 'success');
+                // 汇报三段：新增 / 已有该词跳过 / 失败。
+                // 幂等后重复点击会报「跳过 N」，用户才能确认是「本来就加过」而不是「没生效」。
+                let msg = '已为 ' + data.updated + ' 个文件添加触发词';
+                if (data.skipped) msg += '，' + data.skipped + ' 个已含该触发词（跳过）';
+                if (data.errors) msg += '，' + data.errors + ' 个失败';
+                showNotification(msg, data.errors ? 'warning' : 'success');
                 closePrepend();
                 setTimeout(refreshCurrentImage, 1000);
             })
@@ -2202,6 +2487,15 @@
             document.getElementById('confirm-modal').classList.remove('hidden');
         }
 
+        // 详情弹窗里「主库未收录」提示的跳转：带 #newtag=<标签名> 去 Danbooru 页，
+        // 那边会自动打开新标签弹窗并预填标签名（见 danbooru_wiki.html 的 _applyHashAction）。
+        // 走 navigateAway 而不是直接 window.location：本页有未保存修改时它负责弹确认框，
+        // 直接跳会静默丢掉用户刚编辑的标签。
+        function gotoNewTagEntry() {
+            navigateAway('/#newtag=' + encodeURIComponent(_detailState.tag || ''));
+            return false;
+        }
+
         function navigateToEditor() {
             const target = (currentIndex >= 0 && visibleImages[currentIndex])
                 ? '/img_editor#' + encodeURIComponent(visibleImages[currentIndex])
@@ -2329,45 +2623,59 @@
             const replaceTo = document.getElementById('ts-replace-to').value.trim();
             if (!replaceFind) { showNotification('请输入替换查找内容', 'warning'); return; }
 
-            const matchedTags = allTagStats.filter(s => s.tag === replaceFind).map(s => s.tag);
-            if (!matchedTags.length) { showNotification('没有匹配的标签', 'info'); return; }
+            // 后端是整项精确匹配，所以最多只有一个标签会命中；这里去掉原先的循环
+            // （循环体对同一 find 重复请求 N 次，每次都全目录扫一遍，纯属浪费）。
+            const matched = allTagStats.some(s => s.tag === replaceFind);
+            if (!matched) { showNotification('没有匹配的标签（整项精确匹配，不会命中子串）', 'info'); return; }
 
-            const btn = document.getElementById('ts-replace-btn');
-            btn.disabled = true; btn.textContent = '替换中...';
+            // 两个需要用户确认的语义，先弹确认框再执行
+            const isEmptyReplace = !replaceTo;
+            const isMulti = /[,，]/.test(replaceTo);
+            const warnParts = [];
+            if (isEmptyReplace) warnParts.push('替换内容为空 —— 这会**删除**所有匹配的标签');
+            if (isMulti) warnParts.push('替换内容含逗号 —— 一个标签会被展开成多个标签');
 
-            const saveP = isDirty() ? saveCaption() : Promise.resolve();
-            saveP.then(() => {
-                let chain = Promise.resolve({replaced: 0, updated_files: 0});
-                for (const tag of matchedTags) {
-                    chain = chain.then(acc => {
-                        return fetch('/find_replace', {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({find: tag, replace: replaceTo})
-                        })
-                        .then(r => r.json())
-                        .then(data => ({
-                            replaced: acc.replaced + (data.replaced || 0),
-                            updated_files: acc.updated_files + (data.updated_files || 0)
-                        }));
-                    });
-                }
-                return chain;
-            })
-            .then(acc => {
-                showNotification('替换完成：' + acc.replaced + ' 处，涉及 ' + acc.updated_files + ' 个文件', 'success');
-                setTimeout(refreshCurrentImage, 1000);
-                // 磁盘标签已变更：刷新弹窗统计表（旧 allTagStats 已失效），并清空查找框
-                // （被替换的标签已不存在，保留旧查找词会让用户误以为还能再替换）
-                document.getElementById('ts-replace-find').value = '';
-                document.getElementById('ts-replace-to').value = '';
-                document.getElementById('ts-replace-btn').disabled = true;
-                reloadTagStats().catch(() => showNotification('统计刷新失败，请重开弹窗', 'warning'));
-                // 若主页面处于过滤状态，替换可能改变命中集 → 重新过滤保持视图一致
-                if (filterActive) applyFilter();
-            })
-            .catch(() => showNotification('替换失败', 'error'))
-            .finally(() => { btn.textContent = '替换匹配项'; updateReplaceBtnState(); });
+            const run = () => {
+                const btn = document.getElementById('ts-replace-btn');
+                btn.disabled = true; btn.textContent = '替换中...';
+                const saveP = isDirty() ? saveCaption() : Promise.resolve();
+                return saveP
+                    .then(() => fetch('/find_replace', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({find: replaceFind, replace: replaceTo})
+                    }))
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.error) { showNotification(data.error, 'error'); return; }
+                        let msg = '替换完成：' + data.replaced + ' 处，涉及 ' + data.updated_files + ' 个文件';
+                        if (data.errors) msg += '；' + data.errors + ' 个文件失败（详见服务端日志）';
+                        showNotification(msg, data.errors ? 'warning' : 'success');
+                        setTimeout(refreshCurrentImage, 1000);
+                        // 磁盘标签已变更：刷新弹窗统计表（旧 allTagStats 已失效），并清空查找框
+                        // （被替换的标签已不存在，保留旧查找词会让用户误以为还能再替换）
+                        document.getElementById('ts-replace-find').value = '';
+                        document.getElementById('ts-replace-to').value = '';
+                        document.getElementById('ts-replace-btn').disabled = true;
+                        reloadTagStats().catch(() => showNotification('统计刷新失败，请重开弹窗', 'warning'));
+                        // 若主页面处于过滤状态，替换可能改变命中集 → 重新过滤保持视图一致
+                        if (filterActive) applyFilter();
+                    })
+                    .catch(() => showNotification('替换失败', 'error'))
+                    .finally(() => { btn.textContent = '替换匹配项'; updateReplaceBtnState(); });
+            };
+
+            if (warnParts.length) {
+                showConfirm({
+                    title: '确认替换',
+                    message: warnParts.join('；') + '。确定继续？',
+                    okText: '继续替换',
+                    cancelText: '取消',
+                    onOk: run
+                });
+            } else {
+                run();
+            }
         }
 
         // === 清空文件（弹窗选择模式） ===

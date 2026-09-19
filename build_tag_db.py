@@ -19,7 +19,11 @@ import sqlite3
 from pathlib import Path
 
 from config import get_tag_db_config
+import logging
 
+
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tags (
@@ -42,6 +46,20 @@ CREATE TABLE IF NOT EXISTS fetch_state (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT ''
 );
+-- 用户新标签表：打标过程中遇到、主标签库（tags）未收录的标签，由用户手动维护。
+-- 与爬取的 tags 表独立：同步/重建 tags 不会影响本表；翻译结果存本表自己的字段。
+-- 两表存在相同标签时以主表（tags）为准（查询/翻译优先主表）。
+CREATE TABLE IF NOT EXISTS user_tags (
+    name        TEXT PRIMARY KEY,            -- 标签名（规范化 key：strip+小写+空格→下划线）
+    cn_name     TEXT NOT NULL DEFAULT '',    -- 中文名（翻译结果或手动编辑）
+    cn_wiki     TEXT NOT NULL DEFAULT '',    -- 中文 wiki（深度翻译生成）
+    created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    updated_at  TEXT NOT NULL DEFAULT ''     -- 最后修改时间（翻译/编辑时更新）
+);
+-- cn_name 首段反查索引：prompt_tool 的 _batch_cn_first_segment 按「cn_name = 词」
+-- 或「cn_name 以 词+逗号 开头」批量取候选。无索引时是 SCAN tags（5 词 ~110ms）；
+-- 有了它，多词 OR 可走 MULTI-INDEX OR 各自做范围扫描（同条件 0.09ms）。
+CREATE INDEX IF NOT EXISTS idx_tags_cn_name ON tags(cn_name);
 """
 
 # search_tags 全文索引：FTS5 trigram 虚拟表，对 name(规范化) + other_names + cn_name 做子串匹配。
@@ -125,7 +143,8 @@ def _has_legacy_columns(conn):
 def _migrate_to_target_schema(conn):
     """把任意旧 schema 迁移为当前目标结构
     （name/cn_name/en_wiki/cn_wiki/other_names/category/post_count/updated_at/nsfw）。
-    保留已有数据，丢弃其他列；缺失的列补默认值。无事务包裹：调用方负责 commit。
+    保留已有数据，丢弃其他列；缺失的列补默认值。迁移前先整库备份到
+    `<db>.premigrate.bak`，迁移失败时可由用户手动还原。调用方负责 commit。
     若已是目标 schema 则无操作。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(tags)").fetchall()}
     target = {'name', 'cn_name', 'en_wiki', 'cn_wiki', 'other_names', 'category', 'post_count', 'updated_at', 'nsfw', 'cn_name_locked', 'cn_wiki_locked'}
@@ -146,7 +165,22 @@ def _migrate_to_target_schema(conn):
     # cn_name_locked / cn_wiki_locked 缺失时补默认值
     select_parts.append('cn_name_locked' if 'cn_name_locked' in cols else '0 AS cn_name_locked')
     select_parts.append('cn_wiki_locked' if 'cn_wiki_locked' in cols else '0 AS cn_wiki_locked')
+    # 迁移前备份：executescript 内部无法回滚，DROP 与 RENAME 之间失败（磁盘满/被 kill）
+    # 会留下「无 tags 表、只有 tags_new」的库，tags 数据全丢且无法自愈。
+    _backup = str(conn.execute("PRAGMA database_list").fetchone()[2]) + '.premigrate.bak'
+    try:
+        with conn:
+            _dst = sqlite3.connect(_backup)
+            try:
+                conn.backup(_dst)
+            finally:
+                _dst.close()
+        log.info(f"[BuildTagDB] 迁移前已备份: {_backup}")
+    except Exception as e:
+        log.error(f"[BuildTagDB] 迁移前备份失败，中止迁移: {e}")
+        raise
     conn.executescript(f"""
+        DROP TABLE IF EXISTS tags_new;
         CREATE TABLE tags_new (
             name        TEXT PRIMARY KEY,
             cn_name     TEXT NOT NULL DEFAULT '',
@@ -182,6 +216,82 @@ def _table_exists(conn, table_name):
     return conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name = ?", (table_name,)
     ).fetchone() is not None
+
+
+def normalize_tag_key(tag):
+    """规范化标签 key：strip + 小写 + 空格→下划线（与 tags.name / lookup_tags 口径一致）。"""
+    return (tag or '').strip().lower().replace(' ', '_')
+
+
+# ── 用户新标签表（user_tags）─────────────────────────────────────────────
+# 与爬取的 tags 表独立：CSV/同步流程不触碰本表。翻译结果存本表字段。
+
+def list_user_tags(conn):
+    """读取全部用户新标签，按名称排序。返回 [{name, cn_name, cn_wiki, created_at, updated_at}]。
+    不依赖 conn.row_factory（build_tag_db.get_conn 未设置 Row）。"""
+    cols = ('name', 'cn_name', 'cn_wiki', 'created_at', 'updated_at')
+    rows = conn.execute(
+        "SELECT name, cn_name, cn_wiki, created_at, updated_at FROM user_tags ORDER BY name"
+    ).fetchall()
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def lookup_user_tags(conn, tags):
+    """批量查用户新标签的翻译。返回 {name: {'cn_name', 'cn_wiki'}}（key 为规范化 name）。
+
+    供显示链路（标签编辑页翻译列 / 标签统计 / 标签详情）在主表无中文名时回落补齐。
+    只返回翻译字段——user_tags 没有 en_wiki / category 等主表字段，调用方按缺失处理。
+    分批查询原因同 lookup_tags（SQLITE_MAX_VARIABLE_NUMBER）。"""
+    if not tags:
+        return {}
+    norm_list = []
+    seen = set()
+    for t in tags:
+        n = normalize_tag_key(t)
+        if n and n not in seen:
+            seen.add(n)
+            norm_list.append(n)
+
+    result = {}
+    BATCH = 500
+    for i in range(0, len(norm_list), BATCH):
+        chunk = norm_list[i:i+BATCH]
+        placeholders = ','.join('?' * len(chunk))
+        rows = conn.execute(
+            f"SELECT name, cn_name, cn_wiki FROM user_tags WHERE name IN ({placeholders})",
+            chunk
+        ).fetchall()
+        for r in rows:
+            result[r[0]] = {'cn_name': r[1], 'cn_wiki': r[2]}
+    return result
+
+
+def upsert_user_tag(conn, name, cn_name=None, cn_wiki=None):
+    """新增/更新用户新标签。name 为规范化 key。
+    cn_name / cn_wiki 为 None 时保持原值不变（新增时默认空串）。
+    更新时刷新 updated_at。"""
+    fields = []
+    params = []
+    if cn_name is not None:
+        fields.append("cn_name = ?")
+        params.append(cn_name)
+    if cn_wiki is not None:
+        fields.append("cn_wiki = ?")
+        params.append(cn_wiki)
+    set_clause = ", ".join(fields + ["updated_at = datetime('now', 'localtime')"])
+    conn.execute(f"""
+        INSERT INTO user_tags (name, cn_name, cn_wiki, updated_at)
+        VALUES (?, ?, ?, datetime('now', 'localtime'))
+        ON CONFLICT(name) DO UPDATE SET {set_clause}
+    """, [name, cn_name or '', cn_wiki or ''] + params)
+    conn.commit()
+
+
+def delete_user_tag(conn, name):
+    """删除用户新标签。返回是否命中。"""
+    cur = conn.execute("DELETE FROM user_tags WHERE name = ?", (name,))
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def get_conn(db_path=None):
@@ -398,23 +508,41 @@ def set_fetch_state(conn, key, value, commit=True):
 def lookup_tag_by_cn(conn, cn_name):
     """反向查找：中文翻译 → 英文标签名（中译英用）。返回英文 name 或空字符串。
     匹配 cn_name 的第一个逗号分隔项（cn_name 可能是"蓝发,蓝色头发"多词形式）。
-    无 post_count 后改按 name 字母序取首条。"""
+
+    写法用**范围比较而非 LIKE**（同 _batch_cn_first_segment 的理由）：
+    `cn_name LIKE '词,%'` 是非前缀通配，SQLite 的 LIKE 优化不适用（cn_name 是
+    BINARY 排序规则，LIKE 默认大小写不敏感，索引没法直接用于 LIKE），
+    EXPLAIN QUERY PLAN 显示 `SCAN tags`——整表 5 万行逐行求值谓词，
+    20 个中文名约 1000ms。改成 `cn_name >= '词,' AND cn_name < '词-'` 后走
+    idx_tags_cn_name 的范围扫描，首条即返回。
+    顺带修掉 LIKE 的通配符问题：cn_name 里含 `_` / `%` 时旧写法会把它们当通配符；
+    范围比较是字面比较，更准。
+
+    ORDER BY name 保留：多个标签共用同一 cn_name 时（实测 'Aurora' 同时命中
+    aurora_(league) 与 aurora_sya_lis_kaymin），排序保证结果稳定可复现。
+    走索引后排序是对这个小结果集建临时 B-tree，实测 400 次查询 6.2ms，
+    比不排序的 7.5ms 还略快，没有代价。"""
     if not cn_name:
         return ''
     cn_first = cn_name.strip().split(',')[0].strip()
     if not cn_first:
         return ''
-    # 在 cn_name 字段里查找：整字段等于、或以"cn_first,"开头（多词形式的第一项）
+    # 整字段等于，或以 "cn_first," 开头（多词形式的第一项）
     row = conn.execute(
-        "SELECT name FROM tags WHERE cn_name = ? OR cn_name LIKE ? ORDER BY name LIMIT 1",
-        (cn_first, cn_first + ',%')
+        "SELECT name FROM tags WHERE cn_name = ? "
+        "OR (cn_name >= ? AND cn_name < ?) ORDER BY name LIMIT 1",
+        (cn_first, cn_first + ',', cn_first + chr(0x2C + 1))
     ).fetchone()
     return row[0] if row else ''
 
 
-def search_tags(conn, keyword, limit=20):
+def search_tags(conn, keyword, limit=20, light=False):
     """模糊搜索标签。匹配 name / cn_name / other_names 三列，按 name 字母序。
     keyword 为空时返回空列表。返回 list[dict]（与 lookup_tags 的 info 结构一致）。
+
+    light=True 时不取 en_wiki / cn_wiki / other_names 三列。wiki 正文单条可达数 KB，
+    200 条的搜索下拉白传几百 KB 却一个字符都不显示（下拉只渲染 name/cn_name/post_count）。
+    需要完整信息的调用方（工具层检索、候选分类）保持默认 light=False。
 
     空格/下划线/连字符兼容：Danbooru 标签命名规则是「空格→下划线，连字符保留」
     （如 side-tie_panties、on_bed）。但用户搜索时习惯用空格（on bed、side tie）。
@@ -445,6 +573,9 @@ def search_tags(conn, keyword, limit=20):
     # trigram 要求 keyword ≥3 字符才能命中（<3 时退化为全表 LIKE）
     use_fts = len(kw) >= 3 and _table_exists(conn, 'tags_fts')
 
+    sel = "name, cn_name, category, post_count" if light \
+        else "name, cn_name, en_wiki, cn_wiki, other_names, category, post_count"
+
     if use_fts:
         # FTS5 trigram MATCH：双引号包裹避免特殊字符被当查询语法。
         # name_norm/other_names 用规范化 keyword；cn_name 用原始 keyword（中文无需规范化）。
@@ -453,8 +584,8 @@ def search_tags(conn, keyword, limit=20):
         fts_q_kw = kw.replace('"', '""')
         match_expr = 'name_norm:"{0}" OR other_names:"{0}" OR cn_name:"{1}"'.format(fts_q_norm, fts_q_kw)
         rows = conn.execute(
-            """
-            SELECT name, cn_name, en_wiki, cn_wiki, other_names, category, post_count FROM tags WHERE rowid IN (
+            f"""
+            SELECT {sel} FROM tags WHERE rowid IN (
                 SELECT rowid FROM tags_fts WHERE tags_fts MATCH ?
             )
             ORDER BY post_count DESC, length(name), name
@@ -465,8 +596,8 @@ def search_tags(conn, keyword, limit=20):
     else:
         # 短 keyword（<3 字符，trigram 无效）或 FTS 未建：回退全表 LIKE
         rows = conn.execute(
-            """
-            SELECT name, cn_name, en_wiki, cn_wiki, other_names, category, post_count
+            f"""
+            SELECT {sel}
             FROM tags
             WHERE REPLACE(name, '-', '_') LIKE ? ESCAPE '\\'
                OR cn_name LIKE ? ESCAPE '\\'
@@ -476,6 +607,9 @@ def search_tags(conn, keyword, limit=20):
             """,
             (name_pat, cn_pat, name_pat, limit)
         ).fetchall()
+    if light:
+        return [{'name': r[0], 'cn_name': r[1], 'category': r[2], 'post_count': r[3]}
+                for r in rows]
     return [{
         'name': r[0], 'cn_name': r[1], 'en_wiki': r[2], 'cn_wiki': r[3], 'other_names': r[4],
         'category': r[5], 'post_count': r[6],
@@ -487,11 +621,11 @@ def init_from_files(db_path, csv_path, parquet_path, verbose=True):
     import pandas as pd
 
     if verbose:
-        print(f"[BuildTagDB] 读取 CSV: {csv_path}")
+        log.info(f"[BuildTagDB] 读取 CSV: {csv_path}")
     df_csv = pd.read_csv(csv_path, dtype=str).fillna('')
 
     if verbose:
-        print(f"[BuildTagDB] 读取 Parquet: {parquet_path}")
+        log.info(f"[BuildTagDB] 读取 Parquet: {parquet_path}")
     df_wiki = pd.read_parquet(parquet_path, columns=['title', 'body', 'other_names', 'updated_at'])
     wiki_map = {}
     for _, row in df_wiki.iterrows():
@@ -548,11 +682,11 @@ def init_from_files(db_path, csv_path, parquet_path, verbose=True):
         )
         conn.commit()
         if verbose:
-            print(f"[BuildTagDB] 构建完成：{len(deduped)} 条记录 → {db_path}")
+            log.info(f"[BuildTagDB] 构建完成：{len(deduped)} 条记录 → {db_path}")
     except Exception:
         conn.rollback()
         if verbose:
-            print("[BuildTagDB] 构建失败，已回滚（旧数据保留，未产生半成品库）")
+            log.error("[BuildTagDB] 构建失败，已回滚（旧数据保留，未产生半成品库）")
         raise
     finally:
         conn.close()
@@ -584,7 +718,7 @@ def merge_local_sources(db_path, sqlite_src=None, wiki_parquet=None, csv_src=Non
 
     def _v(msg):
         if verbose:
-            print(msg)
+            log.info(msg)
 
     stats = {'category': 0, 'post_count': 0, 'cn_name': 0, 'cn_wiki': 0,
              'en_wiki': 0, 'other_names': 0, 'updated_at': 0}
@@ -605,6 +739,7 @@ def merge_local_sources(db_path, sqlite_src=None, wiki_parquet=None, csv_src=Non
                 # 批1：补 category/post_count（本地无值才写，update_tag_meta 的 CASE 守卫已保证）
                 meta_batch = []
                 # 批2：补 cn_name（本地为空才写）
+                cn_batch = []
                 # 用一条 SQL 拿到「本地 cn_name 为空」的 name 集合
                 empty_cn = {r[0] for r in conn.execute(
                     "SELECT name FROM tags WHERE cn_name = '' OR cn_name IS NULL").fetchall()}
@@ -625,13 +760,17 @@ def merge_local_sources(db_path, sqlite_src=None, wiki_parquet=None, csv_src=Non
                     # category/post_count：本地缺失才补（update_tag_meta 的 CASE 守卫）
                     if cat_i >= 0 or pc_i > 0:
                         meta_batch.append((n, cat_i, pc_i))
-                    # cn_name：本地为空且源非空才补
+                    # cn_name：本地为空且源非空才补（先攒批，循环外一次性 executemany）
                     if n in empty_cn and cn and str(cn).strip():
-                        conn.execute(
-                            "UPDATE tags SET cn_name = ? WHERE name = ? AND (cn_name = '' OR cn_name IS NULL)",
-                            (str(cn).strip(), n)
-                        )
-                        stats['cn_name'] += 1
+                        cn_batch.append((str(cn).strip(), n))
+                # 批量补 cn_name（逐行 execute 在几万行的表上会产生同样多次独立写往返）。
+                # cn_name 上有 tags_fts_au 触发器，executemany 同样逐条触发，FTS 索引一致。
+                if cn_batch:
+                    conn.executemany(
+                        "UPDATE tags SET cn_name = ? WHERE name = ? AND (cn_name = '' OR cn_name IS NULL)",
+                        cn_batch
+                    )
+                    stats['cn_name'] += len(cn_batch)
                 # 批量补 category/post_count
                 for i in range(0, len(meta_batch), 500):
                     chunk = meta_batch[i:i+500]
@@ -781,6 +920,10 @@ def _fetch_with_retry(session, url, params, danbooru_cfg, cancel_check=None, lab
     net_errors = 0
     MAX_429 = 10         # 连续 429 上限：达此值放弃（≈指数退避累计已数十分钟）
     MAX_NET_ERRORS = 5   # 连续网络异常上限：达此值放弃（5×60s=5min 仍不通）
+    # 其它非 200（5xx/404 等）：调用方「睡 60s 再来」的次数上限。与 429/网络异常
+    # 同口径，避免服务端持续维护时无限重试。不放在 _fetch_with_retry 里，因为
+    # 该函数只负责单次请求，非 200 的处理策略由各阶段调用方决定。
+    MAX_HTTP_FAIL_STREAK = 5
     timeout = danbooru_cfg['timeout']
     while True:
         # 中断优先：请求前检查，避免发出请求后才中断
@@ -854,7 +997,7 @@ def full_scan_wiki(db_path, verbose=True, progress_callback=None, cancel_check=N
     danbooru_cfg = get_danbooru_config()
     if not danbooru_cfg['enabled']:
         msg = 'Danbooru 抓取已禁用（DANBOORU_ENABLED=false）'
-        print(f'[BuildTagDB] {msg}')
+        log.info(f'[BuildTagDB] {msg}')
         _emit({'type': 'error', 'message': msg})
         return
 
@@ -867,11 +1010,12 @@ def full_scan_wiki(db_path, verbose=True, progress_callback=None, cancel_check=N
     session = _make_session(db_cfg, danbooru_cfg)
     api_url = danbooru_cfg['api_url'].rstrip('/') + '/wiki_pages.json'
 
-    print('[BuildTagDB] 开始 wiki 全量遍历（默认排序 + page + 千页突破）')
+    log.info('[BuildTagDB] 开始 wiki 全量遍历（默认排序 + page + 千页突破）')
     _emit({'type': 'progress', 'page': 1, 'new_count': 0})
 
     EMPTY_RETRIES = 3
     empty_streak = 0
+    http_fail_streak = 0  # 非 200 连续计数（见 MAX_HTTP_FAIL_STREAK）
     current_page = 1
     current_upper_bound = None  # 千页突破：search[updated_at]=..<upper
     wiki_count = 0
@@ -888,40 +1032,49 @@ def full_scan_wiki(db_path, verbose=True, progress_callback=None, cancel_check=N
             r = _fetch_with_retry(
                 session, api_url, params, danbooru_cfg,
                 cancel_check=cancel_check, label='wiki',
-                on_429=lambda c, b: print(f'[BuildTagDB] wiki 429（第 {c} 次），退避 {b}s'),
-                on_network_error=lambda m: print(f'[BuildTagDB] {m}'),
+                on_429=lambda c, b: log.info(f'[BuildTagDB] wiki 429（第 {c} 次），退避 {b}s'),
+                on_network_error=lambda m: log.info(f'[BuildTagDB] {m}'),
             )
             if r['cancelled']:
-                print(f'[BuildTagDB] 用户中断 wiki 全量遍历（已抓 {wiki_count} 条）')
+                log.info(f'[BuildTagDB] 用户中断 wiki 全量遍历（已抓 {wiki_count} 条）')
                 _emit({'type': 'cancelled', 'new_count': wiki_count})
                 cancelled = True
                 break
             if r['status'] == 403:
                 msg = '403 错误，凭证可能失效或被限流'
-                print(f'[BuildTagDB] {msg}，停止')
+                log.info(f'[BuildTagDB] {msg}，停止')
                 _emit({'type': 'error', 'message': msg})
                 break
             if r['status'] == 410:
                 # page 超过 1000 上限，触发千页突破
                 if current_upper_bound:
-                    print(f'[BuildTagDB] wiki 千页上限(410)，重置时间轴到 updated_at<{current_upper_bound}')
+                    log.info(f'[BuildTagDB] wiki 千页上限(410)，重置时间轴到 updated_at<{current_upper_bound}')
                     current_page = 1
                     continue
                 else:
-                    print('[BuildTagDB] wiki 首页即 410，停止')
+                    log.info('[BuildTagDB] wiki 首页即 410，停止')
                     break
             if r['status'] != 200:
-                print(f'[BuildTagDB] wiki HTTP {r["status"]}，60s 后重试')
+                http_fail_streak += 1
+                if http_fail_streak >= MAX_HTTP_FAIL_STREAK:
+                    msg = (f'wiki 连续 {http_fail_streak} 次非 200'
+                           f'（最后一次 HTTP {r["status"]}），已放弃')
+                    log.info(f'[BuildTagDB] {msg}')
+                    _emit({'type': 'error', 'message': msg})
+                    break
+                log.warning(f'[BuildTagDB] wiki HTTP {r["status"]}，60s 后重试'
+                      f'（第 {http_fail_streak}/{MAX_HTTP_FAIL_STREAK} 次）')
                 time.sleep(60)
                 continue
+            http_fail_streak = 0
 
             data = r['data']
             if not data:
                 empty_streak += 1
                 if empty_streak >= EMPTY_RETRIES:
-                    print(f'[BuildTagDB] wiki 连续 {EMPTY_RETRIES} 次空响应，遍历完成')
+                    log.info(f'[BuildTagDB] wiki 连续 {EMPTY_RETRIES} 次空响应，遍历完成')
                     break
-                print(f'[BuildTagDB] wiki 空响应（第 {empty_streak}/{EMPTY_RETRIES} 次），5s 后重试')
+                log.warning(f'[BuildTagDB] wiki 空响应（第 {empty_streak}/{EMPTY_RETRIES} 次），5s 后重试')
                 time.sleep(5)
                 continue
             empty_streak = 0
@@ -952,18 +1105,18 @@ def full_scan_wiki(db_path, verbose=True, progress_callback=None, cancel_check=N
             if current_page > 900:
                 if page_oldest_ua:
                     current_upper_bound = page_oldest_ua
-                    print(f'[BuildTagDB] wiki 千页突破，重置时间轴到 updated_at<{current_upper_bound[:19]}，page 重置为 1')
+                    log.info(f'[BuildTagDB] wiki 千页突破，重置时间轴到 updated_at<{current_upper_bound[:19]}，page 重置为 1')
                 current_page = 1
             # 每 pause_every 页打印进度
             if current_page > 1 and (current_page - 1) % pause_every == 0:
-                print(f'[BuildTagDB] wiki 全量进行中：{wiki_count} 条，当前 page={current_page}')
+                log.info(f'[BuildTagDB] wiki 全量进行中：{wiki_count} 条，当前 page={current_page}')
                 time.sleep(pause_secs)
 
         if cancelled:
-            print(f'[BuildTagDB] wiki 全量遍历已中断：抓取 {wiki_count} 条，跳过已删除 {skipped_deleted} 条')
+            log.warning(f'[BuildTagDB] wiki 全量遍历已中断：抓取 {wiki_count} 条，跳过已删除 {skipped_deleted} 条')
             # cancelled 事件已在循环中断点发送，此处不再重复
         else:
-            print(f'[BuildTagDB] wiki 全量遍历完成：抓取 {wiki_count} 条，跳过已删除 {skipped_deleted} 条')
+            log.warning(f'[BuildTagDB] wiki 全量遍历完成：抓取 {wiki_count} 条，跳过已删除 {skipped_deleted} 条')
             _emit({'type': 'complete', 'new_count': wiki_count})
     finally:
         conn.close()
@@ -1019,7 +1172,7 @@ def update_from_danbooru(db_path, verbose=True, progress_callback=None, cancel_c
     danbooru_cfg = get_danbooru_config()
     if not danbooru_cfg['enabled']:
         msg = 'Danbooru 抓取已禁用（DANBOORU_ENABLED=false）'
-        print(f'[BuildTagDB] {msg}')
+        log.info(f'[BuildTagDB] {msg}')
         _emit({'type': 'error', 'message': msg})
         return
 
@@ -1043,7 +1196,7 @@ def update_from_danbooru(db_path, verbose=True, progress_callback=None, cancel_c
     finally:
         conn.close()
     if verbose:
-        print(f'[BuildTagDB] 本地最新 updated_at: {last_update_time}')
+        log.info(f'[BuildTagDB] 本地最新 updated_at: {last_update_time}')
 
     # 2. 断点续传
     current_page = 1
@@ -1055,7 +1208,7 @@ def update_from_danbooru(db_path, verbose=True, progress_callback=None, cancel_c
                 current_page = max(1, int(lines[0].strip()) - 2)  # 回退 2 页保险
                 if len(lines) > 1 and lines[1].strip():
                     current_upper_bound = lines[1].strip()
-                print(f'[BuildTagDB] 检测到中断记录，从第 {current_page} 页恢复')
+                log.info(f'[BuildTagDB] 检测到中断记录，从第 {current_page} 页恢复')
         except ValueError:
             pass
 
@@ -1063,6 +1216,7 @@ def update_from_danbooru(db_path, verbose=True, progress_callback=None, cancel_c
     reached_end = False
     WIKI_EMPTY_RETRIES = 3   # wiki 增量空响应重试次数（与 tags 阶段同机制）
     wiki_empty_streak = 0    # wiki 增量连续空响应计数
+    wiki_http_fail_streak = 0  # wiki 增量非 200 连续计数（见 MAX_HTTP_FAIL_STREAK）
     page_latest_seen = None  # 全局最新 updated_at（跨页累积），用于意外 410 时重置时间轴
 
     # 3. 连接数据库。本地仅包含通过 sync_tags_db 同步的热门标签（post_count≥100, category∈{0,3,4}），
@@ -1071,11 +1225,11 @@ def update_from_danbooru(db_path, verbose=True, progress_callback=None, cancel_c
     cancelled = False
     try:
         tag_count = conn.execute("SELECT count(*) FROM tags").fetchone()[0]
-        print(f'[BuildTagDB] 本地标签库 {tag_count} 个标签，开始增量抓取 wiki...')
+        log.info(f'[BuildTagDB] 本地标签库 {tag_count} 个标签，开始增量抓取 wiki...')
 
         # 4. 主循环
         while not reached_end:
-            print(f'[BuildTagDB] 抓取第 {current_page} 页...')
+            log.info(f'[BuildTagDB] 抓取第 {current_page} 页...')
             params = {'limit': page_limit, 'page': current_page}
             if current_upper_bound:
                 params['search[updated_at]'] = '..' + current_upper_bound
@@ -1084,17 +1238,17 @@ def update_from_danbooru(db_path, verbose=True, progress_callback=None, cancel_c
             r = _fetch_with_retry(
                 session, api_url, params, danbooru_cfg,
                 cancel_check=cancel_check, label='wiki',
-                on_429=lambda c, b: print(f'[BuildTagDB] wiki 触发频率限制（第 {c} 次），指数退避 {b}s'),
-                on_network_error=lambda m: print(f'[BuildTagDB] {m}'),
+                on_429=lambda c, b: log.info(f'[BuildTagDB] wiki 触发频率限制（第 {c} 次），指数退避 {b}s'),
+                on_network_error=lambda m: log.info(f'[BuildTagDB] {m}'),
             )
             if r['cancelled']:
-                print(f'[BuildTagDB] 用户中断 wiki 抓取（已抓 {new_count} 条，断点已保存）')
+                log.info(f'[BuildTagDB] 用户中断 wiki 抓取（已抓 {new_count} 条，断点已保存）')
                 _emit({'type': 'cancelled', 'new_count': new_count})
                 cancelled = True
                 break
             if r['status'] == 403:
                 msg = '403 错误，凭证可能失效或被限流'
-                print(f'[BuildTagDB] {msg}，停止')
+                log.info(f'[BuildTagDB] {msg}，停止')
                 _emit({'type': 'error', 'message': msg})
                 break
             if r['status'] == 410:
@@ -1102,25 +1256,34 @@ def update_from_danbooru(db_path, verbose=True, progress_callback=None, cancel_c
                 # 但若服务端阈值变化提前 410，用已记录的 page_latest 重置时间轴继续。
                 if page_latest_seen:
                     current_upper_bound = page_latest_seen
-                    print(f'[BuildTagDB] wiki 意外 410，重置时间轴至 {current_upper_bound}，page 重置为 1')
+                    log.info(f'[BuildTagDB] wiki 意外 410，重置时间轴至 {current_upper_bound}，page 重置为 1')
                     current_page = 1
                     continue
                 else:
-                    print('[BuildTagDB] wiki 410 且无 page_latest 可重置，停止')
+                    log.info('[BuildTagDB] wiki 410 且无 page_latest 可重置，停止')
                     break
             if r['status'] != 200:
-                print(f'[BuildTagDB] wiki HTTP {r["status"]}，60s 后重试')
+                wiki_http_fail_streak += 1
+                if wiki_http_fail_streak >= MAX_HTTP_FAIL_STREAK:
+                    msg = (f'wiki 连续 {wiki_http_fail_streak} 次非 200'
+                           f'（最后一次 HTTP {r["status"]}），已放弃（已抓 {new_count} 条）')
+                    log.info(f'[BuildTagDB] {msg}')
+                    _emit({'type': 'error', 'message': msg})
+                    break
+                log.warning(f'[BuildTagDB] wiki HTTP {r["status"]}，60s 后重试'
+                      f'（第 {wiki_http_fail_streak}/{MAX_HTTP_FAIL_STREAK} 次）')
                 time.sleep(60)
                 continue
+            wiki_http_fail_streak = 0
             data = r['data']
             if not data:
                 # 空响应容错：可能是网络抖动，连续 WIKI_EMPTY_RETRIES 次空才认定到最后一页。
                 # （与 tags 阶段同机制，避免单次空响应误判导致漏抓）
                 wiki_empty_streak += 1
                 if wiki_empty_streak >= WIKI_EMPTY_RETRIES:
-                    print('[BuildTagDB] wiki 连续空响应，已到服务器最后一页')
+                    log.info('[BuildTagDB] wiki 连续空响应，已到服务器最后一页')
                     break
-                print(f'[BuildTagDB] wiki 空响应（第 {wiki_empty_streak}/{WIKI_EMPTY_RETRIES} 次），5s 后重试')
+                log.warning(f'[BuildTagDB] wiki 空响应（第 {wiki_empty_streak}/{WIKI_EMPTY_RETRIES} 次），5s 后重试')
                 time.sleep(5)
                 continue
             wiki_empty_streak = 0  # 收到数据，重置空响应计数
@@ -1162,7 +1325,7 @@ def update_from_danbooru(db_path, verbose=True, progress_callback=None, cancel_c
             _emit({'type': 'progress', 'page': current_page, 'new_count': new_count})
 
             if reached_end:
-                print(f'[BuildTagDB] 与本地时间线衔接，增量完成（本页新增 {new_count} 条）')
+                log.info(f'[BuildTagDB] 与本地时间线衔接，增量完成（本页新增 {new_count} 条）')
                 break
 
             current_page += 1
@@ -1172,12 +1335,12 @@ def update_from_danbooru(db_path, verbose=True, progress_callback=None, cancel_c
             if current_page > 900:
                 if page_latest:
                     current_upper_bound = page_latest
-                    print(f'[BuildTagDB] 时间轴重置至 {current_upper_bound}')
+                    log.info(f'[BuildTagDB] 时间轴重置至 {current_upper_bound}')
                     current_page = 1
                 else:
                     # page_latest 为空（异常：900 页都没拿到新数据），停止避免死循环。
                     # 正常增量远不会到 900 页（几页就衔接锚点），到这里说明数据异常。
-                    print('[BuildTagDB] 千页突破但无 page_latest（900 页无新数据），停止避免死循环')
+                    log.info('[BuildTagDB] 千页突破但无 page_latest（900 页无新数据），停止避免死循环')
                     break
 
             # 每页都存检查点（轻量：2 行小文件），保证中断后可从当前页-2 恢复，不丢数据。
@@ -1190,7 +1353,7 @@ def update_from_danbooru(db_path, verbose=True, progress_callback=None, cancel_c
                         f.write(f'{current_upper_bound}\n')
                 # 每 pause_every 页额外休息 pause_secs（长任务保险）
                 if pages_done % pause_every == 0:
-                    print(f'[BuildTagDB] 已抓 {pages_done} 页，检查点已保存，休息 {pause_secs}s')
+                    log.info(f'[BuildTagDB] 已抓 {pages_done} 页，检查点已保存，休息 {pause_secs}s')
                     time.sleep(pause_secs)
 
         # --- 不再需要 tags.json 补查阶段 ---
@@ -1200,16 +1363,21 @@ def update_from_danbooru(db_path, verbose=True, progress_callback=None, cancel_c
         if not cancelled and progress_file.exists():
             progress_file.unlink()
         if cancelled:
-            print(f'[BuildTagDB] 更新已中断，本次新增/更新 {new_count} 条（断点已保存，下次续传）')
+            log.info(f'[BuildTagDB] 更新已中断，本次新增/更新 {new_count} 条（断点已保存，下次续传）')
             # cancelled 事件已在各阶段中断点发送，此处不再重复
         else:
-            print(f'[BuildTagDB] 增量更新完成，本次新增/更新 {new_count} 条')
+            log.info(f'[BuildTagDB] 增量更新完成，本次新增/更新 {new_count} 条')
             _emit({'type': 'complete', 'new_count': new_count})
     finally:
         conn.close()
 
 
 def main():
+    # CLI 直接运行时也要配日志：长跑命令（init/update/llm-process）出问题需要回溯，
+    # 而 stats 那类表格输出仍走 print（见 show_stats），两者格式互不干扰。
+    from logging_setup import setup_logging
+    setup_logging()
+
     parser = argparse.ArgumentParser(description='Danbooru 标签数据库工具')
     sub = parser.add_subparsers(dest='cmd', required=True)
 
@@ -1233,7 +1401,12 @@ def main():
     # ── 新命令：标签工程管线 ──
     p_sync = sub.add_parser('sync-tags', help='从上游 GitHub SQLite 同步新标签')
     p_sync.add_argument('--db', default=None, help='SQLite 路径')
-    p_sync.add_argument('--download', action='store_true', default=True, help='是否下载最新 tag.sqlite（默认下载）')
+    # BooleanOptionalAction 才有 --no-download。原先的 action='store_true' + default=True
+    # 是一个永远为真的开关：用户传 --download 得到 True，不传也是 True，
+    # 「用本地已有的 tag.sqlite」这条路径根本无法从命令行走到
+    # （sync_tags.run 里 download=False 的分支形同不存在）。
+    p_sync.add_argument('--download', action=argparse.BooleanOptionalAction, default=True,
+                        help='是否下载最新 tag.sqlite（默认下载；--no-download 用本地已有文件）')
 
     p_tg = sub.add_parser('tag-groups', help='抓取 Danbooru 标签组（tag_group）体系')
     p_tg.add_argument('--db', default=None, help='SQLite 路径')
@@ -1298,9 +1471,9 @@ def main():
         from tag_groups import run as run_tag_groups
         from llm_pipeline import run_llm_process
         from cooc_pipeline import run_fetch_cooc, run_trim_cooc
-        print('=' * 60)
-        print('[Pipeline] 启动一键全流程')
-        print('=' * 60)
+        log.info('=' * 60)
+        log.info('[Pipeline] 启动一键全流程')
+        log.info('=' * 60)
         run_sync_tags(db_path)
         run_tag_groups(db_path)
         run_llm_process(db_path)

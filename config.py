@@ -8,6 +8,28 @@ _env_mtime = None
 
 _prompts_cache = None  # (签名, prompts dict)；签名变化时重新读取
 
+# write_text_atomic 的临时文件名序号（配合 pid + 线程 id 保证同进程内唯一）
+import threading as _threading
+_atomic_seq = 0
+_atomic_seq_lock = _threading.Lock()
+
+# 按目标路径串行化并发写：Windows 的 os.replace 在「另一个线程正持有目标文件」时
+# 会抛 PermissionError（不是原子的），实测 4 线程写同一文件 120 次里失败 14 次。
+# 本应用是单 worker（CLAUDE.md 有记），所以进程内的按路径锁就足以消除这种竞争；
+# 多进程部署需要换成文件锁，那时这段要一起改。
+# 锁表不回收：条数 = 被写过的文件数（受 uploads 规模约束），本地工具可接受。
+_atomic_path_locks = {}
+_atomic_path_locks_guard = _threading.Lock()
+
+
+def _path_lock(path):
+    with _atomic_path_locks_guard:
+        lock = _atomic_path_locks.get(path)
+        if lock is None:
+            lock = _threading.Lock()
+            _atomic_path_locks[path] = lock
+        return lock
+
 
 def load_prompts(prompts_dir='prompts'):
     """按需读取提示词目录：每个 .txt 文件对应一个提示词，文件名（去 .txt）为 key。
@@ -75,23 +97,49 @@ def load_env(env_path='.env'):
     _env_mtime = mtime
 
 
+# 本地部署的 OpenAI 兼容端点（Ollama / LM Studio / vLLM / llama.cpp 等）不校验 Key，
+# 但 openai SDK 2.x 在 api_key 为空字符串时同样抛 OpenAIError（_client.py 判定的是
+# `not self.api_key`，不只是 None），故统一喂一个占位串。需要鉴权的云端端点照旧在
+# .env 里填 LLM_TEXT_API_KEY / LLM_VISION_API_KEY。
+API_KEY_PLACEHOLDER = 'not-needed'
+
+
+def resolve_api_key(raw_key):
+    """把空 API Key 归一化为占位串。本地端点无需配置 key，云端端点照旧透传。"""
+    return (raw_key or '').strip() or API_KEY_PLACEHOLDER
+
+
 def get_llm_config():
     """每次调用时重新读取 .env 配置"""
     load_env()
     return {
-        'api_url': os.environ.get('LLM_API_URL', 'http://localhost:8080/v1'),
-        'api_key': os.environ.get('LLM_API_KEY', 'ollama'),
-        'model': os.environ.get('LLM_MODEL', 'qwen2.5:7b'),
+        'api_url': os.environ.get('LLM_TEXT_API_URL', 'http://localhost:8080/v1'),
+        'api_key': resolve_api_key(os.environ.get('LLM_TEXT_API_KEY', '')),
+        'model': os.environ.get('LLM_TEXT_MODEL', 'qwen2.5:7b'),
     }
 
 
 def get_vision_config():
-    """每次调用时重新读取视觉模型配置（用于 VLM 自然语言描述生成）"""
+    """每次调用时重新读取视觉模型配置（用于 VLM 自然语言描述生成）
+
+    api_key 经 resolve_api_key 归一化：本地部署（Ollama 等）不配 LLM_VISION_API_KEY
+    也能直接用，云端端点填了照旧透传。消费方（tagger.py / prompt_tool.py）
+    直接把该值喂给 OpenAI() 即可。
+    """
     load_env()
     return {
-        'api_url': os.environ.get('VISION_API_URL', ''),
-        'api_key': os.environ.get('VISION_API_KEY', ''),
-        'model': os.environ.get('VISION_MODEL', ''),
+        'api_url': os.environ.get('LLM_VISION_API_URL', ''),
+        'api_key': resolve_api_key(os.environ.get('LLM_VISION_API_KEY', '')),
+        'model': os.environ.get('LLM_VISION_MODEL', ''),
+        # max_tokens 是 reasoning_content + content 的共享额度，不是只算正式回答。
+        # 推理模型（DeepSeek 等）思考模式默认开启，512 会被思考吃光 → content 为空。
+        'max_tokens': int(os.environ.get('LLM_VISION_MAX_TOKENS', '1024')),
+        # 'off' = 关闭思考（本任务只需 2~3 个短句，思考纯烧时间和钱；
+        # 且思考模式下服务端会静默忽略 temperature，关掉后 temperature 才真正生效）
+        'thinking': os.environ.get('LLM_VISION_THINKING', 'off').strip().lower(),
+        # 单次请求超时（秒）。openai SDK 默认 600s——端点卡死会把整批任务挂住十分钟。
+        # prompt_tool.py 有自己独立的 PROMPT_TOOL_TIMEOUT，这条只服务 tagger.py 的 VLM 路径。
+        'timeout': int(os.environ.get('LLM_VISION_TIMEOUT', '180')),
     }
 
 
@@ -99,21 +147,67 @@ def get_caption_config():
     """每次调用时重新读取 VLM 自然语言描述生成配置"""
     load_env()
     return {
-        'reference_tags': os.environ.get('CAPTION_REFERENCE_TAGS', 'true').strip().lower() in ('true', '1', 'yes'),
-        'save_format': os.environ.get('CAPTION_SAVE_FORMAT', 'txt'),  # txt 覆盖标签 / separate 另存 .caption.txt
+        'reference_tags': os.environ.get('CAPTION_USE_TAGS_AS_HINT', 'true').strip().lower() in ('true', '1', 'yes'),
+        'save_format': os.environ.get('CAPTION_SAVE_AS', 'txt'),  # txt 覆盖标签 / separate 另存 .caption.txt
+    }
+
+
+# ── 提示词优化器（/prompt_tool）的内置参数 ──────────────────────────────────
+# 这些是「调好就不动」的实现细节（检索口径、token 预算、图片编码上限），不是用户配置项，
+# 故写死在代码里。.env 只留三个会真的按需调整的：PROMPT_TOOL_MAX_TOKENS / THINKING / TIMEOUT。
+_PROMPT_TEMPERATURE = 0.4        # 结构化改写求稳，不要 0.7 的发散
+_PROMPT_MAX_INPUT_TAGS = 60      # 输入标签注入上限
+_PROMPT_WIKI_CHARS = 240         # 每条标签注入的 en_wiki 字符数（实测均值 546、最大 30393，必须截断）
+_PROMPT_COOC_TOPK = 8            # 共现推荐条数
+_PROMPT_COOC_NSFW = 'hide'       # 过滤 tags.nsfw=1 的推荐词（hide | show）
+# 候选自身 post_count 下限：太冷门的标签 lift 虚高（实测 three-tone_hair 只有 237 条却霸榜）
+_PROMPT_COOC_MIN_POST = 500
+# 候选只取通用类：22445 条角色标签会淹没风格/光影类候选
+_PROMPT_CANDIDATE_CATEGORIES = {0}
+_PROMPT_IMAGE_MAX_BYTES = 4194304   # 超过则用 Pillow 缩到最长边 _PROMPT_IMAGE_MAX_SIDE 并重编码
+_PROMPT_IMAGE_MAX_SIDE = 1536
+
+
+def get_prompt_tool_config():
+    """每次调用时重新读取提示词优化器（/prompt_tool）配置。
+
+    模型端点复用 LLM_VISION_API_URL/KEY/MODEL（多模态），只有三个参数走 .env：
+    - max_tokens：输出是逐条 diff JSON + 一段自然语言描述，条目多；且与思考共享额度
+    - thinking：结构化 JSON 任务，思考纯烧钱且会静默吃掉 temperature
+    - timeout：单次调用超时（tagger.py 的 VLM 路径没传 timeout，这里必须显式传）
+    其余检索/编码参数见上方 _PROMPT_* 常量。
+    """
+    load_env()
+    vision = get_vision_config()
+    return {
+        'api_url': vision['api_url'],
+        'api_key': vision['api_key'],
+        'model': vision['model'],
+        'max_tokens': int(os.environ.get('PROMPT_TOOL_MAX_TOKENS', '8192')),
+        'thinking': os.environ.get('PROMPT_TOOL_THINKING', 'off').strip().lower(),
+        'timeout': int(os.environ.get('PROMPT_TOOL_TIMEOUT', '180')),
+        'temperature': _PROMPT_TEMPERATURE,
+        'max_input_tags': _PROMPT_MAX_INPUT_TAGS,
+        'wiki_chars': _PROMPT_WIKI_CHARS,
+        'cooc_topk': _PROMPT_COOC_TOPK,
+        'cooc_nsfw': _PROMPT_COOC_NSFW,
+        'cooc_min_post': _PROMPT_COOC_MIN_POST,
+        'candidate_categories': _PROMPT_CANDIDATE_CATEGORIES,
+        'image_max_bytes': _PROMPT_IMAGE_MAX_BYTES,
+        'image_max_side': _PROMPT_IMAGE_MAX_SIDE,
     }
 
 
 def get_wd14_config():
     """每次调用时重新读取 WD14 配置"""
     load_env()
-    model_path = os.environ.get('WD14_MODEL_PATH', 'models/wd-eva02-large-tagger-v3')
+    model_path = os.environ.get('TAGGER_MODEL_PATH', 'models/wd-eva02-large-tagger-v3')
     if not os.path.isabs(model_path):
         model_path = str(Path(__file__).parent / model_path)
     return {
         'model_path': model_path,
-        'general_threshold': float(os.environ.get('WD14_GENERAL_THRESHOLD', '0.3')),
-        'character_threshold': float(os.environ.get('WD14_CHARACTER_THRESHOLD', '0.1')),
+        'general_threshold': float(os.environ.get('TAGGER_GENERAL_THRESHOLD', '0.3')),
+        'character_threshold': float(os.environ.get('TAGGER_CHARACTER_THRESHOLD', '0.1')),
     }
 
 
@@ -138,10 +232,10 @@ def get_birefnet_config():
                     trust_remote_code 加载所需，从 https://huggingface.co/ZhengPeng7/birefnet 下载。
     toonout_weights：ToonOut 动漫微调权重 .pth，从 https://huggingface.co/joelseytre/toonout 下载。"""
     load_env()
-    base_model_dir = os.environ.get('BIREFNET_BASE_MODEL_DIR', 'models/birefnet-base')
+    base_model_dir = os.environ.get('BIREFNET_BASE_DIR', 'models/birefnet-base')
     if not os.path.isabs(base_model_dir):
         base_model_dir = str(Path(__file__).parent / base_model_dir)
-    toonout_weights = os.environ.get('BIREFNET_TOONOUT_WEIGHTS', 'models/toonout.pth')
+    toonout_weights = os.environ.get('BIREFNET_WEIGHTS', 'models/toonout.pth')
     if not os.path.isabs(toonout_weights):
         toonout_weights = str(Path(__file__).parent / toonout_weights)
     return {
@@ -232,3 +326,43 @@ def is_within_directory(path, base_dir):
     abs_path = os.path.abspath(path)
     abs_base = os.path.abspath(base_dir)
     return os.path.commonpath([abs_path, abs_base]) == abs_base
+
+
+def write_text_atomic(path, text, encoding='utf-8'):
+    """原子写文本文件：写同目录临时文件 → os.replace 覆盖目标。
+
+    标签文件（.txt / .nl.txt）是用户真正的资产，直接 `open(path, 'w')` 存在两个
+    失败窗口：写入中途进程被杀/磁盘满 → 文件被截断成半截；编码错误在 write 阶段
+    抛出 → 旧内容已被清空。os.replace 在同一文件系统内是原子的，失败时目标文件
+    保持原样（要么全是新内容，要么完全是旧内容）。
+
+    临时文件必须与目标同目录：跨盘/跨文件系统的 os.replace 会退化成复制+删除，
+    不再是原子的。
+
+    临时名用 pid + 线程 id + 计数器：**只带 pid 是不够的** —— Flask 默认多线程，
+    同一进程里两个请求（如批量替换正在跑、用户又点了保存）会算出同一个临时名而互相覆盖。
+    再加一层按目标路径的锁：Windows 的 os.replace 在目标被别的线程占用时会抛
+    PermissionError，光靠唯一临时名解决不了（实测 4 线程写同一文件 120 次失败 14 次）。
+    """
+    import threading
+    dir_name = os.path.dirname(os.path.abspath(path))
+    global _atomic_seq
+    lock = _path_lock(os.path.abspath(path))
+    with lock:
+        with _atomic_seq_lock:
+            _atomic_seq += 1
+            seq = _atomic_seq
+        tmp_path = os.path.join(
+            dir_name, '.%s.%d.%d.%d.tmp' % (os.path.basename(path), os.getpid(),
+                                            threading.get_ident(), seq))
+        try:
+            with open(tmp_path, 'w', encoding=encoding) as f:
+                f.write(text)
+            os.replace(tmp_path, path)
+        except Exception:
+            # 写失败时清掉临时文件，别在 uploads 里留下 .xxx.tmp 垃圾
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise

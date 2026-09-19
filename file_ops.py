@@ -1,8 +1,14 @@
 # -*- coding: utf-8 -*-
 import os
 import struct
+import uuid
 from flask import Blueprint, request, redirect, url_for, jsonify, send_from_directory, current_app
-from config import allowed_file, safe_filename, is_within_directory, get_image_files
+from config import (allowed_file, safe_filename, is_within_directory, get_image_files,
+                    write_text_atomic)
+import logging
+
+
+log = logging.getLogger(__name__)
 
 file_ops_bp = Blueprint('file_ops', __name__)
 
@@ -60,6 +66,12 @@ def _get_image_size(file_path):
                         if len(seg_len_bytes) < 2:
                             break
                         seg_len = struct.unpack('>H', seg_len_bytes)[0]
+                        # seg_len 含长度字段自身的 2 字节。畸形 JPEG 会带 seg_len < 2
+                        # （0 或 1），seek 负数在 Python 里是「从当前位置往回退」而非报错，
+                        # 于是解析器在同一个位置来回打转 → 死循环 + 每轮多读 2 字节，
+                        # 直到文件末尾才靠 marker 读取失败退出。显式判非法长度直接放弃。
+                        if seg_len < 2:
+                            break
                         f.seek(seg_len - 2, 1)  # 跳过本段剩余字节
 
         # GIF: bytes 6-10 为逻辑屏宽高（小端 16 位）
@@ -108,9 +120,15 @@ def _sanitize_rename_name(name):
     return name.strip()[:128]
 
 
+# 上传后允许跳回的页面（表单里的 next 字段）。
+# 白名单而非直接 redirect(next)：next 来自表单，不校验就是开放重定向漏洞。
+_UPLOAD_NEXT_PAGES = {'tag_editor': 'tag_editor', 'image_editor': 'editor',
+                      'prompt_tool': 'prompt_tool_page'}   # 值必须是 endpoint 名：新页面的函数是 prompt_tool_page
+
+
 @file_ops_bp.route('/upload', methods=['POST'])
 def upload_files():
-    """上传文件"""
+    """上传文件。可选表单字段 next 指定上传后回哪个页面（默认标签编辑页）。"""
     if 'files' not in request.files:
         return redirect(request.url)
 
@@ -123,10 +141,11 @@ def upload_files():
         if file and (allowed_file(file.filename, 'image') or allowed_file(file.filename, 'text')):
             filename = safe_filename(file.filename)
             save_path = os.path.join(upload_dir, filename)
-            print(f"[上传] {filename} -> {save_path}")
+            log.info(f"[上传] {filename} -> {save_path}")
             file.save(save_path)
 
-    return redirect(url_for('tag_editor'))
+    endpoint = _UPLOAD_NEXT_PAGES.get((request.form.get('next') or '').strip())
+    return redirect(url_for(endpoint or 'tag_editor'))
 
 
 @file_ops_bp.route('/get_caption/<image_name>')
@@ -148,7 +167,7 @@ def get_caption(image_name):
             with open(caption_path, 'r', encoding='utf-8') as f:
                 caption = f.read()
         except Exception as e:
-            print(f"读取标签文件失败: {str(e)}")
+            log.error(f"读取标签文件失败: {str(e)}")
 
     # 读取自然语言描述（.nl.txt）
     nl_path = os.path.join(upload_dir, f"{base_name}.nl.txt")
@@ -158,7 +177,7 @@ def get_caption(image_name):
             with open(nl_path, 'r', encoding='utf-8') as f:
                 nl_caption = f.read().strip()
         except Exception as e:
-            print(f"读取自然语言描述文件失败: {str(e)}")
+            log.error(f"读取自然语言描述文件失败: {str(e)}")
 
     # 一次性返回标签 + 翻译（从 SQLite cn_name 查）
     tags = [t.strip() for t in caption.split(',') if t.strip()] if caption else []
@@ -177,8 +196,14 @@ def save_caption(image_name):
     if not is_within_directory(file_path, upload_dir):
         return jsonify({'success': False, 'error': '非法路径'}), 400
 
-    data = request.get_json()
+    # silent=True + 类型校验：body 是合法 JSON 数组/字符串时 get_json() 会原样返回，
+    # 后面 .get() 抛 AttributeError → 500；这里直接判成 400。
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'error': '请求体必须是 JSON 对象'}), 400
     content = data.get('content', '')
+    if not isinstance(content, str):
+        return jsonify({'success': False, 'error': 'content 必须是字符串'}), 400
 
     # 保存时统一转小写 + 去重（与前端逻辑一致）。
     # 统一小写保证 DB name 列与查询 key 一致，避免翻译查不到；
@@ -199,13 +224,18 @@ def save_caption(image_name):
     caption_path = os.path.join(upload_dir, caption_file)
 
     try:
-        with open(caption_path, 'w', encoding='utf-8') as f:
-            f.write(content)
+        write_text_atomic(caption_path, content)
     except Exception as e:
-        print(f"保存标签文件失败: {str(e)}")
+        log.error(f"保存标签文件失败: {str(e)}")
         return jsonify({'success': False, 'error': str(e)})
 
     return jsonify({'success': True})
+
+
+def _write_nl_caption(upload_dir, base_name, content):
+    """把自然语言描述写入 {base}.nl.txt。抽出来供 /save_nl_caption 与提示词优化器复用。"""
+    nl_path = os.path.join(upload_dir, f"{base_name}.nl.txt")
+    write_text_atomic(nl_path, content)
 
 
 @file_ops_bp.route('/save_nl_caption/<image_name>', methods=['POST'])
@@ -217,17 +247,19 @@ def save_nl_caption(image_name):
     if not is_within_directory(file_path, upload_dir):
         return jsonify({'success': False, 'error': '非法路径'}), 400
 
-    data = request.get_json()
-    content = data.get('content', '').strip()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'error': '请求体必须是 JSON 对象'}), 400
+    content = data.get('content', '')
+    if not isinstance(content, str):
+        return jsonify({'success': False, 'error': 'content 必须是字符串'}), 400
+    content = content.strip()
 
     base_name = os.path.splitext(filename)[0]
-    nl_path = os.path.join(upload_dir, f"{base_name}.nl.txt")
-
     try:
-        with open(nl_path, 'w', encoding='utf-8') as f:
-            f.write(content)
+        _write_nl_caption(upload_dir, base_name, content)
     except Exception as e:
-        print(f"保存自然语言描述失败: {str(e)}")
+        log.error(f"保存自然语言描述失败: {str(e)}")
         return jsonify({'success': False, 'error': str(e)})
 
     return jsonify({'success': True})
@@ -304,25 +336,39 @@ def clear_all():
               'tags' 所有标签文件 .txt + .nl.txt（保留图片）
     返回 JSON: {removed: N}
     """
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    # 非 dict 的请求体（如 `[1]`、`"all"`）一律 400，**不要**回落到默认 mode。
+    # 这是本应用唯一的批量删除接口，默认 mode='all' 会清空整个 uploads 目录；
+    # 「参数没看懂就执行最危险的默认值」是绝不能被接受的降级路径。
+    # 前端调用点只有一个（executeClear），永远发 dict，所以 400 不会误伤正常使用。
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体必须是 JSON 对象'}), 400
     mode = data.get('mode', 'all')
+    if not isinstance(mode, str):
+        return jsonify({'error': f'mode 必须是字符串，收到 {type(mode).__name__}'}), 400
+    # 不做 strip/lower 之类的宽松归一化：本接口的失败模式是「删光 uploads」，
+    # 归一化会扩大命中 'all' 的输入集合（' ALL ' 会被折叠成破坏性的 'all'）。
+    # 只接受精确的三个字面量，其余一律 400 由调用方自己修正。
+    if mode not in ('all', 'nl', 'tags'):
+        return jsonify({'error': f'未知模式: {mode!r}（只接受 all / nl / tags）'}), 400
     upload_dir = current_app.config['UPLOAD_FOLDER']
     removed = 0
+    # mode 已在上面白名单校验过，这里无需再判 else 分支
     for filename in os.listdir(upload_dir):
+        if not os.path.isfile(os.path.join(upload_dir, filename)):
+            continue  # 跳过子目录（os.unlink 对目录会抛错并计入失败日志）
         if mode == 'all':
             delete = True
         elif mode == 'nl':
             delete = filename.endswith('.nl.txt')
-        elif mode == 'tags':
+        else:  # 'tags'
             delete = filename.endswith('.txt')  # .nl.txt 同样以 .txt 结尾，一并涵盖
-        else:
-            return jsonify({'error': f'未知模式: {mode}'}), 400
         if delete:
             try:
                 os.unlink(os.path.join(upload_dir, filename))
                 removed += 1
             except Exception as e:
-                print(f"删除文件失败 {filename}: {str(e)}")
+                log.error(f"删除文件失败 {filename}: {str(e)}")
 
     return jsonify({'removed': removed})
 
@@ -420,18 +466,15 @@ def rename_files():
         })
 
     # 执行重命名：两阶段（避免源/目标同名覆盖）
-    # 阶段1：old_base.<图片后缀> 和 old_base.txt → __tageditor_rename_tmp_{i}.<后缀>
-    # 阶段2：__tageditor_rename_tmp_{i}.<后缀> → new_base.<后缀>
+    # 阶段1：old_base.<图片后缀> 和 old_base.txt → <本次唯一前缀>{i}.<后缀>
+    # 阶段2：<前缀>{i}.<后缀> → new_base.<后缀>
     # 图片用原图扩展名（保留格式），标签固定 .txt。
-    tmp_prefix = '__tageditor_rename_tmp_'
-
-    # 清理上次中断残留的 tmp 文件
-    for f in os.listdir(upload_dir):
-        if f.startswith(tmp_prefix):
-            try:
-                os.remove(os.path.join(upload_dir, f))
-            except Exception:
-                pass
+    #
+    # 前缀带随机串而不只是固定字符串：固定前缀的「清理上次残留」会把**上一次
+    # 被中断的重命名**留在盘上的 tmp 文件删掉——而那些文件是用户还没落地的新名字，
+    # 图直接丢失。而且两个浏览器同时点重命名会共用同名前缀、互相覆盖。
+    # 随机后缀保证前缀唯一，只清理本次自己产生的残留。
+    tmp_prefix = '__tageditor_rename_' + uuid.uuid4().hex[:8] + '_'
 
     renamed = 0
     errors = 0
@@ -447,7 +490,7 @@ def rename_files():
                     try:
                         os.rename(old_path, tmp_path)
                     except Exception as ex:
-                        print(f"[重命名] 阶段1失败 {old_path} -> {tmp_path}: {ex}")
+                        log.error(f"[重命名] 阶段1失败 {old_path} -> {tmp_path}: {ex}")
                         errors += 1
             # 阶段2：tmp → new
             moved_any = False
@@ -456,18 +499,24 @@ def rename_files():
                 new_path = os.path.join(upload_dir, new_base + e)
                 if os.path.exists(tmp_path):
                     try:
-                        # 防御：若 new_path 已被别的源占用（不该发生），先清理
-                        if os.path.abspath(tmp_path) != os.path.abspath(new_path) and os.path.exists(new_path):
-                            os.unlink(new_path)
+                        if os.path.exists(new_path):
+                            # 目标已被占用：plan 用 used 集合保证新名互不重复，所以
+                            # 这只可能是盘上本来就有的同名文件（与本次 batch 无关）。
+                            # 原来的 unlink 会静默删掉用户的一张图换成本次的新图——
+                            # 改成报错并保住两边，让用户自己决定。
+                            log.warning(f"[重命名] 跳过 {new_path}：目标文件已存在，未覆盖")
+                            errors += 1
+                            continue
                         os.rename(tmp_path, new_path)
                         moved_any = True
                     except Exception as ex:
-                        print(f"[重命名] 阶段2失败 {tmp_path} -> {new_path}: {ex}")
+                        log.error(f"[重命名] 阶段2失败 {tmp_path} -> {new_path}: {ex}")
                         errors += 1
             if moved_any:
                 renamed += 1
     finally:
-        # 清理本轮残留的 tmp 文件（阶段1成功但阶段2失败时遗留）
+        # 清理**本次**残留的 tmp 文件（阶段1成功但阶段2失败时遗留）。
+        # 前缀唯一，不会碰到其它批次/其它请求留下的文件。
         for f in os.listdir(upload_dir):
             if f.startswith(tmp_prefix):
                 try:
@@ -483,7 +532,7 @@ def export_zip():
     """将所有图片及对应的标签文件导出为 ZIP。
     请求体 JSON：
         txt_ext: str   标签后缀，如 'txt'（常规标签）或 'nl'（自然语言描述）
-    返回 ZIP 文件下载，标签文件名重置为与图片同名。
+    返回 ZIP 文件下载，标签文件名重置为与图片同名。所有文件放入 zip 内 train/ 文件夹。
     """
     import io
     import zipfile
@@ -504,7 +553,7 @@ def export_zip():
             img_path = os.path.join(upload_dir, filename)
             if not os.path.exists(img_path):
                 continue
-            zf.write(img_path, filename)
+            zf.write(img_path, f"train/{filename}")
 
             base = os.path.splitext(filename)[0]
 
@@ -530,11 +579,11 @@ def export_zip():
 
                 if tags_content or nl_content:
                     merged = tags_content + (', ' + nl_content if tags_content and nl_content else nl_content)
-                    zf.writestr(f"{base}.txt", merged.encode('utf-8'))
+                    zf.writestr(f"train/{base}.txt", merged.encode('utf-8'))
             else:
                 txt_path = os.path.join(upload_dir, f"{base}.txt")
                 if os.path.exists(txt_path):
-                    zf.write(txt_path, f"{base}.txt")
+                    zf.write(txt_path, f"train/{base}.txt")
 
     buf.seek(0)
     return (

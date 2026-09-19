@@ -5,12 +5,42 @@ from io import BytesIO
 from flask import Blueprint, request, jsonify, Response, current_app, send_file, stream_with_context
 from config import safe_filename, is_within_directory, get_realesrgan_config, get_birefnet_config
 from sse_utils import sse_event
+import logging
+
+
+log = logging.getLogger(__name__)
 
 image_editor_bp = Blueprint('image_editor', __name__)
 
 # Real-ESRGAN upsampler 缓存（首次加载后常驻内存，与 _wd14_model_cache 同理）。
 # 按 model_path + tile 作为 key 失效，避免热加载 .env 切换模型后仍用旧实例。
 _realesrgan_cache = {'upsampler': None, 'model_key': None}
+
+
+def _write_png_atomic(path, img, compression=3):
+    """原子写 PNG：编码到内存 → 写 .tmp → os.replace 覆盖目标。
+
+    不用 cv2.imwrite(目标) 的原因有二：
+    1) imwrite 的编码器按**扩展名**推断，写 `x.png.tmp` 会直接失败，没法做临时文件；
+    2) 直接覆写目标时若中途失败（磁盘满/进程被杀/cv2 返回 False），原图已被截断，
+       用户既丢了原图也没拿到新图。imencode 先拿到完整字节再落盘可避免。
+    返回 True/False（与 cv2.imwrite 口径一致）。"""
+    import cv2
+    ok, buf = cv2.imencode('.png', img, [cv2.IMWRITE_PNG_COMPRESSION, compression])
+    if not ok:
+        return False
+    tmp_path = path + '.tmp'
+    try:
+        with open(tmp_path, 'wb') as f:
+            f.write(buf.tobytes())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    return True
 
 
 def _parse_bg_color(raw):
@@ -71,18 +101,23 @@ def process_image():
     new_filename = os.path.splitext(filename)[0] + '.png'
     save_path = os.path.join(upload_dir, new_filename)
 
-    # 扩展名变化时删除旧文件
-    if original_ext != '.png':
-        old_path = os.path.join(upload_dir, filename)
-        if os.path.exists(old_path) and os.path.abspath(old_path) != os.path.abspath(save_path):
-            os.unlink(old_path)
+    # 已有同名 .png 时直接覆写，不要先删——删了再写失败就是「原图没了、新图也没成」。
+    # 仅当「源文件名 ≠ 目标文件名」（扩展名变化，如 .jpg → .png）时才在**写成功之后**删除旧文件。
+    is_same_path = os.path.abspath(os.path.join(upload_dir, filename)) == os.path.abspath(save_path)
 
     try:
-        ret = cv2.imwrite(save_path, img, [cv2.IMWRITE_PNG_COMPRESSION, 3])
+        ret = _write_png_atomic(save_path, img)
         if not ret:
-            return jsonify({'success': False, 'error': '图片写入失败（cv2.imwrite 返回 False）'}), 500
+            return jsonify({'success': False, 'error': '图片写入失败（PNG 编码失败）'}), 500
     except Exception as e:
         return jsonify({'success': False, 'error': f'保存失败: {str(e)}'}), 500
+
+    # 新图已安全落盘，此时删除扩展名不同的旧文件才是安全的
+    if not is_same_path and original_ext != '.png':
+        try:
+            os.unlink(os.path.join(upload_dir, filename))
+        except OSError:
+            pass
 
     return jsonify({'success': True, 'filename': new_filename,
                     'width': img.shape[1], 'height': img.shape[0]})
@@ -113,7 +148,7 @@ def batch_alpha_to_white():
                 return jsonify({'success': True, 'message': 'no_alpha'})
             alpha = img[:, :, 3:4] / 255.0
             result = (img[:, :, :3] * alpha + bg_rgb * (1.0 - alpha)).astype(np.uint8)
-            if not cv2.imwrite(fpath, result, [cv2.IMWRITE_PNG_COMPRESSION, 3]):
+            if not _write_png_atomic(fpath, result):
                 return jsonify({'success': False, 'error': '图片写入失败'}), 500
             return jsonify({'success': True, 'converted': 1, 'item': filename})
         except Exception as e:
@@ -155,8 +190,8 @@ def batch_alpha_to_white():
                     result = img[:, :, :3] * alpha + bg_rgb * (1.0 - alpha)
                     result = result.astype(np.uint8)
 
-                    if not cv2.imwrite(fpath, result, [cv2.IMWRITE_PNG_COMPRESSION, 3]):
-                        raise RuntimeError('图片写入失败 (cv2.imwrite 返回 False)')
+                    if not _write_png_atomic(fpath, result):
+                        raise RuntimeError('图片写入失败 (PNG 编码失败)')
                     converted += 1
                     yield sse_event('progress', {
                         'current': i + 1, 'total': total, 'item': fname
@@ -214,7 +249,7 @@ def _load_realesrgan_upsampler(cfg):
     )
 
     _realesrgan_cache = {'upsampler': upsampler, 'model_key': model_key}
-    print(f"[RealESRGAN] 模型加载完成: {cfg['model_path']}, tile={cfg['tile']}, "
+    log.info(f"[RealESRGAN] 模型加载完成: {cfg['model_path']}, tile={cfg['tile']}, "
           f"half={half}, device={upsampler.device}")
     return upsampler
 
