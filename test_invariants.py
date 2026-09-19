@@ -556,6 +556,140 @@ def test_generator_exit_guard_present_where_cancellable():
 
 
 @case
+def test_cancel_registry_survives_overlapping_runs():
+    """同名多轮并发时，两轮必须**同时**可被取消，且结束一轮不得摘掉另一轮。
+
+    原 bug：注册表是 `dict[name] = evt`，后来的覆盖先前的。两个后果：
+      1) 先启动的那轮从注册表里消失 → _cancel_all 找不到它 → 永远取消不掉，
+         一直烧 GPU 到跑完（日志里 17:51 启动的那轮 20 分钟后还在输出）
+      2) 先启动的那轮结束时 `_unregister_cancel(name)` 会把**当前**登记的那个
+         摘掉 → 后启动的那轮也失去可取消性
+    日志里的表现是同一个操作名出现多组 total（708/667/662/659 同时存在）。
+    """
+    import tageditor.translate.translation as tr
+    saved = dict(tr._active_cancel_events)
+    try:
+        tr._active_cancel_events.clear()
+        old = tr._register_cancel('llm_process_db')
+        new = tr._register_cancel('llm_process_db')
+
+        # 关键断言 1：两轮都在册，_cancel_all 必须同时停掉两轮。
+        # 用 `dict[name] = {evt}`（只覆盖但仍是集合）的实现能骗过「新轮还活着」
+        # 那条断言，却会让 old 从注册表消失 —— 必须显式检查 old 也能被取消。
+        tr._cancel_all()
+        ok(old.is_set(), '先启动的那一轮也必须可被取消（原先被覆盖丢失）')
+        ok(new.is_set(), '后启动的那一轮也必须可被取消')
+
+        # 关键断言 2：重新来过，旧轮结束时只注销自己，不得摘掉新轮
+        tr._active_cancel_events.clear()
+        old = tr._register_cancel('llm_process_db')
+        new = tr._register_cancel('llm_process_db')
+        tr._unregister_cancel('llm_process_db', old)
+        tr._cancel_all()
+        ok(new.is_set(), '旧轮注销后，新轮仍必须可被 _cancel_all 取消')
+        ok(tr._has_active('llm_process_db'), '新轮的登记不该被旧轮摘掉')
+    finally:
+        tr._active_cancel_events.clear()
+        tr._active_cancel_events.update(saved)
+
+
+@case
+def test_cancel_name_stops_only_same_name():
+    """_cancel_name 只停同名轮次，不牵连同时在跑的其它操作。
+
+    重复点「批量深度翻译」时要把旧轮停掉，但此刻可能正在同步标签库/
+    抓共现 —— 那些不该被一个翻译动作带停。
+    """
+    import tageditor.translate.translation as tr
+    saved = dict(tr._active_cancel_events)
+    try:
+        tr._active_cancel_events.clear()
+        llm = tr._register_cancel('llm_process_db')
+        sync = tr._register_cancel('sync_tags_db')
+        n = tr._cancel_name('llm_process_db')
+        eq(n, 1, '只应置位 1 个事件')
+        ok(llm.is_set(), '同名操作必须被停')
+        ok(not sync.is_set(), '别的操作不得被牵连')
+    finally:
+        tr._active_cancel_events.clear()
+        tr._active_cancel_events.update(saved)
+
+
+@case
+def test_cancel_registry_does_not_leak_or_over_remove():
+    """注销必须按对象身份，且全部注销后不留空 key。"""
+    import threading
+    import tageditor.translate.translation as tr
+    saved = dict(tr._active_cancel_events)
+    try:
+        tr._active_cancel_events.clear()
+        a = tr._register_cancel('fetch_cooc')
+        b = tr._register_cancel('fetch_cooc')
+        # 注销一个不属于自己的 event：不得误伤
+        tr._unregister_cancel('fetch_cooc', threading.Event())
+        ok(tr._has_active('fetch_cooc'), '外来 event 不该摘掉真实登记')
+        tr._unregister_cancel('fetch_cooc', a)
+        ok(tr._has_active('fetch_cooc'), '还剩 b，不该整组清掉')
+        tr._unregister_cancel('fetch_cooc', b)
+        ok(not tr._has_active('fetch_cooc'), '全部注销后应无活跃')
+        ok('fetch_cooc' not in tr._active_cancel_events, '空组不该残留 key')
+    finally:
+        tr._active_cancel_events.clear()
+        tr._active_cancel_events.update(saved)
+
+
+@case
+def test_all_unregister_calls_pass_their_event():
+    """每个 _unregister_cancel 调用都必须传自己的 evt。
+
+    不传 evt 会走「按名字整组清除」的兜底分支 —— 在并发同名场景下就是原 bug
+    的另一种写法。所有调用点的 evt 都在同一闭包作用域内，没有理由省略。
+    """
+    import ast
+    offenders = []
+    for f in all_source_files():
+        try:
+            tree = ast.parse(f.read_text(encoding='utf-8'))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and getattr(node.func, 'id', '') == '_unregister_cancel'
+                    and len(node.args) < 2):
+                offenders.append('%s:%d' % (f.relative_to(ROOT), node.lineno))
+    eq(offenders, [], '这些 _unregister_cancel 调用没传 evt')
+
+
+@case
+def test_repeated_trigger_stops_previous_run():
+    """重复触发同一操作时，必须先把同名旧轮停掉（并发守卫）。
+
+    源码级断言：路由里要出现 _cancel_name("<自己的名字>")。
+    没有它，重复点击会叠出多轮抢同一个模型端点 + 同时写同一个 SQLite。
+    """
+    tr = src_of('translation')
+    ok(re.search(r'_cancel_name\(\s*["\']llm_process_db["\']', tr),
+       'llm_process_db 缺少重复触发守卫（应先 _cancel_name 停掉同名旧轮）')
+    pp = src_of('prompt_tool')
+    ok(re.search(r'_cancel_name\(\s*["\']prompt_tool["\']', pp),
+       'prompt_tool 缺少重复触发守卫')
+
+
+@case
+def test_generator_exit_log_does_not_claim_user_action():
+    """GeneratorExit 的日志不得写成「前端中断连接」这类断言用户操作的说法。
+
+    该分支覆盖页面刷新/导航/关标签页/浏览器回收，不只是点「中断」。
+    原先的措辞让每次刷新页面都留下一条像用户主动取消的日志 —— 排查时被误导。
+    """
+    tr = src_of('translation')
+    for pat in (r'前端中断连接', r'用户已取消', r'用户主动中断'):
+        ok(not re.search(pat, tr),
+           'GeneratorExit 分支的日志措辞断言了用户操作（%s）；'
+           '该分支也覆盖页面刷新/导航' % pat)
+
+
+@case
 def test_sse_total_step_count_is_six():
     """prompt_tool 的 total 必须是 6 —— CLAUDE.md:『别把 total 改成 7』。
 

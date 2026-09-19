@@ -1234,9 +1234,16 @@ def prompt_adjust():
     except _PromptFatal as e:
         return jsonify({'error': str(e)}), 400
 
-    from tageditor.translate.translation import _register_cancel, _unregister_cancel
+    from tageditor.translate.translation import (
+        _register_cancel, _unregister_cancel, _cancel_name)
 
     def generate():
+        # 并发守卫：同名旧轮先停掉，避免重复点击叠出多轮抢同一个模型端点。
+        # 只停自己的名字，不影响同时可能在跑的标签库同步等操作。
+        stale = _cancel_name('prompt_tool')
+        if stale:
+            log.warning('[PromptTool] 检测到 %d 个同名旧轮次，已请求其停止（本轮重新开始）', stale)
+
         cancel_evt = _register_cancel('prompt_tool')
         try:
             yield from _run(cancel_evt)
@@ -1244,6 +1251,8 @@ def prompt_adjust():
             # 客户端断开 / 用户点「中断」：GeneratorExit 继承 BaseException，
             # 不走下面的 except Exception，必须在此处显式置位，
             # 否则 _run 内的 6 处 _cancelled() 检查全是死代码，已发出的 LLM 请求会跑满超时。
+            #
+            # 注意措辞：这条分支也覆盖页面刷新/导航，不只是用户点「中断」。
             cancel_evt.set()
             raise
         except _PromptFatal as e:
@@ -1254,7 +1263,7 @@ def prompt_adjust():
             traceback.print_exc()
             yield sse_event('fatal', {'error': f'内部错误：{e}'})
         finally:
-            _unregister_cancel('prompt_tool')
+            _unregister_cancel('prompt_tool', cancel_evt)
 
     def _run(cancel_evt):
         cfg = get_prompt_tool_config()

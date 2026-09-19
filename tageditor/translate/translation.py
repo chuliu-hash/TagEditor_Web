@@ -333,7 +333,7 @@ def sync_tags_db():
                 pass
             yield sse_event('fatal', {'error': f'同步异常终止: {e}'})
         finally:
-            _unregister_cancel("sync_tags_db")
+            _unregister_cancel("sync_tags_db", cancel_evt)
             if os.path.exists(sqlite_path):
                 os.remove(sqlite_path)
 
@@ -429,7 +429,7 @@ def crawl_tag_groups():
             log.error(f'[crawl_tag_groups] 异常终止: {e}')
             yield sse_event('fatal', {'error': f'爬取异常终止: {e}'})
         finally:
-            _unregister_cancel("crawl_tag_groups")
+            _unregister_cancel("crawl_tag_groups", cancel_evt)
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
@@ -446,14 +446,30 @@ def llm_process_db():
     from tageditor.core.config import get_tag_db_config
     db_path = get_tag_db_config()['db_path']
 
+    # 并发守卫：本轮启动前，把**同名的**旧轮停掉。
+    #
+    # 为什么必须有：原先没有任何守卫，用户重复点「批量深度翻译」（或页面刷新后
+    # 重新点）会叠出多轮同时跑 —— 它们抢同一个 llama.cpp 单 slot、同时写同一个
+    # SQLite，界面进度还会互相覆盖（日志里同时出现 708/667/662/659 四组计数）。
+    # 更糟的是旧轮停不下来：它的 cancel_evt 已被后来者的 _unregister 摘掉。
+    #
+    # 只停同名的旧轮，不调 _cancel_all —— 标签库同步/共现抓取可能也在跑，
+    # 它们不该被「翻译」这个动作牵连。
+    stale = _cancel_name("llm_process_db")
+    if stale:
+        log.warning('[LLM 翻译] 检测到 %d 个同名旧轮次，已请求其停止（本轮重新开始）', stale)
+
     cancel_evt = _register_cancel("llm_process_db")
 
     def generate():
         try:
             yield from _generate()
         except GeneratorExit:
+            # 注意措辞：这里接的是**任何**形式的连接终止，不只是用户点「中断」——
+            # 页面刷新/导航、关标签页、浏览器回收响应流都会走到这。原先写「前端中断
+            # 连接」，于是每次刷新页面都留下一条像用户主动取消的日志，极难排查。
             cancel_evt.set()
-            log.info('[LLM 翻译] 前端中断连接，已设置取消信号')
+            log.info('[LLM 翻译] 连接断开（页面刷新/导航/取消），已设置取消信号')
             raise
         except Exception as e:
             log.error(f'[LLM 翻译] 致命错误: {e}')
@@ -461,7 +477,7 @@ def llm_process_db():
             traceback.print_exc()
             yield sse_event('fatal', {'error': f'翻译管线异常: {str(e)}'})
         finally:
-            _unregister_cancel("llm_process_db")
+            _unregister_cancel("llm_process_db", cancel_evt)
 
     def _generate():
         import time
@@ -1181,35 +1197,75 @@ def danbooru_update():
         if not finished:
             yield sse_event('fatal', {'error': '增量更新异常终止（未收到完成事件）'})
 
-        _unregister_cancel("danbooru_update")
+        _unregister_cancel("danbooru_update", cancel_evt)
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
 # 取消事件注册表：各 SSE 路线创建各自的 Event，/danbooru_cancel 统一取消所有活跃操作。
+#
+# **同一个操作名可能同时有多轮在跑**（用户重复点「批量深度翻译」，或页面刷新后
+# 旧的那轮还没退出）。原先用 `dict[name] = evt` 直接覆盖，于是：
+#   1) 旧的一轮结束时 `_unregister_cancel(name)` 把**新**一轮的 event 摘掉了 ——
+#      此后点「中断」对新那轮无效（_cancel_all 找不到它），它会一直烧 GPU 到跑完。
+#   2) 即使都在字典里，也只能存下一轮，先启动的那轮永远取消不掉。
+# 改成 set 收集同一个名字下的所有 event，并在注销时**按对象身份**移除，
+# 互不干扰。
 import threading as _threading
-_active_cancel_events: dict[str, _threading.Event] = {}
+_active_cancel_events: dict[str, set] = {}   # name -> {Event, ...}
 _cancel_events_lock = _threading.Lock()
 
 def _register_cancel(name: str) -> _threading.Event:
-    """注册一个操作名到取消事件，返回新建的 Event。每个 SSE 路线各自注册。"""
+    """注册一个操作名到取消事件，返回新建的 Event。每个 SSE 路线各自注册。
+
+    同名多轮各自持有独立的 Event 并**同时**登记在册，任意一轮的结束都不会
+    影响其它轮的可取消性。调用方必须把返回的 Event 传给 _unregister_cancel。
+    """
     evt = _threading.Event()
     with _cancel_events_lock:
-        _active_cancel_events[name] = evt
+        _active_cancel_events.setdefault(name, set()).add(evt)
     return evt
 
-def _unregister_cancel(name: str):
-    """操作完成/取消后注销。"""
+def _unregister_cancel(name: str, evt=None):
+    """操作完成/取消后注销。
+
+    **必须传 evt**：只移除「就是自己这一个」的登记。省略 evt 时按名字整组清除，
+    仅用于确认没有并发同名的场景（当前所有调用点都传）。
+    """
     with _cancel_events_lock:
-        _active_cancel_events.pop(name, None)
+        if evt is None:
+            _active_cancel_events.pop(name, None)
+            return
+        group = _active_cancel_events.get(name)
+        if group is not None:
+            group.discard(evt)
+            if not group:
+                _active_cancel_events.pop(name, None)
 
 def _cancel_all():
     """设置所有活跃的取消事件（前端一键取消）。"""
     with _cancel_events_lock:
-        events = list(_active_cancel_events.values())
+        events = [e for group in _active_cancel_events.values() for e in group]
     for e in events:
         e.set()
+
+def _cancel_name(name: str) -> int:
+    """只取消指定名字下的所有活跃操作，返回置位的事件数。
+
+    用于「重复触发同一个操作」：新的一轮要把**同名的旧轮**停掉，但不该连带
+    停掉别的操作（比如正在同步标签库时点了深度翻译）。
+    """
+    with _cancel_events_lock:
+        events = list(_active_cancel_events.get(name, ()))
+    for e in events:
+        e.set()
+    return len(events)
+
+def _has_active(name: str) -> bool:
+    """该操作名下是否已有活跃轮次（用于重复触发守卫）。"""
+    with _cancel_events_lock:
+        return bool(_active_cancel_events.get(name))
 
 
 # ---------------------------------------------------------------------------
@@ -1308,7 +1364,7 @@ def fetch_cooc():
             log.error(f'[fetch_cooc] 异常: {e}')
             yield sse_event('fatal', {'error': f'异常终止: {e}'})
         finally:
-            _unregister_cancel("fetch_cooc")
+            _unregister_cancel("fetch_cooc", cancel_evt)
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
@@ -1403,7 +1459,7 @@ def trim_cooc():
             log.error(f'[trim_cooc] 异常: {e}')
             yield sse_event('fatal', {'error': f'异常终止: {e}'})
         finally:
-            _unregister_cancel("trim_cooc")
+            _unregister_cancel("trim_cooc", cancel_evt)
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
