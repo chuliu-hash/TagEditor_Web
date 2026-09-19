@@ -1,22 +1,31 @@
 @echo off
-REM ===== TagEditor_Web 一键安装依赖（Windows）=====
-REM 用法：双击本文件，或在 cmd / PowerShell 里执行 setup.bat
+REM ===== TagEditor_Web dependency installer (Windows) =====
+REM Usage: double-click this file, or run "setup.bat" in cmd / PowerShell.
 REM
-REM 做的事：检查 conda 环境 → 装依赖 → 处理 pip 搞不定的三个包
-REM         （torch 的 CUDA 版、basicsr 的 --no-deps、onnxruntime-gpu 的源）
-REM 可重复执行：已装好的会跳过，不会重复下载。
+REM What it does: find conda env -> install deps -> handle the three packages
+REM that plain pip cannot install correctly (CUDA torch, basicsr --no-deps,
+REM onnxruntime-gpu's extra index). Safe to re-run: installed packages are skipped.
+REM
+REM WHY THIS FILE IS PURE ASCII (no Chinese anywhere, not even in comments):
+REM cmd.exe parses batch files byte-by-byte using the system ANSI codepage
+REM (GBK on Chinese Windows). A Chinese character in UTF-8 takes 3 bytes, but
+REM GBK pairs bytes 2-at-a-time, so the decoder drifts out of alignment and
+REM eventually swallows an ASCII letter as a trailing byte -- the rest of the
+REM line then gets misparsed AS A COMMAND. That is not just garbled display;
+REM it can execute unintended commands. Keeping every byte ASCII makes the
+REM file encoding-independent: UTF-8, GBK and ASCII are identical for it.
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
 set ENV_NAME=tageditor
 
 echo ============================================================
-echo  TagEditor_Web 依赖安装
+echo  TagEditor_Web - installing dependencies
 echo ============================================================
 echo.
 
-REM ---------- 1. 找 Python ----------
-echo [1/6] 查找 conda 环境 "%ENV_NAME%" ...
+REM ---------- 1. locate Python ----------
+echo [1/6] Looking for conda env "%ENV_NAME%" ...
 set PYEXE=
 for %%P in (
     "D:\Miniconda3\envs\%ENV_NAME%\python.exe"
@@ -36,81 +45,81 @@ if not defined PYEXE (
 )
 if not defined PYEXE (
     echo.
-    echo   [错误] 找不到 conda 环境 "%ENV_NAME%"。
-    echo   请先创建它，再重新运行本脚本：
+    echo   [ERROR] conda env "%ENV_NAME%" not found.
+    echo   Create it first, then run this script again:
     echo.
     echo       conda create -n %ENV_NAME% python=3.11 -y
     echo.
     goto :fail
 )
-echo   使用: %PYEXE%
+echo   Using: %PYEXE%
 "%PYEXE%" --version
 echo.
 
-REM ---------- 2. 基础依赖 ----------
-echo [2/6] 安装基础依赖（flask / numpy / pandas / opencv / openai 等）...
+REM ---------- 2. base dependencies ----------
+echo [2/6] Installing base dependencies ^(flask / numpy / pandas / opencv / openai ...^) ...
 "%PYEXE%" -m pip install --upgrade pip -q
 "%PYEXE%" -m pip install -r requirements.txt --upgrade-strategy only-if-needed
 if errorlevel 1 (
-    echo   [警告] 基础依赖有失败项，继续处理需要特殊步骤的包...
+    echo   [WARN] Some base packages failed; continuing with the special-case packages...
 )
 echo.
 
-REM ---------- 3. torch（CUDA 版）----------
-echo [3/6] 检查 torch ...
+REM ---------- 3. torch (CUDA build) ----------
+echo [3/6] Checking torch ...
 "%PYEXE%" -c "import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)" >nul 2>nul
 if !errorlevel! equ 0 (
-    "%PYEXE%" -c "import torch; print('  已有可用的 CUDA torch:', torch.__version__, '| CUDA', torch.version.cuda)"
+    "%PYEXE%" -c "import torch; print('  CUDA torch already available:', torch.__version__, '| CUDA', torch.version.cuda)"
 ) else (
-    echo   未检测到可用的 CUDA torch，安装 cu121 版本（约 2.5GB，需要几分钟）...
-    echo   如果显卡驱动对应别的 CUDA 版本，请改下面这行的 cu121：
+    echo   No usable CUDA torch found. Installing cu121 build ^(~2.5GB, takes a few minutes^)...
+    echo   If your driver targets a different CUDA version, edit the cu121 in this line:
     echo     https://pytorch.org/get-started/locally/
     "%PYEXE%" -m pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
-    if errorlevel 1 echo   [警告] torch 安装失败，超清放大/背景移除将不可用（其余功能不受影响）
+    if errorlevel 1 echo   [WARN] torch install failed; upscaling/background-removal will be unavailable ^(other features unaffected^)
 )
 echo.
 
 REM ---------- 4. basicsr ----------
-echo [4/6] 检查 basicsr ...
+echo [4/6] Checking basicsr ...
 "%PYEXE%" -c "import basicsr" >nul 2>nul
 if !errorlevel! equ 0 (
-    echo   已安装，跳过
+    echo   Already installed, skipping
 ) else (
-    echo   basicsr 依赖已下架的 tb-nightly，必须用 --no-deps 装再补运行时依赖...
+    echo   basicsr depends on the retired tb-nightly, so it needs --no-deps plus manual runtime deps...
     "%PYEXE%" -m pip install basicsr==1.4.2 --no-deps
     "%PYEXE%" -m pip install addict future lmdb scipy scikit-image tqdm yapf
-    if errorlevel 1 echo   [警告] basicsr 安装失败，超清放大/背景移除将不可用
+    if errorlevel 1 echo   [WARN] basicsr install failed; upscaling/background-removal will be unavailable
 )
 echo.
 
 REM ---------- 5. onnxruntime-gpu ----------
-echo [5/6] 检查 onnxruntime-gpu（WD14 打标用）...
+echo [5/6] Checking onnxruntime-gpu ^(used by WD14 tagging^) ...
 "%PYEXE%" -c "import onnxruntime" >nul 2>nul
 if !errorlevel! equ 0 (
-    "%PYEXE%" -c "import onnxruntime as o; print('  已安装:', o.__version__)"
-    echo   [提示] requirements.txt 里钉的是 1.18.0；若你已装更高版本且能加载模型，
-    echo          不要为了对齐版本而降级（本脚本不做降级）。
+    "%PYEXE%" -c "import onnxruntime as o; print('  Already installed:', o.__version__)"
+    echo   [NOTE] requirements.txt pins 1.18.0; if you already have a newer version
+    echo          that loads models fine, do NOT downgrade just to match this pin.
 ) else (
-    echo   安装 onnxruntime-gpu（CUDA 12.x 专用源）...
+    echo   Installing onnxruntime-gpu ^(CUDA 12.x index^) ...
     "%PYEXE%" -m pip install onnxruntime-gpu==1.18.0 --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
     if errorlevel 1 (
-        echo   [警告] GPU 版安装失败，改装 CPU 版（WD14 仍可用，只是慢些）
+        echo   [WARN] GPU build failed; installing the CPU build instead ^(WD14 still works, just slower^)
         "%PYEXE%" -m pip install onnxruntime
     )
 )
 echo.
 
-REM ---------- 6. 自检 ----------
-echo [6/6] 自检 ...
+REM ---------- 6. self-check ----------
+echo [6/6] Running environment self-check ...
 "%PYEXE%" -c "import os,sys; sys.path.insert(0,'.'); exec(open('setup_check.py',encoding='utf-8').read())" 2>nul
 if errorlevel 1 (
-    echo   [提示] 自检脚本未跑起来，可稍后手动执行: python setup_check.py
+    echo   [NOTE] Self-check did not run; you can run it later with: python setup_check.py
 )
 echo.
 echo ============================================================
-echo  安装完成。
-echo  下一步：复制 .env.example 为 .env 并填写模型地址与密钥，
-echo          然后运行 run.bat 启动。
+echo  Done.
+echo  Next: copy .env.example to .env, fill in your model endpoint
+echo        and API keys, then run run.bat to start.
 echo ============================================================
 endlocal
 pause
