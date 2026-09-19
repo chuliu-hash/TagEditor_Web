@@ -577,6 +577,244 @@ def test_upload_next_pages_use_endpoint_names():
         ok(val in eps, '_UPLOAD_NEXT_PAGES[%r]=%r 不是有效 endpoint' % (key, val))
 
 
+@case
+def test_no_print_isms_in_log_calls():
+    """log.* 调用不能带 print 专属参数，也不能缺 msg。
+
+    这是 print→logging 机械迁移留下的典型伤：只换了函数名，参数原样保留。
+    实际踩到的是 `log.info(f"...", end='')`（进度条想用 \\r 原地刷新）——
+    logging 的 `Logger._log()` 不接受 `end`，直接 TypeError。在那个场景里
+    它被外层 try/except 吞掉，表现为「下载失败: Logger._log() got an
+    unexpected keyword argument 'end'」，看起来像网络问题，实际是日志调用写错。
+    `log.info()`（无参）同理。
+
+    这类错误**导入期不报**，只在对应分支被执行时才炸，所以必须靠源码级断言守。
+    """
+    import ast
+    bad = []
+    for p in all_source_files():
+        src = p.read_text(encoding='utf-8')
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            continue
+        for n in ast.walk(tree):
+            if not isinstance(n, ast.Call):
+                continue
+            f = n.func
+            # 只认 `log.<level>(...)` 形态（各模块的 logger 变量名就是 log）
+            if not (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                    and f.value.id == 'log'
+                    and f.attr in ('info', 'warning', 'error', 'debug', 'critical',
+                                   'exception')):
+                continue
+            for kw in n.keywords:
+                if kw.arg in ('end', 'sep', 'flush', 'file'):
+                    bad.append('%s:%d log.%s(...) 带了 print 专属参数 %s='
+                               % (p, n.lineno, f.attr, kw.arg))
+            if not n.args and not n.keywords:
+                bad.append('%s:%d log.%s() 缺少 msg 参数'
+                           % (p, n.lineno, f.attr))
+    eq(bad, [], '存在 print 式残留的 log 调用')
+
+
+@case
+def test_bangumi_circuit_breaker():
+    """Bangumi 连续失败达阈值后必须停止发包。
+
+    为什么这条重要：Bangumi 服务故障时（实测其对每个请求返 500，因为它的
+    Meilisearch 挂了），不改的话每个标签都要撞满 12 个请求 × timeout=10s，
+    且 `verify_ssl=False` 那轮还会再来一遍。一批 32 个标签最坏接近 10 分钟，
+    而结果必然是空 —— 纯白等。熔断后前 5 个标签之后直接返回空。
+
+    同时守两件事：
+      - 5xx 时不该跑 verify_ssl=False 那一轮（那是给证书问题准备的）
+      - 200 但无匹配项算「成功」，不能触发熔断（没有匹配是正常结果）
+    """
+    import time
+    from unittest import mock
+    import requests
+    import tageditor.translate.llm_pipeline as lp
+
+    class R500:
+        status_code = 500
+        def json(self): return {}
+
+    class R200Empty:
+        status_code = 200
+        def json(self): return {'data': []}
+
+    def boom(*a, **k):
+        raise requests.exceptions.RequestException('too many 500 error responses')
+
+    lp.reset_bangumi_circuit()
+    try:
+        calls = {'n': 0}
+
+        def counted(*a, **k):
+            calls['n'] += 1
+            return boom()
+
+        with mock.patch.object(requests.Session, 'post', counted), \
+             mock.patch.object(time, 'sleep', lambda *_: None):
+            for i in range(lp._BANGUMI_FAIL_THRESHOLD):
+                lp._fetch_bangumi_entity('t%d_(series)' % i, 3, 'tok')
+            ok(lp._bangumi_circuit_open(), '达阈值后应跳闸')
+            before = calls['n']
+            for i in range(20):
+                lp._fetch_bangumi_entity('after%d_(series)' % i, 3, 'tok')
+            eq(calls['n'], before, '跳闸后不应再发包')
+
+        # 5xx 时不该走 verify=False 那一轮
+        lp.reset_bangumi_circuit()
+        verifies = []
+
+        def rec(self, url, **kw):
+            verifies.append(kw.get('verify'))
+            raise requests.exceptions.RequestException('boom')
+
+        with mock.patch.object(requests.Session, 'post', rec), \
+             mock.patch.object(time, 'sleep', lambda *_: None):
+            lp._fetch_bangumi_entity('x_(series)', 3, 'tok')
+        ok(False not in verifies or len(set(verifies)) == 1,
+           '5xx 时混用了 verify=True/False：%s' % verifies)
+
+        # 空结果不能触发熔断
+        lp.reset_bangumi_circuit()
+        with mock.patch.object(requests.Session, 'post',
+                               lambda *a, **k: R200Empty()), \
+             mock.patch.object(time, 'sleep', lambda *_: None):
+            for i in range(10):
+                lp._fetch_bangumi_entity('nomatch%d' % i, 3, 'tok')
+        ok(not lp._bangumi_circuit_open(),
+           '200 但无匹配项是正常结果，不该触发熔断')
+
+        # 非 3/4 分类不该发请求
+        lp.reset_bangumi_circuit()
+        calls['n'] = 0
+        with mock.patch.object(requests.Session, 'post', counted):
+            for cat in (0, 1, 5, -1):
+                lp._fetch_bangumi_entity('some_tag', cat, 'tok')
+        eq(calls['n'], 0, 'category 0/1/5 不该发起 Bangumi 请求')
+    finally:
+        lp.reset_bangumi_circuit()   # 别把跳闸状态留给后续用例
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 配置一致性：.env / .env.example / 代码读取 三者必须对得上
+# ═══════════════════════════════════════════════════════════════════════════
+
+# 通过变量名间接读取、正则扫不到的键（logging_setup 的 _level(name, ...)）
+_INDIRECT_ENV_KEYS = {'LOG_LEVEL', 'LOG_FILE_LEVEL'}
+
+
+def _env_keys(path):
+    """读一个 .env 风格文件的键（含被注释掉的 #KEY= 形式）。
+
+    被注释的也算：.env.example 里刻意用注释保留「可选/默认即可」的项。
+    """
+    out = set()
+    p = ROOT / path
+    if not p.exists():
+        return out
+    import re as _re
+    for line in p.read_text(encoding='utf-8').splitlines():
+        s = line.strip()
+        if not s or '=' not in s:
+            continue
+        k = s.split('=', 1)[0].strip().lstrip('#').strip()
+        if _re.fullmatch(r'[A-Z_][A-Z_0-9]*', k):
+            out.add(k)
+    return out
+
+
+def _code_env_keys():
+    """代码里真正会读的 env 键。"""
+    import re as _re
+    keys = set(_INDIRECT_ENV_KEYS)
+    for p in all_source_files():
+        src = p.read_text(encoding='utf-8')
+        for m in _re.finditer(r"os\.environ\.get\(\s*'([A-Z_0-9]+)'", src):
+            keys.add(m.group(1))
+        for m in _re.finditer(r"os\.environ\[\s*'([A-Z_0-9]+)'\s*\]", src):
+            keys.add(m.group(1))
+    return keys
+
+
+@case
+def test_env_keys_are_documented_in_example():
+    """`.env` 里**实际配置**的每一项都必须在 `.env.example` 里有记录。
+
+    **只查这一个方向**，不要求两边键集合相等：`.env.example` 会用注释列出
+    「有默认值、可选」的项（如 LOG_*），而 `.env` 不必把它们写出来 ——
+    要求相等会把正常状态判成失败。
+
+    守的是反方向漂移（真实踩过）：LLM_TEXT_THINKING / LLM_TEXT_TIMEOUT 曾
+    只加进 `.env`、忘了同步示例，导致「照着示例配的人根本不知道有这两项」。
+    """
+    real, example = _env_keys('.env'), _env_keys('.env.example')
+    if not real:
+        return          # 没有 .env（未配置的环境）就跳过
+    eq(sorted(real - example), [],
+       '.env 已配置但 .env.example 未记录（照示例配的人会漏掉）')
+
+
+@case
+def test_no_dead_config_in_env_example():
+    """.env.example 里的每个键都必须**真的被代码读取**。
+
+    这是 CAPTION_USE_TAGS_AS_HINT / CAPTION_SAVE_AS 那对死配置的教训：
+    它们写在示例里、README 里还列了表格，但代码从来不读 ——
+    用户以为能关掉「描述参考已有标签」，实际关不掉。比没有这个配置更糟。
+    """
+    code = _code_env_keys()
+    example = _env_keys('.env.example')
+    dead = sorted(example - code)
+    eq(dead, [], '.env.example 里存在「代码根本不读」的死配置')
+
+
+@case
+def test_all_code_env_keys_documented():
+    """代码会读的每个 env 键都必须在**某处**有记录。
+
+    判定为「.env.example 或 README 任一提及」。这是刻意的分工，不是放宽：
+      - `.env.example` = 照着填就能跑（只列必填/常改的）
+      - `README` 的配置说明 = 完整参考（连有默认值不必配的也列）
+    README 的配置表还带默认值，比示例更适合查「这项默认是什么」。
+
+    守的是「新加了一个 os.environ.get(...) 却哪都没写」——
+    用户既不知道有这项可调，也不知道该配什么。
+    """
+    import re as _re
+    code = _code_env_keys()
+    readme = (ROOT / 'README.md').read_text(encoding='utf-8')
+    missing = []
+    for k in sorted(code):
+        if ('`%s`' % k) in readme:
+            continue
+        if k in _env_keys('.env.example'):
+            continue
+        missing.append(k)
+    eq(missing, [], '代码读取但 .env.example 与 README 都未记录的键')
+
+
+@case
+def test_readme_config_table_covers_env_example():
+    """README 的配置说明要覆盖 .env.example 的每个键。
+
+    不要求逐字一致，只要求「用户能在 README 里查到这一项」。
+    """
+    import re as _re
+    example = _env_keys('.env.example')
+    readme = (ROOT / 'README.md').read_text(encoding='utf-8')
+    missing = []
+    for k in sorted(example):
+        # README 用 `KEY` 形式提及
+        if ('`%s`' % k) not in readme:
+            missing.append(k)
+    eq(missing, [], 'README 未提及的配置项')
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 
 def main():
