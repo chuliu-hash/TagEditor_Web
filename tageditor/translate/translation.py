@@ -6,7 +6,8 @@
 """
 import os
 import json
-from flask import Blueprint, request, jsonify, current_app, Response
+import threading as _threading
+from flask import Blueprint, request, jsonify, Response
 from tageditor.core.sse_utils import sse_event
 import logging
 
@@ -19,53 +20,89 @@ translation_bp = Blueprint('translation', __name__)
 _TAG_COOC_TOP_K = 20
 
 
-# 本地 SQLite 连接（懒加载，进程级单例）。None 表示 DB 暂不可用。
-# 使用 check_same_thread=False 允许 Flask 多请求（不同线程）复用同一连接。
-# 本应用为单用户本地工具，写并发极低，SQLite 写锁足够保证一致性。
-# 注意：_tag_db_available=False 只是「上一次检测失败」的缓存，不永久否定——
-# 后续调用会重新检测（DB 可能刚被 build_tag_db.py init 创建）。
-_tag_db_conn = None
-_tag_db_available = None  # None=未检测, True/False=上一次检测结果
+# ── 本地 SQLite 连接：**线程本地**，不是进程级单例 ──────────────────────────
+#
+# 为什么必须是线程本地：`app.run()` 只传了 debug/port，而 Flask 3.x 内部是
+# `options.setdefault("threaded", True)` → **每请求一线程**。原先全进程共用一个
+# `check_same_thread=False` 的连接，`sqlite3.threadsafety == 3` 只保证不内存损坏，
+# **事务是连接级的**，于是：
+#   · 线程 A 开着事务时，线程 B 的 commit() 会把 A 的半截事务一起提交；
+#   · 线程 B 的 rollback() 会把 A 已发出但未提交的写回滚掉（A 的 commit 返回成功却什么都没落）；
+#   · B 执行 BEGIN 直接抛 "cannot start a transaction within a transaction"。
+# 实测复现过最严重的一条：`llm_pipeline._apply_results` 的 commit 变成 no-op 却不报错，
+# 而紧随其后的 `_save_history` 已把这批标签记为「已处理」→ 下一轮按 history 永久跳过
+# → **这批翻译永久丢失，界面还显示「完成」**。
+#
+# 改成线程本地后，并发写由 SQLite 自己的 busy_timeout 跨连接串行化（这才是正确做法）。
+# 已实测：线程结束时 thread-local 里的连接会被回收，不会按请求数泄漏句柄
+# （300 个线程建连接后存活 Connection == 0）。
+_local = _threading.local()
+_conn_create_lock = _threading.Lock()
+# schema / 迁移 / FTS 只需在本进程里初始化一次：连接现在是每线程一条，
+# 若不记这个标志，每个新线程都要重跑 executescript + 迁移探测 + 两次 count()。
+_schema_ready = False
 
 
 def _get_tag_db_conn():
-    """懒加载 SQLite 连接。DB 不存在时返回 None，后续查询跳过 SQLite 层直接走 LLM。
-    连接以 check_same_thread=False 打开，允许跨线程复用（Flask 每请求一线程）。
-    不永久缓存「不可用」状态——每次调用都重新检查 DB 是否已出现（build_tag_db.py 可能刚建好）。"""
-    global _tag_db_conn, _tag_db_available
-    # 已有可用连接则复用
-    if _tag_db_conn is not None:
-        return _tag_db_conn
+    """取当前线程的 SQLite 连接（懒加载 + 线程本地）。
+
+    DB 不存在时返回 None，后续查询跳过 SQLite 层直接走 LLM。
+    不永久缓存「不可用」状态——每次调用都重新检查 DB 是否已出现
+    （build_tag_db.py 可能刚建好）。"""
+    global _schema_ready, _tag_db_available
+    conn = getattr(_local, 'conn', None)
+    if conn is not None:
+        return conn
     try:
         import sqlite3
-        from tageditor.db.build_tag_db import SCHEMA, _ensure_fts_index, _rebuild_fts_index, _table_exists, _migrate_to_target_schema
+        from tageditor.db.build_tag_db import (SCHEMA, _PERSISTENT_PRAGMAS,
+                                               _ensure_fts_index,
+                                               _rebuild_fts_index,
+                                               _migrate_to_target_schema,
+                                               apply_conn_pragmas)
         from tageditor.core.config import get_tag_db_config
         db_path = get_tag_db_config()['db_path']
 
-        # sqlite3.connect 会自动创建不存在的文件，所以不需要提前检查 os.path.isfile
-        # check_same_thread=False 允许跨线程；busy_timeout 让写锁竞争时等待而非立即报错；
-        # journal_mode=WAL 允许「增量更新写」与本连接「读」并发不阻塞
-        _tag_db_conn = sqlite3.connect(db_path, check_same_thread=False, timeout=5)
-        _tag_db_conn.row_factory = sqlite3.Row
-        _tag_db_conn.execute('PRAGMA busy_timeout = 5000')
-        _tag_db_conn.execute('PRAGMA journal_mode = WAL')
-        _tag_db_conn.executescript(SCHEMA)
-        # 旧库兼容：列集合与目标不符就迁移
-        if _migrate_to_target_schema(_tag_db_conn):
-            _tag_db_conn.commit()
-        # FTS5 全文索引（search_tags 加速）：建表 + 触发器；空则补数据
-        _ensure_fts_index(_tag_db_conn)
-        fts_count = _tag_db_conn.execute("SELECT count(*) FROM tags_fts").fetchone()[0]
-        tag_count = _tag_db_conn.execute("SELECT count(*) FROM tags").fetchone()[0]
-        if tag_count > 0 and fts_count == 0:
-            _rebuild_fts_index(_tag_db_conn)
-            _tag_db_conn.commit()
+        # sqlite3.connect 会自动创建不存在的文件，所以不需要提前检查 os.path.isfile。
+        # check_same_thread 保持默认 True —— 连接只服务本线程，正好让 SQLite
+        # 用跨连接的方式（busy_timeout + WAL）处理并发，而不是同连接内的假串行。
+        conn = sqlite3.connect(db_path, timeout=5)
+        # row_factory 必须在建连接后立刻设：/tag_detail 等处依赖 dict(r)
+        conn.row_factory = sqlite3.Row
+        # 只设连接级 PRAGMA；journal_mode 是持久属性且有写锁开销，
+        # 放在下面那把锁里设一次（见注释）
+        apply_conn_pragmas(conn, set_persistent=False)
+
+        if not _schema_ready:
+            # 建表/迁移/FTS 是重活且含 DDL，多个线程同时跑会互相撞锁（也浪费），
+            # 故串行化；只在首次真正需要时执行。
+            with _conn_create_lock:
+                if not _schema_ready:
+                    # journal_mode=WAL 是**写库头**的操作，需要短暂写锁。它只需成功设一次
+                    # （属性持久），放在这把锁内就不会与别的线程的 DDL 互撞。
+                    for _k, _v in _PERSISTENT_PRAGMAS:
+                        conn.execute(f'PRAGMA {_k} = {_v}')
+                    conn.executescript(SCHEMA)
+                    # 旧库兼容：列集合与目标不符就迁移
+                    if _migrate_to_target_schema(conn):
+                        conn.commit()
+                    # FTS5 全文索引（search_tags 加速）：建表 + 触发器；空则补数据
+                    fts_rebuilt = _ensure_fts_index(conn)
+                    fts_count = conn.execute("SELECT count(*) FROM tags_fts").fetchone()[0]
+                    tag_count = conn.execute("SELECT count(*) FROM tags").fetchone()[0]
+                    # fts_rebuilt 也要触发重建：布局版本升级时表被 DROP 重建，
+                    # 只靠 fts_count==0 判断在「重建后恰好非空」的情况下会漏掉。
+                    if tag_count > 0 and (fts_count == 0 or fts_rebuilt):
+                        _rebuild_fts_index(conn)
+                        conn.commit()
+                    _schema_ready = True
+
+        _local.conn = conn
         _tag_db_available = True
-        return _tag_db_conn
+        return conn
     except Exception:
         import traceback
         traceback.print_exc()
-        _tag_db_conn = None
         _tag_db_available = False
         return None
 
@@ -138,9 +175,6 @@ def _lookup_en_from_db(cn_names):
         log.error('[translation] _lookup_en_from_db 查询失败，本次反查结果为空:')
         traceback.print_exc()
         return {}
-
-
-import threading as _threading
 
 
 @translation_bp.route('/lookup_cache', methods=['POST'])
@@ -269,6 +303,12 @@ def sync_tags_db():
                 return
             if new_tags:
                 try:
+                    # 连接现在是线程本地的，正常情况下没有残留事务；但本线程若在该连接上
+                    # 留过一个隐式事务（写过但没 commit），显式 BEGIN 会直接抛
+                    # "cannot start a transaction within a transaction"。
+                    # 这里先收干净，让 BEGIN 的语义确定。
+                    if conn.in_transaction:
+                        conn.rollback()
                     conn.execute("BEGIN")
                     conn.executemany(
                         "INSERT OR IGNORE INTO tags (name, cn_name, category, post_count) VALUES (?, ?, ?, ?)",
@@ -381,6 +421,7 @@ def crawl_tag_groups():
 
             last_sent = 0
             finished = False
+            last_error = None
             while t.is_alive() or last_sent < len(events):
                 while last_sent < len(events):
                     evt = events[last_sent]
@@ -392,6 +433,11 @@ def crawl_tag_groups():
                             'total': evt.get('total', '?'),
                             'item': evt.get('item', '')
                         })
+                    elif etype == 'error':
+                        # 与 fetch_cooc 同一个缺口：worker 报的具体原因不能丢，
+                        # 否则前端只能显示「未收到完成信号」，用户不知道该怎么修。
+                        last_error = evt.get('message') or evt.get('error') or '未知错误'
+                        yield sse_event('error', {'error': last_error})
                     elif etype == 'complete':
                         yield sse_event('complete', {'message': evt.get('item', '标签组爬取完成')})
                         finished = True
@@ -418,7 +464,11 @@ def crawl_tag_groups():
             _tag_groups_cache = None
 
             if not finished:
-                if worker_failed:
+                if last_error:
+                    # 报过 error 却走到这里 = worker 出错后正常返回：如实报失败，
+                    # 不要发出「完成」把错误盖掉。
+                    yield sse_event('fatal', {'error': f'爬取失败：{last_error}'})
+                elif worker_failed:
                     yield sse_event('fatal', {'error': '爬取过程出错，详情见日志'})
                 else:
                     yield sse_event('complete', {'message': '标签组爬取完成'})
@@ -440,7 +490,9 @@ def llm_process_db():
     """LLM 三层深度翻译管线（SSE 流式）。
     处理数据库中所有标签，生成中文描述/扩展中文名/NSFW 判定。
     body: {reprocess: bool} — 是否重新处理已处理的标签（默认 false）"""
-    data = request.get_json() or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = {}
     reprocess = data.get('reprocess', False)
 
     from tageditor.core.config import get_tag_db_config
@@ -604,8 +656,10 @@ def llm_process_db():
                         log.error(f'[LLM 翻译] 实体批处理失败: {e}')
                         yield sse_event('error', {'item': f'实体批 {i}-{i + len(batch)}', 'error': str(e)})
                         continue
-                    lp._apply_results(conn, results)
-                    current_run.update(item["name"] for item in results if item.get("name"))
+                    # 只把**真正写入了字段**的标签记入本轮结果：原先无条件
+                    # `results` 里的 name 全算已处理，而模型可能返回 cn_wiki 为空的条目
+                    # → 记进 history 后被永久跳过（实测 512 条有中文名却没中文 wiki）。
+                    current_run.update(lp._apply_results(conn, results))
                     done += len(batch)
                     # 每批保存历史，支持断点续传和中途恢复
                     lp._save_history(db_path, history | current_run)
@@ -631,8 +685,10 @@ def llm_process_db():
                         log.error(f'[LLM 翻译] 常规批处理失败: {e}')
                         yield sse_event('error', {'item': f'常规批 {i}-{i + len(batch)}', 'error': str(e)})
                         continue
-                    lp._apply_results(conn, results)
-                    current_run.update(item["name"] for item in results if item.get("name"))
+                    # 只把**真正写入了字段**的标签记入本轮结果：原先无条件
+                    # `results` 里的 name 全算已处理，而模型可能返回 cn_wiki 为空的条目
+                    # → 记进 history 后被永久跳过（实测 512 条有中文名却没中文 wiki）。
+                    current_run.update(lp._apply_results(conn, results))
                     done += len(batch)
                     # 每批保存历史
                     lp._save_history(db_path, history | current_run)
@@ -660,8 +716,10 @@ def llm_process_db():
                         continue
                     # 必须与 entity/general 层一样落库：兜底层花的是同样的 LLM 调用，
                     # 只记历史不写库 = 结果丢弃 + 该标签被永久跳过（修 bug：原先漏了这一行）
-                    lp._apply_results(conn, results)
-                    current_run.update(item["name"] for item in results if item.get("name"))
+                    # 只把**真正写入了字段**的标签记入本轮结果：原先无条件
+                    # `results` 里的 name 全算已处理，而模型可能返回 cn_wiki 为空的条目
+                    # → 记进 history 后被永久跳过（实测 512 条有中文名却没中文 wiki）。
+                    current_run.update(lp._apply_results(conn, results))
                     done += len(batch)
                     # 每批保存历史
                     lp._save_history(db_path, history | current_run)
@@ -813,7 +871,11 @@ def update_tag_wiki():
     受 cn_wiki_locked 守卫：中文 wiki 锁定后跳过更新。
     同 update_cn_name：仅允许编辑主库已收录的标签，避免
     update_cn_wiki 的 INSERT ... ON CONFLICT 把未收录标签插进主库。"""
-    data = request.get_json() or {}
+    data = request.get_json(silent=True)
+    # 非 dict 一律 400：漏 Content-Type 的调用拿到 HTML 错误页（前端按 Content-Type
+    # 分流，真实的参数错误提示传不到用户）；合法 JSON 的非对象会让 .get() 抛 500。
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体必须是 JSON 对象'}), 400
     tag = (data.get('tag') or '').strip()
     lang = (data.get('lang') or '').strip().lower()
     content = data.get('content')
@@ -852,7 +914,9 @@ def update_cn_name():
     仅允许编辑主库已收录的标签：update_translation 是 INSERT ... ON CONFLICT，
     对未收录标签会往 tags 表插一行（主库其余字段全是默认值），把用户新标签
     污染进爬取的主库。用户新标签的翻译走 user_tags，不经本路由。"""
-    data = request.get_json() or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体必须是 JSON 对象'}), 400
     tag = (data.get('tag') or '').strip()
     cn_name = data.get('cn_name', '')
     if cn_name is None:
@@ -884,7 +948,9 @@ def toggle_cn_lock():
     """切换标签中文名或中文 wiki 的锁定状态。body: {tag, field}。
     field: 'name' → cn_name_locked；'wiki' → cn_wiki_locked。
     锁定后对应字段不能被深度翻译或手动编辑覆盖。"""
-    data = request.get_json() or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体必须是 JSON 对象'}), 400
     tag = (data.get('tag') or '').strip()
     field = (data.get('field') or '').strip()
     if not tag:
@@ -920,7 +986,9 @@ def translate_single_tag():
 
     只处理主库已收录的标签（前端详情卡对 in_main_db=false 的标签已隐藏翻译按钮）：
     _update_tag 是纯 UPDATE，未收录标签不会插入行。用户新标签的翻译走 /user_tags/translate。"""
-    data = request.get_json() or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体必须是 JSON 对象'}), 400
     tag = (data.get('tag') or '').strip()
     if not tag:
         return jsonify({'error': '缺少 tag'}), 400
@@ -998,7 +1066,11 @@ def upsert_user_tag_api():
     新增时若主表已收录同名标签则拒绝（两表同名时以主表为准）；
     编辑已存在的行不受此限制（主库后续收录不影响已有记录）。"""
     from tageditor.db.build_tag_db import lookup_tags, normalize_tag_key, upsert_user_tag
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    # `or {}` 会把合法 JSON 的非对象（如 [1,2]、"abc"）也兜成默认值往下走，
+    # 这里必须显式判类型——「参数没看懂就执行」不是可接受的降级。
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体必须是 JSON 对象'}), 400
     name_key = normalize_tag_key(data.get('name') or '')
     if not name_key:
         return jsonify({'error': '请填写标签名'}), 400
@@ -1027,7 +1099,9 @@ def upsert_user_tag_api():
 def delete_user_tag_api():
     """删除用户新标签。body: {name}。"""
     from tageditor.db.build_tag_db import normalize_tag_key, delete_user_tag
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体必须是 JSON 对象'}), 400
     name_key = normalize_tag_key(data.get('name') or '')
     if not name_key:
         return jsonify({'error': '缺少 name'}), 400
@@ -1047,7 +1121,9 @@ def translate_user_tag():
     body: {name}。主表已收录且有中文名时直接返回主表数据（以主表为准）。
     返回 {cn_name, cn_wiki, source}，source 为 'main_db' 或 'llm'。"""
     from tageditor.db.build_tag_db import lookup_tags, normalize_tag_key, upsert_user_tag
-    data = request.get_json() or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体必须是 JSON 对象'}), 400
     name_key = normalize_tag_key(data.get('name') or '')
     if not name_key:
         return jsonify({'error': '缺少 name'}), 400
@@ -1090,7 +1166,9 @@ def translate_user_tag():
 @translation_bp.route('/danbooru_search', methods=['POST'])
 def danbooru_search():
     """模糊搜索标签库。body: {keyword, limit=20, light=false}"""
-    data = request.get_json() or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体必须是 JSON 对象'}), 400
     keyword = (data.get('keyword') or '').strip()
     # 上限 500，防止单次返回过多拖慢传输/渲染；下限 1 —— 不能只钳上限：
     # limit=-1 在 SQLite 里是「不限量」，会一次吐回整张 5 万行的表。
@@ -1124,10 +1202,31 @@ def danbooru_random():
     conn = _get_tag_db_conn()
     if conn is None:
         return jsonify({'tags': []})
+    # 随机推荐：**别用 ORDER BY RANDOM()**。
+    # 它要为全部 5.3 万行求值 RANDOM() 再整体排序（实测 107.6ms，
+    # PLAN: SCAN tags + USE TEMP B-TREE FOR ORDER BY），而这是**每次打开首页**
+    # 都会打的接口。改成「随机取一段 rowid 区间，再按 rowid 顺序取 N 条」后
+    # PLAN 变成 SEARCH tags USING INTEGER PRIMARY KEY，实测 0.1ms（约 1000 倍）。
+    # 代价：N 条会聚集在 rowid 相邻的一段（同一批同步进来的标签相邻），
+    # 对「首页随机推荐」这个用途可以接受。
+    import random as _random
+    _max = conn.execute("SELECT max(rowid) FROM tags").fetchone()[0] or 0
+    if _max <= 0:
+        return jsonify({'tags': []})
+    _window = max(n * 20, 2000)
+    _lo = _random.randint(1, max(1, _max - _window + 1))
     rows = conn.execute(
-        "SELECT name, cn_name, category, post_count FROM tags WHERE cn_name != '' AND cn_name IS NOT NULL "
-        "ORDER BY RANDOM() LIMIT ?", (n,)
+        "SELECT name, cn_name, category, post_count FROM tags "
+        "WHERE rowid >= ? AND rowid < ? AND cn_name != '' AND cn_name IS NOT NULL "
+        "ORDER BY rowid LIMIT ?", (_lo, _lo + _window, n)
     ).fetchall()
+    if not rows:
+        # 该 rowid 段恰好没有带中文名的标签（尾部稀疏）→ 回退全表随机，
+        # 保证「宁可慢一点也不能返回空」；正常情况走不到这里。
+        rows = conn.execute(
+            "SELECT name, cn_name, category, post_count FROM tags WHERE cn_name != '' AND cn_name IS NOT NULL "
+            "ORDER BY RANDOM() LIMIT ?", (n,)
+        ).fetchall()
     return jsonify({'tags': [dict(r) for r in rows]})
 
 
@@ -1138,12 +1237,15 @@ def danbooru_update():
     from tageditor.db.build_tag_db import update_from_danbooru
     db_path = get_tag_db_config()['db_path']
 
-    def generate():
+    # 与 llm_process_db 同款：取消事件在**路由体**里注册，_generate 与 generate 共同闭包它，
+    # 这样 generate 的 GeneratorExit 分支才能置位同一个 event。
+    cancel_evt = _register_cancel("danbooru_update")
+
+    def _generate():
         # worker 在后台线程跑 update_from_danbooru，通过 cb 回调把事件追加到 events；
         # 主线程（SSE generator）轮询 events 顺序 yield 为 SSE。
         import threading
         import time as _time
-        cancel_evt = _register_cancel("danbooru_update")
         events = []
 
         def cb(event):
@@ -1160,44 +1262,65 @@ def danbooru_update():
 
         t = threading.Thread(target=worker, daemon=True)
         t.start()
-
-        last_sent = 0
-        finished = False  # 是否已发送结束事件（complete/fatal/cancelled），避免 worker 异常后再补发 complete
-        while t.is_alive() or last_sent < len(events):
-            while last_sent < len(events):
-                evt = events[last_sent]
-                last_sent += 1
-                etype = evt.get('type')
-                if etype == 'progress':
-                    yield sse_event('progress', {
-                        'current': evt['page'],
-                        'total': '?',  # 总页数未知（取决于增量数据量）
-                        'item': f"第 {evt['page']} 页（已新增 {evt['new_count']} 条）"
-                    })
-                elif etype == 'error':
-                    yield sse_event('fatal', {'error': evt['message']})
-                    finished = True
+        try:
+            last_sent = 0
+            finished = False  # 是否已发送结束事件（complete/fatal/cancelled），避免 worker 异常后再补发 complete
+            while t.is_alive() or last_sent < len(events):
+                while last_sent < len(events):
+                    evt = events[last_sent]
+                    last_sent += 1
+                    etype = evt.get('type')
+                    if etype == 'progress':
+                        yield sse_event('progress', {
+                            'current': evt['page'],
+                            'total': '?',  # 总页数未知（取决于增量数据量）
+                            'item': f"第 {evt['page']} 页（已新增 {evt['new_count']} 条）"
+                        })
+                    elif etype == 'error':
+                        yield sse_event('fatal', {'error': evt['message']})
+                        finished = True
+                        break
+                    elif etype == 'cancelled':
+                        # 用户中断：已爬数据已落库，断点已保存。前端据此停止读取流。
+                        yield sse_event('cancelled', {'new_count': evt['new_count']})
+                        finished = True
+                        break
+                    elif etype == 'complete':
+                        yield sse_event('complete', {'new_count': evt['new_count']})
+                        finished = True
+                        break
+                if finished:
                     break
-                elif etype == 'cancelled':
-                    # 用户中断：已爬数据已落库，断点已保存。前端据此停止读取流。
-                    yield sse_event('cancelled', {'new_count': evt['new_count']})
-                    finished = True
-                    break
-                elif etype == 'complete':
-                    yield sse_event('complete', {'new_count': evt['new_count']})
-                    finished = True
-                    break
-            if finished:
-                break
-            if t.is_alive():
-                # 等待新事件，用短 sleep 避免忙等
-                _time.sleep(0.5)
+                if t.is_alive():
+                    # 等待新事件，用短 sleep 避免忙等
+                    _time.sleep(0.5)
 
-        # 线程结束但没收到 complete/error/cancelled 事件（worker 未捕获异常退出兜底）
-        if not finished:
-            yield sse_event('fatal', {'error': '增量更新异常终止（未收到完成事件）'})
+            # 线程结束但没收到 complete/error/cancelled 事件（worker 未捕获异常退出兜底）
+            if not finished:
+                yield sse_event('fatal', {'error': '增量更新异常终止（未收到完成事件）'})
+        finally:
+            # **必须放 finally**：原先 _unregister_cancel 写在生成器主体末尾，
+            # 而客户端断开（页面刷新/导航/关标签页/前端对旧流 abort）会让生成器在
+            # 任意一个 yield 处收到 GeneratorExit 直接退出 —— 那行就永远执行不到。
+            # 后果有两层，都很隐蔽：
+            #   ① 取消登记永久残留 → _has_active() 永远为真（以后所有「互斥」判断都误判）；
+            #   ② worker 是 daemon 线程，它按 cancel_evt.is_set 决定要不要停，而这个
+            #      event 从来没被置位 → **用户以为停了，爬虫继续抓取并写库**；
+            #      再点一次就是两个爬虫并发写同一个 db_path 与同一份断点锚点。
+            _unregister_cancel("danbooru_update", cancel_evt)
 
-        _unregister_cancel("danbooru_update", cancel_evt)
+    def generate():
+        # 与本文件其它 6 条 SSE 路由同款收尾（crawl_tag_groups / fetch_cooc / trim_cooc /
+        # llm_process_db 都有，只有这条漏了）：断开时置取消信号，让 worker 自己停。
+        try:
+            yield from _generate()
+        except GeneratorExit:
+            # 注意措辞：这里接的是**任何**形式的连接终止，不只是用户点「中断」——
+            # 页面刷新/导航、关标签页、前端对旧流 abort()（danbooru_wiki.html 在启动新
+            # 操作时会主动 abort 上一条）都会走到这。
+            cancel_evt.set()
+            log.info('[danbooru_update] 连接断开（页面刷新/导航/取消），已请求后台爬虫停止')
+            raise
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
@@ -1212,7 +1335,6 @@ def danbooru_update():
 #   2) 即使都在字典里，也只能存下一轮，先启动的那轮永远取消不掉。
 # 改成 set 收集同一个名字下的所有 event，并在注销时**按对象身份**移除，
 # 互不干扰。
-import threading as _threading
 _active_cancel_events: dict[str, set] = {}   # name -> {Event, ...}
 _cancel_events_lock = _threading.Lock()
 
@@ -1323,6 +1445,7 @@ def fetch_cooc():
 
             last_sent = 0
             finished = False
+            last_error = None  # worker 报过的具体原因（用于结尾兜底时告诉用户真正的问题）
             while t.is_alive() or last_sent < len(events):
                 while last_sent < len(events):
                     evt = events[last_sent]
@@ -1334,6 +1457,14 @@ def fetch_cooc():
                             'total': evt.get('total', '?'),
                             'item': evt.get('item', '')
                         })
+                    elif etype == 'error':
+                        # **原先没有这个分支**：worker 通过 error 事件报的具体原因
+                        # （例如 cooc_pipeline 的「找不到原始共现文件，先运行 fetch-cooc」）
+                        # 被整个丢掉，而 worker 随后正常 return、又不发终态事件 →
+                        # 前端只能报「连接异常中断：未收到完成信号 / 请重试」，
+                        # 重试同样失败，用户永远看不到该怎么修 —— 而那句话正是唯一有用的信息。
+                        last_error = evt.get('message') or evt.get('error') or '未知错误'
+                        yield sse_event('error', {'error': last_error})
                     elif etype == 'complete':
                         yield sse_event('complete', {'message': f"共现抓取完成（{evt.get('new_count', 0)} 个标签）"})
                         finished = True
@@ -1354,9 +1485,15 @@ def fetch_cooc():
                 if t.is_alive():
                     _time.sleep(0.3)
 
+            # **一律发终态事件**：没有终态事件的流会让前端报「连接异常中断」，
+            # 而 worker 其实是有结论地结束了（正常早退 / 出错）。有具体原因就带上它。
             if not finished:
-                if worker_failed:
+                if last_error:
+                    yield sse_event('fatal', {'error': f'抓取共现失败：{last_error}'})
+                elif worker_failed:
                     yield sse_event('fatal', {'error': '抓取共现失败，详情见日志'})
+                else:
+                    yield sse_event('fatal', {'error': '抓取共现异常终止（未收到完成事件，详情见日志）'})
         except GeneratorExit:
             cancel_evt.set()
             raise

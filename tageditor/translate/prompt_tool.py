@@ -1,39 +1,45 @@
 # -*- coding: utf-8 -*-
-"""提示词优化器（/prompt_tool）：图片 + 提示词 + 优化要求 → 以标签库为知识库重调提示词。
+"""提示词优化器（/prompt_tool）：参考图工作区 + 提示词 + 优化要求 → 以标签库为知识库重调提示词。
 
-提示词是**两段式**：标签行 + 自然语言描述段。实测真实文件（uploads/HRdo_aAbQAIZrm6..txt）
-1808 字符、只有 1 个换行、50 个逗号块——第 0~35 块是真标签，换行落在第 36 块中间，
-第 37~49 块是散文段（英文句读的逗号被逗号切分炸成 14 个假标签）。所以：
+**与标签编辑功能完全独立**，体现在三处：
+  1. 参考图来自自己的 `prompt_workspace/`，不是 uploads/（见 prompt_workspace.py）
+  2. 不读标签编辑产生的 `.txt` / `.nl.txt`（早期会把 `{图}.nl.txt` 当参照并入，
+     那让两套功能纠缠在一起，且参考图本来就只是「给模型看的素材」）
+  3. 不写入任何文件：产出只供复制（原 `/save_prompt_result` 已删除）
+
+参考图**多张、有序**：列表下标 +1 就是提示词里说的「图1 / 图2」。典型用法是组合
+（「用图1 的人物配图2 的动作」）—— 这也是规划轮改成带图的原因。
+
+提示词是**两段式**：标签行 + 自然语言描述段。实测真实文件 1808 字符、只有 1 个换行、
+50 个逗号块——第 0~35 块是真标签，换行落在第 36 块中间，第 37~49 块是散文段
+（英文句读的逗号被逗号切分炸成 14 个假标签）。所以：
 **首个换行是标签与描述的唯一可靠分界，逗号切分只作用于标签行。**
 
 用户的输入是**对这份提示词的优化要求**，不一定是画面效果 —— 还可能是精炼、清理假标签、
 按图校正、调整动作、去重/规范格式等元操作。所以**不在本地猜意图**（硬编码中文关键词表对
-「精简一下」抽出的词是 `提示词/精简/一下`，搜 cn_name 全是噪声）：先跑一次纯文本「规划」调用，
+「精简一下」抽出的词是 `提示词/精简/一下`，搜 cn_name 全是噪声）：先跑一次「规划」调用，
 由模型判断意图并点名要查哪些工具，本地执行（零 LLM），再带图改写。
 
 三次模型调用：
-  ① `_call_planner`    纯文本规划（不带图、便宜）→ {intent, understanding, plan, tools:[{tool, ...}]}
-  ② `_call_vlm_json`   带图综合改写（payload 里带 ① 的意图 + 工具结果）
-  ③ `_call_llm_repair` 未收录标签修补（仅当 ② 产出了库内查不到的标签）
+  ① `_call_planner`    规划（**带参考图**）→ {intent, understanding, plan, tools:[{tool, ...}]}
+  ② `_call_vlm_json`   多图综合改写（payload 里带 ① 的意图 + 工具结果）
+  ③ `_call_llm_repair` 未收录标签修补（仅当 ② 产出了库内查不到的标签；纯文本，不重发图）
 
 四个工具全部复用现成函数，不新写检索逻辑（见 _TOOL_SPECS）：
   search_tags → `_tool_search_tags`（中文走 cn_name 首段/FTS，英文走 build_tag_db.search_tags）
   tag_detail  → `classify_tags`
   cooc        → `cooc_recommendations`
   tag_groups  → data/tag_groups.json（复用 translation._load_tag_groups_cache 的进程级缓存）
-
-本页**不写入任何文件**：产出只供复制（原 `/save_prompt_result` 已删除，本页与标签编辑功能独立）。
 """
-import base64
-import io
 import json
 import os
 import re
 import time
 
-from flask import Blueprint, Response, current_app, jsonify, request
+from flask import Blueprint, Response, jsonify, request
 
-from tageditor.core.config import get_prompt, get_prompt_tool_config, get_tag_db_config, is_within_directory, safe_filename
+from tageditor.core.config import get_prompt, get_prompt_tool_config, get_tag_db_config
+from tageditor.core.llm_metrics import log_llm_usage
 from tageditor.core.sse_utils import sse_event
 import logging
 
@@ -46,13 +52,35 @@ prompt_tool_bp = Blueprint('prompt_tool', __name__)
 
 # 标签库不收的质量/元标签类目（sync 只收 category∈{0,3,4} 且 post_count>=100）。
 # 命中即「库不收 ≠ 编造」，默认保留，不允许因为"查不到"就删。
-_META_TAGS = {
+#
+# **名单外置到 prompts/meta_tags.txt**（每行一个，`#` 开头与空行忽略），
+# 理由与 prompts/ 其它文件一致：这是「用户自己的词表」而不是预算/口径防线 ——
+# 用户很可能有自己的质量标签（比如某个底模的关键词、自己加的 meta tag），
+# 而写死在代码里他改不了。文件缺失/为空时退回下面这份内置默认，
+# **绝不静默变成空集合** —— 那会让所有元标签被判成 uncollected，进而被模型当假标签删掉。
+_META_TAGS_DEFAULT = {
     'masterpiece', 'best_quality', 'good_quality', 'normal_quality', 'worst_quality',
     'low_quality', 'bad_quality', 'high_quality', 'very_aesthetic', 'aesthetic',
     'highres', 'absurdres', 'lowres', 'newest', 'oldest', 'recent', 'quality',
     'bad_proportions', 'bad_anatomy', 'bad_hands', 'very_bad_quality', 'error',
     'jpeg_artifacts', 'signature', 'watermark', 'artist_name', 'username',
 }
+
+
+def _load_meta_tags():
+    """读 prompts/meta_tags.txt（每行一个），缺失/为空时退回内置默认。"""
+    text = get_prompt('meta_tags')
+    if not text:
+        return set(_META_TAGS_DEFAULT)
+    tags = {ln.strip().lower() for ln in text.splitlines()
+            if ln.strip() and not ln.strip().startswith('#')}
+    return tags or set(_META_TAGS_DEFAULT)
+
+
+# 注意：**没有**模块级 `_META_TAGS` / `_MAX_ADD` 常量了。
+# 它们原先存在，但冻在 import 期 → promises 的热更新对手改 prompts/ 不生效。
+# 使用点（classify_tags / _normalize_diff）改为调用 _load_meta_tags() / _load_max_add()，
+# 不要再把结果缓存成模块常量（那就是"两个真相来源"）。
 
 # 中文关键词抽取的停用词（n-gram 里出现即丢弃）
 _CN_STOPWORDS = {
@@ -62,8 +90,29 @@ _CN_STOPWORDS = {
     '什么', '怎么', '这样', '那样', '时候', '并且', '而且', '但是', '如果', '让她', '让他',
 }
 
-# 新增标签数量（与 prompts/prompt_adjust.txt 的硬规则 4 保持一致）
-_MAX_ADD = 12
+# 新增标签上限。**必须与 prompts/prompt_adjust.txt 的硬规则 4 一致**：
+# 提示词让模型「新增 ≤ N 条」，代码这里再校验一次。提示词是可以热更新的
+# （prompts/ 改完即生效），所以两处会漂移 —— 用户把提示词改成 8 条，代码还放行 12 条，
+# 没有任何告警。故这里改成**从提示词里解析**，解析不到才退回默认值。
+_MAX_ADD_DEFAULT = 12
+
+
+def _load_max_add():
+    """从 prompts/prompt_adjust.txt 的「≤ N 条」硬规则里解析新增上限。
+
+    解析不到（提示词改写了措辞/文件缺失）时退回 _MAX_ADD_DEFAULT，
+    并在日志里说明 —— 宁可宽松也不要静默收紧到 0（那会让优化器一条也加不了）。
+    """
+    text = get_prompt('prompt_adjust')
+    m = re.search(r'新增[^\n]{0,20}?(\d+)\s*条', text or '')
+    if m:
+        try:
+            n = int(m.group(1))
+            if 1 <= n <= 200:
+                return n
+        except ValueError:
+            pass
+    return _MAX_ADD_DEFAULT
 
 # 规划器可点名的工具清单：白名单 + 参数说明 + 返回上限。
 # 每个工具只吃**一个列表参数**（`param`），因为四次检索都是「给我一批词，还你一批标签」的形状。
@@ -375,6 +424,10 @@ def classify_tags(conn, names, cfg, with_wiki=False):
         return {}
     from tageditor.db.build_tag_db import lookup_tags, lookup_user_tags, normalize_tag_key
 
+    # 按调用时读 prompts/meta_tags.txt（不是模块级常量）：prompts/ 是热更新的，
+    # 冻在 import 期的常量会让用户改了名单却不生效，且没有任何提示。
+    meta_tags = _load_meta_tags()
+
     norm_list = []
     for n in names:
         k = normalize_tag_key(n)
@@ -410,7 +463,7 @@ def classify_tags(conn, names, cfg, with_wiki=False):
         if u:
             result[k] = {'status': 'user_tag', 'cn_name': u.get('cn_name') or ''}
             continue
-        if k in _META_TAGS:
+        if k in meta_tags:
             result[k] = {'status': 'quality_meta'}
             continue
         result[k] = {'status': 'uncollected', 'suggestions': _tag_suggestions(conn, k)}
@@ -847,13 +900,26 @@ def _system_prompt(key):
     return text
 
 
-def _create_completion(client, attempts=3, **kwargs):
-    """带退避重试的 create：网络/5xx 重试 2 次；response_format 不被支持时立刻抛出交由调用方降级。"""
+def _create_completion(client, attempts=3, label='prompt_tool', **kwargs):
+    """带退避重试的 create：网络/5xx 重试 2 次；response_format 不被支持时立刻抛出交由调用方降级。
+
+    本函数是**本页所有模型调用的唯一收口点**（规划轮 / 带图改写 / 修补轮都走它），
+    所以指标日志放在这里一处即可覆盖三轮 —— 见 core/llm_metrics.py 的说明。
+    失败路径也记耗时：超时前等了多久，本身就是「那 82 秒固定开销」的证据。
+    """
     last = None
+    model = kwargs.get('model', '-')
     for i in range(attempts):
+        _t0 = time.perf_counter()
         try:
-            return client.chat.completions.create(**kwargs)
+            resp = client.chat.completions.create(**kwargs)
+            log_llm_usage(label, model, time.perf_counter() - _t0, resp,
+                          note=f'attempt={i + 1}')
+            return resp
         except Exception as e:
+            log_llm_usage(label, model, time.perf_counter() - _t0, None,
+                          note=f'attempt={i + 1} 失败={type(e).__name__}',
+                          level=logging.WARNING)
             msg = str(e)
             if 'response_format' in msg or 'json_object' in msg:
                 raise _UnsupportedResponseFormat(msg) from e
@@ -893,49 +959,21 @@ def _parse_json_loose(text):
 
 
 def _encode_image(file_path, cfg, warnings):
-    """读图 → (base64, mime)。超字节上限或最长边超限时用 Pillow 压缩到 JPEG q90。"""
+    """读图 → (base64, mime)。超字节上限或最长边超限时用 Pillow 压缩到 JPEG q90。
+
+    压缩逻辑**已抽到 core/image_io.encode_for_vlm** —— 同一台 VLM 后端上，
+    `tagger.py` 的「自然语言描述」路径早先一直是**原图直送**（无任何上限检查），
+    与本页一个压一个不压。两条路径现在共用同一份实现与同一套默认上限，
+    改口径只改一处。
+    """
+    from tageditor.core.image_io import encode_for_vlm
     ext = os.path.splitext(file_path)[1].lstrip('.').lower() or 'png'
-    mime = 'image/jpeg' if ext in ('jpg', 'jpeg') else f'image/{ext}'
     with open(file_path, 'rb') as f:
         raw = f.read()
-
-    need_shrink = len(raw) > cfg['image_max_bytes']
-    try:
-        from PIL import Image
-        with Image.open(io.BytesIO(raw)) as im:
-            if max(im.size) > cfg['image_max_side']:
-                need_shrink = True
-    except Exception as e:
-        log.warning(f"[PromptTool] 图片尺寸检查跳过（Pillow 不可用）: {e}")
-    if not need_shrink:
-        return base64.b64encode(raw).decode('ascii'), mime
-
-    try:
-        from PIL import Image
-        img = Image.open(io.BytesIO(raw))
-        if img.mode in ('RGBA', 'LA', 'P'):
-            img = img.convert('RGBA')
-            bg = Image.new('RGB', img.size, (255, 255, 255))
-            bg.paste(img, mask=img.split()[-1])
-            img = bg
-        else:
-            img = img.convert('RGB')
-        side = cfg['image_max_side']
-        if max(img.size) > side:
-            img.thumbnail((side, side))
-        buf = io.BytesIO()
-        img.save(buf, format='JPEG', quality=90)
-        data = buf.getvalue()
-        warnings.append(f'图片已压缩后送模型（{len(raw) // 1024}KB → {len(data) // 1024}KB）')
-        return base64.b64encode(data).decode('ascii'), 'image/jpeg'
-    except Exception as e:
-        # 压缩失败时不再无条件按原图发送：need_shrink 为真说明这张图已经
-        # 超字节上限或超最长边，原样送出会撞服务端的请求体上限，
-        # 报错却是「请求过大」这种与图片无关的文案，用户查不到原因。
-        mb = cfg['image_max_bytes'] / 1024 / 1024
-        warnings.append(f'图片压缩失败（{e}），且原图 {len(raw) // 1024}KB 可能超过服务端上限'
-                        f'（配置上限 {mb:.0f}MB），本次仍按原图发送')
-        return base64.b64encode(raw).decode('ascii'), mime
+    return encode_for_vlm(raw, ext,
+                          max_bytes=cfg['image_max_bytes'],
+                          max_side=cfg['image_max_side'],
+                          warnings=warnings)
 
 
 def _completion_text(resp):
@@ -955,17 +993,38 @@ def _completion_text(resp):
     raise _PromptFatal(f'模型返回空内容（finish={finish}）')
 
 
-def _call_vlm_json(image_b64, mime, payload, cfg):
-    """第 1 轮：带图的综合改写，返回解析后的 JSON dict。"""
+def _build_image_content(images, label_prefix='参考图'):
+    """把若干参考图编码成 OpenAI 多模态 content 片段，并按序打「图N」标记。
+
+    为什么要打标记：用户会用「图1」「图2」指代（「用图1 的人物配图2 的动作」），
+    而 OpenAI 接口的图片数组**没有编号字段** —— 模型只能按出现顺序数。
+    所以在每张图前面插一条文字，让「图N」这个指代在上下文里有明确锚点。
+    不标的话模型仍可能按顺序猜对，但一旦它数错，错误是静默的（改出来的提示词
+    人物/动作张冠李戴，用户得自己发现）。
+    """
+    parts = []
+    for i, img in enumerate(images or [], 1):
+        b64, mime = img.get('b64'), img.get('mime')
+        if not b64:
+            continue
+        if len(images) > 1:
+            parts.append({'type': 'text', 'text': f'[{label_prefix}{i}]'})
+        parts.append({'type': 'image_url',
+                      'image_url': {'url': f'data:{mime};base64,{b64}'}})
+    return parts
+
+
+def _call_vlm_json(images, payload, cfg):
+    """第 2 轮：带（多）图的综合改写，返回解析后的 JSON dict。
+
+    `images` 是 [{'name','b64','mime'}, ...]，可为空（纯文本模式）。
+    """
     from openai import OpenAI
     client = OpenAI(base_url=cfg['api_url'], api_key=cfg['api_key'], timeout=cfg['timeout'])
     system_prompt = _system_prompt('prompt_adjust')
 
-    user_content = []
-    if image_b64:
-        user_content.append({'type': 'image_url',
-                             'image_url': {'url': f'data:{mime};base64,{image_b64}'}})
     # 无图时的提示由调用方写进 payload['warnings']（这里再 copy 一份就传不回前端了）
+    user_content = _build_image_content(images)
     user_content.append({'type': 'text', 'text': json.dumps(payload, ensure_ascii=False)})
 
     extra = {}
@@ -979,12 +1038,13 @@ def _call_vlm_json(image_b64, mime, payload, cfg):
                   max_tokens=cfg['max_tokens'],
                   **extra)
     try:
-        resp = _create_completion(client, response_format={'type': 'json_object'}, **kwargs)
+        resp = _create_completion(client, response_format={'type': 'json_object'},
+                                  label='提示词优化/带图改写', **kwargs)
     except _UnsupportedResponseFormat:
         # 端点不支持 response_format：降级为不带，并在系统提示词里再强调一次只输出 JSON
         log.warning("[PromptTool] 端点不支持 response_format，降级重试")
         kwargs['messages'][0]['content'] = system_prompt + '\n\n只输出一个 JSON 对象，不要 markdown 代码块、不要解释文字。'
-        resp = _create_completion(client, **kwargs)
+        resp = _create_completion(client, label='提示词优化/带图改写', **kwargs)
 
     content = _completion_text(resp)
     parsed = _parse_json_loose(content)
@@ -993,8 +1053,14 @@ def _call_vlm_json(image_b64, mime, payload, cfg):
     return parsed
 
 
-def _call_json_text(prompt_key, payload, cfg, label):
-    """纯文本 JSON 调用（不重发图片）：规划轮与修补轮共用。"""
+def _call_json_text(prompt_key, payload, cfg, label, images=None):
+    """JSON 调用：规划轮与修补轮共用。
+
+    `images` 默认 None（纯文本）。规划轮现在会传参考图 —— 组合类需求
+    （「用图1 的人物配图2 的动作」）必须看图才知道该去标签库查什么关键词，
+    不看就只能从用户文字里猜。修补轮仍纯文本（它只处理未收录标签的替换，
+    不涉及画面判断，重发图纯属浪费额度）。
+    """
     from openai import OpenAI
     client = OpenAI(base_url=cfg['api_url'], api_key=cfg['api_key'], timeout=cfg['timeout'])
     system_prompt = _system_prompt(prompt_key)
@@ -1003,34 +1069,44 @@ def _call_json_text(prompt_key, payload, cfg, label):
     if cfg['thinking'] not in ('on', 'true', '1', 'enabled'):
         extra['extra_body'] = {'thinking': {'type': 'disabled'}}
 
+    if images:
+        user_content = _build_image_content(images)
+        user_content.append({'type': 'text', 'text': json.dumps(payload, ensure_ascii=False)})
+    else:
+        user_content = json.dumps(payload, ensure_ascii=False)
+
     kwargs = dict(model=cfg['model'],
                   messages=[{'role': 'system', 'content': system_prompt},
-                            {'role': 'user',
-                             'content': json.dumps(payload, ensure_ascii=False)}],
+                            {'role': 'user', 'content': user_content}],
                   temperature=cfg['temperature'],
                   max_tokens=cfg['max_tokens'],
                   **extra)
     try:
-        resp = _create_completion(client, response_format={'type': 'json_object'}, **kwargs)
+        resp = _create_completion(client, response_format={'type': 'json_object'},
+                                  label=f'提示词优化/{label}', **kwargs)
     except _UnsupportedResponseFormat:
         # 端点不支持 response_format：降级为不带，并在系统提示词里再强调一次只输出 JSON
         log.warning("[PromptTool] 端点不支持 response_format，降级重试")
         kwargs['messages'][0]['content'] = system_prompt + '\n\n只输出一个 JSON 对象，不要 markdown 代码块、不要解释文字。'
-        resp = _create_completion(client, **kwargs)
+        resp = _create_completion(client, label=f'提示词优化/{label}', **kwargs)
 
-    content = _completion_text(resp)
-    parsed = _parse_json_loose(content)
+    text = _completion_text(resp)
+    parsed = _parse_json_loose(text)
     if not isinstance(parsed, dict):
-        raise _PromptFatal(f'{label}输出无法解析为 JSON：' + content[:200])
+        raise _PromptFatal(f'{label}输出无法解析为 JSON：' + text[:200])
     return parsed
 
 
-def _call_planner(payload, cfg):
+def _call_planner(payload, cfg, images=None):
     """规划轮（在带图改写之前）：模型自报意图并点名要查的工具。
 
-    **不带图**：它只决定「改什么、要查哪些事实」，看图对决策无增益，带了纯属加钱加时。
+    **带参考图**：它要决定「去标签库查什么关键词」。组合类需求（「用图1 的人物
+    配图2 的动作」）不看图就只能从用户文字里猜，检索会明显不准 ——
+    而这正是本页最主要的用法，所以这里传图。
+    （早期是刻意不带图的：当时的场景只有单图校正，看图对「改什么」无增益。
+    多图组合场景改变了这个判断。）
     """
-    return _call_json_text('prompt_planner', payload, cfg, '规划轮')
+    return _call_json_text('prompt_planner', payload, cfg, '规划轮', images=images)
 
 
 def _call_llm_repair(payload, cfg):
@@ -1052,6 +1128,10 @@ def _normalize_diff(parsed, entries, conn, cfg, warnings):
     4. 返回 (diff, uncollected_targets) —— 后者非空时触发第 2 轮修补
     """
     from tageditor.db.build_tag_db import normalize_tag_key
+
+    # 按调用时从 prompts/prompt_adjust.txt 解析「新增 ≤ N 条」，而不是用 import 期常量：
+    # 提示词可热更新，冻住的常量会让用户改了 12→8 之后代码仍放行 12 条（无告警）。
+    max_add = _load_max_add()
 
     raw_diff = parsed.get('diff')
     if not isinstance(raw_diff, list):
@@ -1109,9 +1189,10 @@ def _normalize_diff(parsed, entries, conn, cfg, warnings):
             continue
         adds.append({'op': 'add', 'tag': got['tag'], 'weight': got['weight'],
                      'cn_name': got['cn_name'], 'reason': got['reason']})
-    if len(adds) > _MAX_ADD:
-        warnings.append(f'模型新增了 {len(adds)} 条标签，已截断到 {_MAX_ADD} 条')
-        adds = adds[:_MAX_ADD]
+    if len(adds) > max_add:
+        warnings.append(f'模型新增了 {len(adds)} 条标签，已截断到 {max_add} 条'
+                        f'（上限取自 prompts/prompt_adjust.txt 的硬规则 4）')
+        adds = adds[:max_add]
     diff.extend(adds)
 
     # 校验 add/modify 的目标标签（remove/keep 的目标本来就在输入里，输入侧已校验过）
@@ -1198,13 +1279,37 @@ def _apply_repair(base_diff, repair_parsed, uncollected):
 
 # ── 路由：主流程（SSE）──────────────────────────────────────────────────────
 
+def _save_result_to_session(sid, prompt_raw, user_request, result):
+    """把本轮结果写回会话（会话是整体：图 + 输入 + 产出装在一起）。
+
+    **只存原始结果，不存派生显示态**（final_prompt 由前端按勾选态拼）——
+    存了它就会与 diff 的勾选状态构成两个真相来源，加载时不知道信谁。
+    """
+    from tageditor.translate.prompt_workspace import read_session, write_session
+    data = dict(read_session(sid) or {})
+    data['prompt'] = prompt_raw
+    data['request'] = user_request
+    data['result'] = result
+    # 这里**不写 title**：标题由 `prompt_workspace.session_title()` 读时从
+    # `prompt` 现算。落盘一份就会与 prompt 脱节 —— 用户改了提示词重跑，
+    # 磁盘上还是上一轮的标题，而列表显示的是算出来的（两个真相来源）。
+    write_session(sid, data)
+
+
 @prompt_tool_bp.route('/prompt_adjust', methods=['POST'])
 def prompt_adjust():
-    """主路由：规划（模型自决意图）→ 本地执行工具 → 带图改写 → 未收录修补（SSE 流式）。"""
-    data = request.get_json(silent=True) or {}
-    image = (data.get('image') or '').strip()
+    """主路由：规划（带参考图）→ 本地执行工具 → 多图改写 → 未收录修补（SSE 流式）。
+
+    参考图属于**当前会话**（prompt_workspace/sessions/<sid>/images/），
+    与标签编辑的 uploads/ 完全无关。顺序即语义：下标 +1 = 提示词里的「图1 / 图2」。
+    """
+    data = request.get_json(silent=True)
+    # 合法 JSON 的非对象（列表/字符串）不能兜成 {} 往下走：那是「没看懂参数就执行」
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体必须是 JSON 对象'}), 400
     prompt_raw = data.get('prompt') or ''
     user_request = (data.get('request') or '').strip()
+    sid = (data.get('sid') or '').strip()
     # 必须显式判类型：`data.get('options') or {}` 只在 None/''/{}/0 时兜底，
     # 前端传成列表时它原样返回 list，下游 options.get(...) 直接 AttributeError → 500。
     options = data.get('options')
@@ -1215,17 +1320,31 @@ def prompt_adjust():
     # 「优化要求」必填：没有它就没有本次调整的目标（提示词本身可空，允许从零/纯描述起步）
     if not user_request:
         return jsonify({'error': '请填写优化要求（告诉模型怎么改这份提示词）'}), 400
-    image_path = None
-    if image:
-        filename = safe_filename(image)
-        if filename != image:
-            return jsonify({'error': '非法图片名'}), 400
-        upload_dir = os.path.abspath(current_app.config['UPLOAD_FOLDER'])
-        image_path = os.path.abspath(os.path.join(upload_dir, filename))
-        if not is_within_directory(image_path, upload_dir):
-            return jsonify({'error': '非法路径'}), 400
-        if not os.path.isfile(image_path):
-            return jsonify({'error': f'图片不存在：{filename}'}), 400
+
+    from tageditor.translate.prompt_workspace import (
+        MAX_SUBMIT_IMAGES, list_images, resolve_image, selected_images, session_dir)
+    if session_dir(sid) is None:
+        return jsonify({'error': '会话不存在或已删除，请新建会话'}), 400
+
+    # 参考图取**会话内被勾选的那几张**，顺序仍是工作区自然序（见 resolve_selection）。
+    # 清单由服务端从会话目录自己列，前端不参与 —— 名字是路径的来源，让前端传
+    # 「清单」就多一条「传的名字与会话里实际有的图不一致」的错路。勾选态落盘在
+    # 会话里（selection.json），所以这里读到的是用户在工作台上的选择。
+    all_names = list_images(sid)
+    names = selected_images(sid)
+    # 上限在这里硬校验一次：前端已拦、select 路由也拦，但**只有这里会真的花 token**。
+    if len(names) > MAX_SUBMIT_IMAGES:
+        return jsonify({'error': f'单次最多提交 {MAX_SUBMIT_IMAGES} 张参考图，'
+                                 f'当前勾选 {len(names)} 张'}), 400
+    image_paths = []
+    for n in names:
+        p = resolve_image(sid, n)
+        if p is None:
+            return jsonify({'error': f'参考图读取失败：{n}'}), 400
+        image_paths.append((n, p))
+    # 工作区张数要传进 generator：文案要区分「没勾」与「本来就没有图」三种情况
+    workspace_count = len(all_names)
+
     try:
         # 提示词文件缺失时立刻 400（进 generator 之前，用户能看到明确原因）
         _system_prompt('prompt_planner')
@@ -1275,27 +1394,60 @@ def prompt_adjust():
 
         yield sse_event('progress', {'current': 0, 'total': total, 'item': '正在准备...'})
 
-        # 阶段 1：读取图片与已有描述
-        yield sse_event('progress', {'current': 1, 'total': total, 'item': '读取图片与已有描述'})
+        # 阶段 1：读取参考图（独立工作区，与标签编辑的 uploads/ 无关）
+        # 带上工作区总数：勾了 0 张时显示「未勾选（工作区 8 张）」，
+        # 而不是「读取参考图（0 张）」——后者看着像是图丢了
+        if image_paths:
+            _img_brief = f'{len(image_paths)} 张'
+        elif workspace_count:
+            _img_brief = f'未勾选（工作区 {workspace_count} 张）'
+        else:
+            _img_brief = '无'
+        yield sse_event('progress', {'current': 1, 'total': total,
+                                     'item': f'读取参考图：{_img_brief}'})
         if _cancelled():
             yield sse_event('cancelled', {'message': '已取消'})
             return
-        image_b64, mime = (None, None)
-        image_caption = ''
-        if image_path:
+        images = []          # [{'name','b64','mime'}, ...]，顺序即「图1/图2」
+        for nm, path in image_paths:
             try:
-                base = os.path.splitext(image_path)[0]
-                nl_path = f'{base}.nl.txt'
-                if os.path.isfile(nl_path):
-                    with open(nl_path, 'r', encoding='utf-8') as f:
-                        image_caption = f.read().strip()
-                image_b64, mime = _encode_image(image_path, cfg, warnings)
+                b64, mime = _encode_image(path, cfg, warnings)
+                images.append({'name': nm, 'b64': b64, 'mime': mime})
             except Exception as e:
-                warnings.append(f'读取图片失败（{e}），改为纯文本模式')
-                image_b64 = None
-        if not image_b64:
+                # 单张读失败不该毁掉整轮：丢掉这张并在 warnings 里点名，
+                # 否则模型看到的编号会与用户说的「图2」错位（静默错位比报错更糟）
+                warnings.append(f'参考图 {nm} 读取失败（{e}），本次未送模型')
+                log.error('[PromptTool] 参考图读取失败 %s: %s', nm, e)
+        # 三种「没有图」必须给三种文案。现在工作区可以有几十张而勾选为空，
+        # 若一律说「本次没有参考图」，用户眼前摆着一屏缩略图却读到这句话，
+        # 只会认为功能坏了 —— 文案与眼前画面不一致比行为本身更伤人。
+        if not images and image_paths:
+            warnings.append('所有参考图都读取失败，本次改为纯文本模式')
+        elif not images and workspace_count:
+            warnings.append(f'本次未勾选任何参考图（工作区里有 {workspace_count} 张），'
+                            f'模型看不到图，只依据提示词与文字要求调整')
+        elif not images:
             # 写进共享的 warnings 列表：模型与前端结果页看到的是同一条（别改回 _call_vlm_json 内部 copy）
-            warnings.append('本次没有图片，只依据提示词与文字要求调整')
+            warnings.append('本次没有参考图，只依据提示词与文字要求调整')
+
+        # 实际送模型的清单（编号 + 文件名）。规划轮、改写轮、complete 事件三处共用，
+        # 各拼一遍的话编号口径迟早会漂 —— 而编号错位是静默的（模型改得看着正常，
+        # 人物与动作却张冠李戴）。**注意保持与 _build_image_content 同一顺序。**
+        model_images = [{'index': i + 1, 'name': im['name']}
+                        for i, im in enumerate(images)]
+
+        # 勾选制带来的新错法：用户把「用图3 的人物」写进了优化要求，之后却取消了
+        # 图3 的勾选（或那时工作区还没第 3 张）。编号是**连续重排**的，所以模型眼里
+        # 的「图2」可能是另一张图 —— 这个检查抓不到重排，但「提到的编号超出了本次
+        # 送出的张数」是确定性的错，能抓的就必须响亮报出来。
+        mentioned = {int(m) for m in re.findall(r'图\s*(\d+)', user_request)}
+        missing = sorted(n for n in mentioned if n > len(images))
+        if missing:
+            sent = '、'.join('图%d' % im['index'] for im in model_images) or '无'
+            warnings.append(
+                '优化要求里提到了「%s」，但本次只送出 %d 张（%s）—— 那个编号没有对应'
+                '的图，模型看不到它，结论可能对不上'
+                % ('、'.join('图%d' % n for n in missing), len(images), sent))
 
         # 阶段 2：解析输入提示词
         parsed = _split_prompt_entries(prompt_raw)
@@ -1325,7 +1477,7 @@ def prompt_adjust():
             'item': f"解析输入提示词：标签 {len(parsed['tags'])} 条（库内命中 {in_db_count} 条）"
                     f"，描述 {len(parsed['prose'])} 字"})
 
-        # 阶段 3：让模型判断优化意图与检索计划（纯文本，不带图）
+        # 阶段 3：让模型判断优化意图与检索计划（带参考图，见 _call_planner 的 docstring）
         yield sse_event('progress', {'current': 3, 'total': total,
                                      'item': '让模型判断优化意图与检索计划（2~5 秒）'})
         if _cancelled():
@@ -1345,13 +1497,13 @@ def prompt_adjust():
         try:
             plan = _normalize_plan(_call_planner({
                 'user_request': user_request,
-                'has_image': bool(image_b64),
+                'reference_images': model_images,
                 'input_mode': parsed['mode'],
                 'input_prompt': entries_knowledge,
                 'input_prose': parsed['prose'],
                 'available_tools': _available_tools(allowed),
                 'warnings': warnings,
-            }, cfg))
+            }, cfg, images=images))
         except Exception as e:
             # 规划器是**增强**不是必需：失败就降级继续（没有工具结果仍可改写），绝不 fatal
             planner_ok = False
@@ -1384,8 +1536,11 @@ def prompt_adjust():
             return
 
         # 阶段 5：调用视觉模型
-        yield sse_event('progress', {'current': 5, 'total': total,
-                                     'item': '调用视觉模型（10~60 秒）'})
+        yield sse_event('progress', {
+            'current': 5, 'total': total,
+            'item': (f'调用视觉模型（{len(images)} 张参考图，10~60 秒）' if images
+                     else '调用视觉模型（未勾选参考图，10~60 秒）' if workspace_count
+                     else '调用视觉模型（无参考图，10~60 秒）')})
         payload = {
             'input_mode': parsed['mode'],
             'input_prompt': entries_knowledge,
@@ -1393,11 +1548,13 @@ def prompt_adjust():
             'user_request': user_request,
             'planner_intent': plan['intent'],
             'planner_plan': plan['plan'],
-            'image_caption': image_caption,
+            # 参考图清单（编号 + 文件名）。图片本体按同样顺序随消息送出，
+            # 这里给一份文字副本，让模型能把「图N」与具体文件对上。
+            'reference_images': model_images,
             'tool_results': tool_results,
             'warnings': warnings,
         }
-        parsed_model = _call_vlm_json(image_b64, mime, payload, cfg)
+        parsed_model = _call_vlm_json(images, payload, cfg)
         summary = (parsed_model.get('summary') or '').strip()
         caption = (parsed_model.get('caption') or '').strip()
         caption_note = (parsed_model.get('caption_note') or '').strip()
@@ -1480,7 +1637,7 @@ def prompt_adjust():
             'modify': sum(1 for d in diff if d['op'] == 'modify'),
             'uncollected': len(still_uncollected),
         }
-        yield sse_event('complete', {
+        result = {
             'summary': summary,
             'caption': caption,
             'caption_note': caption_note,
@@ -1493,7 +1650,21 @@ def prompt_adjust():
             'tool_results': tool_results,
             'repaired': repaired,
             'uncollected': still_uncollected,
-        })
+            # 实际送入模型的参考图清单：编号 + 文件名。
+            # 只回传清单不回传图片字节 —— 前端已经有缩略图，回传 base64 白占带宽。
+            'reference_images': model_images,
+        }
+
+        # 落盘到会话：这是「会话是整体」的落点 —— 图在会话目录里，结果也写回它，
+        # 关掉页面/换个会话再回来，这套东西仍原样在。失败只警告不打断：
+        # 结果已经 yield 出去了，此时抛错会让用户拿到一个「明明算完了却报错」的界面。
+        try:
+            _save_result_to_session(sid, prompt_raw, user_request, result)
+        except Exception as e:
+            log.error('[PromptTool] 会话落盘失败 %s: %s', sid, e)
+            result['warnings'] = warnings + [f'结果未能保存到会话（{e}），仅本次页面可见']
+
+        yield sse_event('complete', result)
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})

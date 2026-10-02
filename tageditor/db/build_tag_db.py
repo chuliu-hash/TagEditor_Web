@@ -14,8 +14,8 @@
     python build_tag_db.py stats
 """
 import argparse
-import os
 import sqlite3
+import sys
 from pathlib import Path
 
 from tageditor.core.config import get_tag_db_config
@@ -62,6 +62,14 @@ CREATE TABLE IF NOT EXISTS user_tags (
 CREATE INDEX IF NOT EXISTS idx_tags_cn_name ON tags(cn_name);
 """
 
+# ⚠ **实际库里可能有本 SCHEMA 不创建的遗留表**，别被它们误导：
+#   · `tag_aliases(alias, tag, created_at)` —— 线上库里有这张表、有索引、还有 5 行手工别名
+#     （如 `brown_footwear → brown_shoes`，建于 2026-09-10），但**全仓 0 处代码引用、
+#     文档也从未提过**。它是某个「手工别名」功能做了一半留下的。上面那 5 行是**用户数据**，
+#     所以不要为了整洁直接 DROP；要么接上功能，要么先导出再删。
+#   · `fetch_state` 见 get_fetch_state 的说明（死代码，0 行）。
+# 重建库（init）不会创建这两张表，因此它们的消失是「预期行为」，不是数据损坏。
+
 # search_tags 全文索引：FTS5 trigram 虚拟表，对 name(规范化) + other_names + cn_name 做子串匹配。
 # trigram 分词器原生支持任意子串（≥3 字符），配合 name_norm（连字符→下划线）实现
 # 「on bed / on_bed / side-tie」三种写法互通。cn_name 也纳入 FTS（≥3 字符查询走 FTS，~2ms；
@@ -78,27 +86,46 @@ CREATE VIRTUAL TABLE IF NOT EXISTS tags_fts USING fts5(
 """
 
 # 同步触发器：tags 表增删改时，自动维护 tags_fts。
-# name_norm 在触发器内对 NEW.name 做 REPLACE('-','_') 计算，保证两侧规范化口径一致。
+#
+# **两列的规范化口径必须与 LIKE 分支一致**（这是实测踩出来的）：
+#   · name → REPLACE('-','_')，让「on bed」规范化成的 on_bed 能命中 on-bed；
+#   · other_names 同样要 REPLACE('-','_')。早先只有 name 做了，于是 other_names 里
+#     的别名搜不到：实测 `sandwich_board` 的 other_names 是 `["a-board", "a-frame"]`，
+#     用 `a board`（规范化成 a_board）走 FTS 查不到它，而同一条查询走 LIKE 分支能查到
+#     —— 同一个搜索框，≥3 字符和 <3 字符给出不同结果，且没有任何报错。
+#     同类还有 `see-through`（搜「see through」）。
+#   · contentless FTS5 的 'delete' 必须传**与写入时完全相同**的值才能删掉正确的词项，
+#     所以三个触发器里的表达式必须逐字一致，不能只改 INSERT 那一处。
 _FTS_TRIGGERS_SQL = """
 CREATE TRIGGER IF NOT EXISTS tags_fts_ai AFTER INSERT ON tags BEGIN
     INSERT INTO tags_fts(rowid, name_norm, other_names, cn_name)
-    VALUES (NEW.rowid, REPLACE(NEW.name, '-', '_'), NEW.other_names, NEW.cn_name);
+    VALUES (NEW.rowid, REPLACE(NEW.name, '-', '_'),
+            REPLACE(NEW.other_names, '-', '_'), NEW.cn_name);
 END;
 CREATE TRIGGER IF NOT EXISTS tags_fts_ad AFTER DELETE ON tags BEGIN
     INSERT INTO tags_fts(tags_fts, rowid, name_norm, other_names, cn_name)
-    VALUES ('delete', OLD.rowid, REPLACE(OLD.name, '-', '_'), OLD.other_names, OLD.cn_name);
+    VALUES ('delete', OLD.rowid, REPLACE(OLD.name, '-', '_'),
+            REPLACE(OLD.other_names, '-', '_'), OLD.cn_name);
 END;
 CREATE TRIGGER IF NOT EXISTS tags_fts_au AFTER UPDATE OF name, other_names, cn_name ON tags BEGIN
     INSERT INTO tags_fts(tags_fts, rowid, name_norm, other_names, cn_name)
-    VALUES ('delete', OLD.rowid, REPLACE(OLD.name, '-', '_'), OLD.other_names, OLD.cn_name);
+    VALUES ('delete', OLD.rowid, REPLACE(OLD.name, '-', '_'),
+            REPLACE(OLD.other_names, '-', '_'), OLD.cn_name);
     INSERT INTO tags_fts(rowid, name_norm, other_names, cn_name)
-    VALUES (NEW.rowid, REPLACE(NEW.name, '-', '_'), NEW.other_names, NEW.cn_name);
+    VALUES (NEW.rowid, REPLACE(NEW.name, '-', '_'),
+            REPLACE(NEW.other_names, '-', '_'), NEW.cn_name);
 END;
 """
 
+# FTS 布局版本（存在 PRAGMA user_version 里）。改了索引内容口径就要 +1，
+# 否则旧库不会重建，触发器换了但索引里还是旧口径的数据 —— 那是最难查的一类不一致。
+#   1 = 初版（name_norm 归一化，other_names 原样）
+#   2 = other_names 也做 '-'→'_' 归一化（与 LIKE 分支对齐）
+_FTS_LAYOUT_VERSION = 2
+
 
 def _ensure_fts_index(conn):
-    """确保 FTS5 索引表与同步触发器存在。
+    """确保 FTS5 索引表与同步触发器存在且是当前布局版本。
     全量重建场景（init_from_files 先 DELETE 再批量 INSERT）会通过触发器自动填充索引，
     无需手动重建。若 FTS 表已存在但为空（旧库升级），调用 _rebuild_fts_index 补数据。
     若旧版 FTS 表列集合不符（如缺少 cn_name 列），DROP 表 + 旧触发器后重建为新结构。
@@ -106,8 +133,9 @@ def _ensure_fts_index(conn):
     needs_rebuild = False
     if _table_exists(conn, 'tags_fts'):
         fts_cols = {r[1] for r in conn.execute("PRAGMA table_info(tags_fts)").fetchall()}
-        if 'cn_name' not in fts_cols:
-            # 旧版 FTS 表：DROP 表 + 三个旧触发器，重新创建带 cn_name 的新版
+        ver = conn.execute('PRAGMA user_version').fetchone()[0] or 0
+        if 'cn_name' not in fts_cols or ver < _FTS_LAYOUT_VERSION:
+            # 列集合变了、或布局版本落后：DROP 表 + 三个旧触发器，按新定义重建
             conn.executescript("""
                 DROP TABLE IF EXISTS tags_fts;
                 DROP TRIGGER IF EXISTS tags_fts_ai;
@@ -117,20 +145,35 @@ def _ensure_fts_index(conn):
             needs_rebuild = True
     conn.executescript(_FTS_INDEX_SQL)
     conn.executescript(_FTS_TRIGGERS_SQL)
+    if needs_rebuild:
+        conn.execute(f'PRAGMA user_version = {_FTS_LAYOUT_VERSION}')
     return needs_rebuild  # 调用方可据此触发 _rebuild_fts_index 填充数据
 
 
 def _rebuild_fts_index(conn):
     """全量重建 FTS5 索引内容（清空后从 tags 表重新填充）。
-    用于：旧库首次升级到 FTS5（触发器建好后表仍空），或索引损坏修复。"""
-    conn.execute("DELETE FROM tags_fts")
+    用于：旧库首次升级到 FTS5 / 布局版本升级（触发器建好后表仍空），或索引损坏修复。
+
+    **清空必须用 contentless 专用的 `'delete-all'` 命令**：`tags_fts` 是
+    `content=''` 的 contentless 表，直接 `DELETE FROM tags_fts` 会抛
+    `OperationalError: cannot DELETE from contentless fts5 table: tags_fts`
+    （实测）。早先之所以"没炸"，只是因为两个调用点拿到的永远是刚 DROP 重建过的空表
+    —— 空表上 DELETE 不执行任何 xUpdate。也就是说 docstring 承诺的「索引损坏修复」
+    其实做不到，而且一旦在非空表上调用就会炸。本文件 :202 附近的注释早就写明了这一点，
+    代码这里是另一套口径。"""
+    conn.execute("INSERT INTO tags_fts(tags_fts) VALUES('delete-all')")
     conn.execute("""
         INSERT INTO tags_fts(rowid, name_norm, other_names, cn_name)
-        SELECT rowid, REPLACE(name, '-', '_'), other_names, cn_name FROM tags
+        SELECT rowid, REPLACE(name, '-', '_'), REPLACE(other_names, '-', '_'), cn_name FROM tags
     """)
 
 # 已废弃的旧列名（用于迁移检测）。迁移时若 tags 表含任一此列，则重建为目标结构。
-# 注意：category/post_count 曾在早期版本存在后被移除，现在重新加入。nsfw 仍属废弃。
+# 触发结构迁移的「已废弃旧列名」。
+#
+# **别再写「nsfw 仍属废弃」**：nsfw 是活列。`llm_pipeline._update_tag` 在写它
+# （三层深度翻译顺带做 NSFW 判定）、`prompt_tool._tool_cooc` 在读它做过滤
+# （`_PROMPT_COOC_NSFW = 'hide'`），库里实测有 3,787 行 nsfw=1。
+# 早先这里有一句「nsfw 仍属废弃」，与事实相反 —— 后人照它删列就会静默废掉共现过滤。
 _LEGACY_COLUMNS = ()
 
 
@@ -294,18 +337,70 @@ def delete_user_tag(conn, name):
     return cur.rowcount > 0
 
 
+# ── 连接级 PRAGMA（唯一出处）──────────────────────────────────────────────
+# 这不是「可有可无的调优」：实测全表扫描类查询（搜索框 <3 字符的中文回退、首页随机推荐、
+# `ORDER BY post_count`、`COUNT(category=0)`、`MAX(updated_at)`）在默认值下是 **~100ms**；
+# 其中 `USE TEMP B-TREE FOR ORDER BY` 因为 `temp_store=FILE` 会**真的落盘**。
+#
+#   cache_size=-2000（默认 2MB）  而 tags 表 55MB → 全表扫描反复换页
+#   temp_store=FILE               ORDER BY / GROUP BY 的临时 B 树落盘
+#   mmap_size=0                   走 read() 而非 mmap
+#
+# `synchronous=NORMAL` 是 WAL 下的常规取舍：进程崩溃不丢已提交事务，仅断电/系统崩溃
+# 可能丢最后若干事务。本项目的写事务都是「一整批 LLM 结果」或「一页 wiki」，
+# 丢一个事务的代价是重跑那一批，可接受。
+#
+# `journal_size_limit` 单列一条：**Flask 长驻时进程级连接一直开着**，WAL 永远不会因
+# 「最后一个连接关闭」而被回收。实测 `wal_checkpoint(PASSIVE)` 已把全部帧写回主库，
+# `-wal` 文件却仍占 48MB；加上这个上限后同一循环降到 4MB。
+#
+# 两处连接（本模块 get_conn / translation._get_tag_db_conn）都调 apply_conn_pragmas，
+# 别再各写一份 —— 它们已经漂移过一次。
+#
+# **持久属性与连接级属性要分开**：`journal_mode` 写在库头里、是**文件级持久**的，
+# 设它是写操作（需要短暂的写锁），只需成功设一次即可。如果每条新连接都设，
+# 首次并发建连接时会互相撞出 `database is locked` —— 实测过：两个线程同时首次取连接，
+# 后者在 PRAGMA 处失败，整个连接返回 None，调用方拿到 NoneType 再报 AttributeError。
+# 故 journal_mode 单独走 set_persistent 开关，由调用方在**建表/迁移的同一把锁内**设一次。
+_PERSISTENT_PRAGMAS = (
+    ('journal_mode', 'WAL'),
+)
+
+# 连接级属性：必须每条连接各设一次（SQLite 不持久化它们）。
+_PER_CONN_PRAGMAS = (
+    ('busy_timeout', '5000'),
+    ('synchronous', 'NORMAL'),
+    ('cache_size', '-65536'),           # 64MB
+    ('temp_store', 'MEMORY'),
+    ('mmap_size', '268435456'),         # 256MB
+    ('journal_size_limit', '4194304'),  # WAL 封顶 4MB
+)
+
+
+def apply_conn_pragmas(conn, set_persistent=True):
+    """统一设置连接级 PRAGMA（口径见上方说明）。
+
+    set_persistent=False 时跳过 journal_mode —— 调用方若自己会在锁内设一次
+    （translation 的首次建连接路径），就不要在这里重复设，避免并发撞写锁。
+    """
+    # busy_timeout 必须第一个设，后面的语句才享受等待而不是立刻报错
+    for key, value in _PER_CONN_PRAGMAS:
+        conn.execute(f'PRAGMA {key} = {value}')
+    if set_persistent:
+        for key, value in _PERSISTENT_PRAGMAS:
+            conn.execute(f'PRAGMA {key} = {value}')
+    return conn
+
+
 def get_conn(db_path=None):
     """打开 SQLite 连接（自动建父目录）。
     若表是旧 schema（列集合与目标不符），自动迁移为目标结构。
-    busy_timeout=5000：写锁竞争时最多等待 5s 再报错。
-    journal_mode=WAL：写时用 WAL，允许「增量更新线程写」与「查询线程读」并发不阻塞
-        （默认 delete 模式下，长事务写入会锁库，并发查询可能 'database is locked'）。"""
+    连接级 PRAGMA 见 apply_conn_pragmas。"""
     if db_path is None:
         db_path = get_tag_db_config()['db_path']
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, timeout=5)
-    conn.execute('PRAGMA busy_timeout = 5000')
-    conn.execute('PRAGMA journal_mode = WAL')
+    apply_conn_pragmas(conn)
     conn.executescript(SCHEMA)
     # 旧库兼容：列集合与目标不符就迁移
     if _migrate_to_target_schema(conn):
@@ -489,7 +584,13 @@ def update_tag_meta(conn, name, category, post_count, commit=True):
 
 
 def get_fetch_state(conn, key, default=''):
-    """读取抓取状态（fetch_state 表）。key 不存在时返回 default。"""
+    """读取抓取状态（fetch_state 表）。key 不存在时返回 default。
+
+    ⚠ **目前无调用方（死代码）**：增量锚点实际走 `SELECT MAX(updated_at) FROM tags`
+    （见 `update_from_danbooru`），`fetch_state` 表实测 0 行。
+    保留它是为了以后真要存「不属于某个标签行的全局抓取进度」时有位置；
+    **别再新增第二个没人用的状态存储** —— 真要动这块，先决定是接上它还是删掉它。
+    """
     row = conn.execute("SELECT value FROM fetch_state WHERE key = ?", (key,)).fetchone()
     return row[0] if row else default
 
@@ -594,14 +695,36 @@ def search_tags(conn, keyword, limit=20, light=False):
             (match_expr, limit)
         ).fetchall()
     else:
-        # 短 keyword（<3 字符，trigram 无效）或 FTS 未建：回退全表 LIKE
+        # 短 keyword（<3 字符，trigram 无效）或 FTS 未建：回退全表 LIKE。
+        #
+        # **这一支要尽量省**：调用方是搜索框（250ms debounce，每敲一次就发），
+        # 而 2 字中文（「白发」「和服」）正是最常见的输入片段，必然落到这里。
+        #
+        # 关键优化：`REPLACE(name,'-','_')` 只为让「on-bed」也能被「on_bed」搜到。
+        # 若**规范化后的 keyword 里不含 `_`**，替换与否不影响匹配（替换只改 `-`→`_`，
+        # 不可能凭空造出关键字也不吞掉它）—— 于是可以整列跳过那两个 REPLACE。
+        # 实测（`白发`，LIMIT 200）：**68.7ms → 41.5ms，结果集逐行一致**。
+        #
+        # **判据必须是 kw_norm 而不是原始 kw**：用户输入 `on bed` 时 kw_norm 是 `on_bed`，
+        # 而库里存的是 `on-bed` —— 这时 REPLACE 正是让它匹配上的那一步，跳过就会丢结果。
+        # （任何空格/连字符/下划线在 kw_norm 里都会留下 `_`，所以只判 `_` 就够了。）
+        #
+        # `other_names` 仍然要扫：它带着多语言别名，实测「猫」有 27 条、「红」16 条
+        # 只在这里命中（例如 `白发` 能搜到 `red_eyes`）——**只走 cn_name 会静默丢结果**，
+        # 所以不要为了再快一点而砍掉这一列。
+        if '_' in kw_norm:
+            where_sql = ("WHERE REPLACE(name, '-', '_') LIKE ? ESCAPE '\\' "
+                         "OR cn_name LIKE ? ESCAPE '\\' "
+                         "OR REPLACE(other_names, '-', '_') LIKE ? ESCAPE '\\'")
+        else:
+            where_sql = ("WHERE name LIKE ? ESCAPE '\\' "
+                         "OR cn_name LIKE ? ESCAPE '\\' "
+                         "OR other_names LIKE ? ESCAPE '\\'")
         rows = conn.execute(
             f"""
             SELECT {sel}
             FROM tags
-            WHERE REPLACE(name, '-', '_') LIKE ? ESCAPE '\\'
-               OR cn_name LIKE ? ESCAPE '\\'
-               OR REPLACE(other_names, '-', '_') LIKE ? ESCAPE '\\'
+            {where_sql}
             ORDER BY post_count DESC, length(name), name
             LIMIT ?
             """,
@@ -616,8 +739,100 @@ def search_tags(conn, keyword, limit=20, light=False):
     } for r in rows]
 
 
+def _safe_tag_count(db_path):
+    """读 tags 行数；库/表不存在或读不了时返回 0（守卫用途，不抛异常）。"""
+    p = Path(db_path)
+    if not p.is_file():
+        return 0
+    try:
+        conn = sqlite3.connect(f'file:{p.as_posix()}?mode=ro', uri=True, timeout=5)
+    except sqlite3.Error:
+        return 0
+    try:
+        return conn.execute("SELECT count(*) FROM tags").fetchone()[0]
+    except sqlite3.Error:
+        return 0
+    finally:
+        conn.close()
+
+
+def backup_db(db_path, dst=None, verbose=True):
+    """用 SQLite 的 `VACUUM INTO` 生成**一致性快照**（顺带压缩碎片），返回快照路径。
+
+    为什么不是 shutil.copy：
+      · 库开着 WAL 时，`-wal` 里可能有**尚未 checkpoint 回主库的已提交事务**，
+        只复制 `.db` 会得到一个「缺最近写入」的旧快照（这个坑很隐蔽：文件能打开、
+        行数看着也正常，只是少了一批数据）。要么连 `-wal`/`-shm` 三件套一起复制，
+        要么用本函数。
+      · `VACUUM INTO` 在单个读事务里取一致视图，**不阻塞写入、不需要独占锁**，
+        产物紧凑（实测 172MB → 68.5MB / 0.6s），顺手把 freelist 回收掉。
+
+    tags 表里存着 5.3 万条 LLM 翻译 + cn_wiki + nsfw 标记 + 锁定标志，而这些字段
+    **都不在 CSV/parquet 里**（重建即归零），所以这是全项目唯一的保险：
+    破坏性操作（init）之前会自动调它一次。
+
+    校验：产物行数与源库必须一致，否则删掉这个不可信的备份并抛错——宁可没有备份，
+    也不要留一个「看起来成功、实际不完整」的备份。
+    """
+    src = Path(db_path).resolve()
+    if not src.is_file():
+        raise FileNotFoundError(f'数据库不存在，无法备份: {src}')
+
+    if dst is None:
+        import time as _time
+        dst = f'{src}.bak-{_time.strftime("%Y%m%d-%H%M%S")}'
+    dst_path = Path(dst).resolve()
+    if dst_path.exists():
+        raise FileExistsError(f'备份目标已存在，拒绝覆盖: {dst_path}')
+
+    # VACUUM INTO 只读源库；timeout 给足，避免与正在跑的写入撞锁
+    conn = sqlite3.connect(str(src), timeout=30)
+    try:
+        conn.execute("VACUUM INTO ?", (str(dst_path),))
+    except Exception:
+        # 半成品快照必须清掉，否则下次会因「目标已存在」而拒绝备份
+        try:
+            dst_path.unlink()
+        except OSError:
+            pass
+        raise
+    finally:
+        conn.close()
+
+    src_n = _safe_tag_count(src)
+    dst_n = _safe_tag_count(dst_path)
+    if src_n != dst_n:
+        try:
+            dst_path.unlink()
+        except OSError:
+            pass
+        raise RuntimeError(f'备份校验失败：源库 {src_n} 行、快照 {dst_n} 行，已删除快照')
+
+    if verbose:
+        log.info(f'[BuildTagDB] 已备份 {src_n} 条 → {dst_path} '
+                 f'({_mb(dst_path.stat().st_size)}，源库 {_mb(src.stat().st_size)})')
+    return str(dst_path)
+
+
+def _mb(n):
+    return f'{n / 1048576:.1f}MB'
+
+
 def init_from_files(db_path, csv_path, parquet_path, verbose=True):
-    """从 tags_enhanced.csv + wiki_pages.parquet 构建本地数据库（全量重建）"""
+    """从 tags_enhanced.csv + wiki_pages.parquet 构建本地数据库（**全量重建，破坏性**）。
+
+    ⚠ **会丢数据**：`DELETE FROM tags` 后只写入 CSV/parquet 里有的 6 个字段
+    （name/cn_name/en_wiki/cn_wiki/other_names/updated_at）。以下内容**不在源文件里**，
+    重建后归默认值：
+      · 本地 LLM 生成的 `cn_wiki`（上游 CSV 只有 cn_name，没有中文 wiki）
+      · `category` → -1、`post_count` → 0（要靠 `merge` 从 raw/tag.sqlite 补回，
+        而它们正是 prompt_tool 候选过滤与搜索排序的依据）
+      · `nsfw` → 0（共现 NSFW 过滤会因此失效）
+      · `cn_name_locked` / `cn_wiki_locked` → 0（用户的手工翻译失去保护）
+
+    CLI 的 `init` 子命令在库非空时会先自动快照、并要求显式 `--yes`；
+    能增量就不要用 init —— `merge` 只补缺、不覆盖。
+    """
     import pandas as pd
 
     if verbose:
@@ -982,6 +1197,9 @@ def full_scan_wiki(db_path, verbose=True, progress_callback=None, cancel_check=N
 
     落库：仅写 en_wiki/other_names/updated_at，保留本地 cn_name/cn_wiki 不变。
 
+    断点续传：data/.wiki_full_progress 记录（页码 + 时间上限），中断后回退 2 页恢复。
+    落库幂等（upsert），回退重抓的页只会覆盖相同内容，不产生错误数据。
+
     progress_callback 同 update_from_danbooru。
     """
     import random
@@ -1009,15 +1227,30 @@ def full_scan_wiki(db_path, verbose=True, progress_callback=None, cancel_check=N
 
     session = _make_session(db_cfg, danbooru_cfg)
     api_url = danbooru_cfg['api_url'].rstrip('/') + '/wiki_pages.json'
+    base_dir = Path(db_path).parent
+    progress_file = base_dir / '.wiki_full_progress'
+
+    # 断点续传（与 update_from_danbooru 同款结构；文件独立，两任务的断点互不覆盖）
+    current_page = 1
+    current_upper_bound = None
+    if progress_file.exists():
+        try:
+            lines = progress_file.read_text().splitlines()
+            if lines:
+                current_page = max(1, int(lines[0].strip()) - 2)  # 回退 2 页保险
+                if len(lines) > 1 and lines[1].strip():
+                    current_upper_bound = lines[1].strip()
+                log.info(f'[BuildTagDB] 检测到 wiki 全量中断记录，从第 {current_page} 页恢复'
+                         + (f'（时间上限 {current_upper_bound[:19]}）' if current_upper_bound else ''))
+        except ValueError:
+            pass
 
     log.info('[BuildTagDB] 开始 wiki 全量遍历（默认排序 + page + 千页突破）')
-    _emit({'type': 'progress', 'page': 1, 'new_count': 0})
+    _emit({'type': 'progress', 'page': current_page, 'new_count': 0})
 
     EMPTY_RETRIES = 3
     empty_streak = 0
     http_fail_streak = 0  # 非 200 连续计数（见 MAX_HTTP_FAIL_STREAK）
-    current_page = 1
-    current_upper_bound = None  # 千页突破：search[updated_at]=..<upper
     wiki_count = 0
     skipped_deleted = 0
 
@@ -1036,7 +1269,7 @@ def full_scan_wiki(db_path, verbose=True, progress_callback=None, cancel_check=N
                 on_network_error=lambda m: log.info(f'[BuildTagDB] {m}'),
             )
             if r['cancelled']:
-                log.info(f'[BuildTagDB] 用户中断 wiki 全量遍历（已抓 {wiki_count} 条）')
+                log.info(f'[BuildTagDB] 用户中断 wiki 全量遍历（已抓 {wiki_count} 条，断点已保存）')
                 _emit({'type': 'cancelled', 'new_count': wiki_count})
                 cancelled = True
                 break
@@ -1107,13 +1340,25 @@ def full_scan_wiki(db_path, verbose=True, progress_callback=None, cancel_check=N
                     current_upper_bound = page_oldest_ua
                     log.info(f'[BuildTagDB] wiki 千页突破，重置时间轴到 updated_at<{current_upper_bound[:19]}，page 重置为 1')
                 current_page = 1
+            # 每页存检查点（2 行小文件，与 update_from_danbooru 同款）：
+            # 全量 27 万页 ≈1350+ 请求，没有断点的话中断只能从 page 1 重来（纯浪费）。
+            pages_done = current_page - 1
+            if pages_done > 0:
+                with open(progress_file, 'w') as f:
+                    f.write(f'{pages_done}\n')
+                    if current_upper_bound:
+                        f.write(f'{current_upper_bound}\n')
             # 每 pause_every 页打印进度
             if current_page > 1 and (current_page - 1) % pause_every == 0:
                 log.info(f'[BuildTagDB] wiki 全量进行中：{wiki_count} 条，当前 page={current_page}')
                 time.sleep(pause_secs)
 
+        # 清理断点文件：仅正常完成时删除（中断时保留供下次续传，与 update_from_danbooru 同口径）
+        if not cancelled and progress_file.exists():
+            progress_file.unlink()
         if cancelled:
-            log.warning(f'[BuildTagDB] wiki 全量遍历已中断：抓取 {wiki_count} 条，跳过已删除 {skipped_deleted} 条')
+            log.warning(f'[BuildTagDB] wiki 全量遍历已中断：抓取 {wiki_count} 条，跳过已删除 {skipped_deleted} 条'
+                        '（断点已保存，下次续传）')
             # cancelled 事件已在循环中断点发送，此处不再重复
         else:
             log.warning(f'[BuildTagDB] wiki 全量遍历完成：抓取 {wiki_count} 条，跳过已删除 {skipped_deleted} 条')
@@ -1381,10 +1626,18 @@ def main():
     parser = argparse.ArgumentParser(description='Danbooru 标签数据库工具')
     sub = parser.add_subparsers(dest='cmd', required=True)
 
-    p_init = sub.add_parser('init', help='从 CSV + Parquet 全量构建数据库')
+    p_init = sub.add_parser('init', help='从 CSV + Parquet 全量构建数据库（破坏性：会丢本地翻译/wiki）')
     p_init.add_argument('--csv', required=True, help='tags_enhanced.csv 路径')
     p_init.add_argument('--parquet', required=True, help='wiki_pages.parquet 路径')
     p_init.add_argument('--db', default=None, help='输出 SQLite 路径（默认用 .env 的 TAG_DB_PATH）')
+    # init 是唯一会 DELETE 整表的命令，而 LLM 翻译/wiki/nsfw/锁定标志都不在源文件里。
+    # 库非空时要求显式确认（在此之前一定会自动做一次一致性快照）。
+    p_init.add_argument('--yes', action='store_true',
+                        help='确认清空重建（库非空时必须显式给出；否则只做备份后退出）')
+
+    p_backup = sub.add_parser('backup', help='生成一致性快照（VACUUM INTO，顺带压缩碎片）')
+    p_backup.add_argument('--db', default=None, help='SQLite 路径（默认用 .env 的 TAG_DB_PATH）')
+    p_backup.add_argument('--out', default=None, help='快照输出路径（默认 <db>.bak-<时间戳>）')
 
     p_update = sub.add_parser('update', help='增量抓取 Danbooru wiki 更新本地数据库')
     p_update.add_argument('--db', default=None, help='SQLite 路径（默认用 .env 的 TAG_DB_PATH）')
@@ -1436,8 +1689,44 @@ def main():
     db_path = args.db if getattr(args, 'db', None) else get_tag_db_config()['db_path']
 
     if args.cmd == 'init':
+        # 守卫：init 会 DELETE 整个 tags 表，而 cn_wiki/nsfw/category/post_count/锁定标志
+        # 都不在 CSV/parquet 里 —— 丢了这个库没有第二份（data/ 不入版本控制，
+        # 源 CSV/parquet 也不在仓库里）。所以：
+        #   ① 只要库非空，先无条件做一次一致性快照；
+        #   ② 没有 --yes 就停下，把「会丢什么」和「更安全的替代」说清楚。
+        existing = _safe_tag_count(db_path)
+        if existing > 0:
+            try:
+                snap = backup_db(db_path)
+            except Exception as e:
+                log.error(f'[BuildTagDB] init 前备份失败，已中止（不让破坏性操作在没有退路时执行）: {e}')
+                return 1
+            if not args.yes:
+                log.error('=' * 64)
+                log.error(f'[BuildTagDB] 拒绝执行 init：目标库已有 {existing} 条标签。')
+                log.error(f'           快照已保存到: {snap}')
+                log.error('           init 是**全量重建**，会丢失：')
+                log.error('             · 本地 LLM 生成的全部 cn_wiki（上游 CSV 没有中文 wiki）')
+                log.error('             · category → -1、post_count → 0')
+                log.error('               （这两项正是提示词优化器候选过滤与搜索排序的依据，'
+                          '重建后需要再跑 merge 从 raw/tag.sqlite 补回）')
+                log.error('             · nsfw → 0（共现 NSFW 过滤会失效）')
+                log.error('             · cn_name_locked / cn_wiki_locked → 0（手工翻译失去保护）')
+                log.error('           若只是想补新标签/新字段，用 `merge`（只补缺、不覆盖）。')
+                log.error('           确实要清空重建，请显式加 --yes。')
+                log.error('=' * 64)
+                return 1
+
         init_from_files(db_path, args.csv, args.parquet)
         show_stats(db_path)
+        # 重建只写了 6 个字段，把「还得做什么」讲清楚，否则用户会以为库是完整的
+        log.warning('[BuildTagDB] init 只写入 CSV/parquet 存在的字段：'
+                    'category=-1、post_count=0、nsfw=0、锁定标志=0。'
+                    '请接着跑 `merge --sqlite <raw/tag.sqlite>` 补 category/post_count，'
+                    '必要时再跑 `sync-tags`。')
+    elif args.cmd == 'backup':
+        snap = backup_db(db_path, dst=args.out)
+        print(f'备份完成: {snap}')
     elif args.cmd == 'update':
         update_from_danbooru(db_path)
         show_stats(db_path)
@@ -1483,4 +1772,6 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    # main() 只在「守卫生效/中止」时返回非 0（见 init 分支），其余返回 None → 0。
+    # 用 sys.exit 让调用方（脚本/CI）能拿到真实退出码。
+    sys.exit(main() or 0)

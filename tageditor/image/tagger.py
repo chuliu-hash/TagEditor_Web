@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 import os
-import base64
+import time
 import numpy as np
 from flask import Blueprint, jsonify, current_app, Response
 from tageditor.core.config import get_vision_config, get_wd14_config, get_image_files, get_prompt, write_text_atomic
+from tageditor.core.llm_metrics import log_llm_usage
 from tageditor.core.sse_utils import sse_event
 import logging
 
@@ -21,9 +22,15 @@ WD14_BATCH_SIZE = 8
 
 
 def wd14_preprocess_image(image_path):
-    """WD14 图像预处理：读取 → RGBA转白底BGR → 填充正方形 → 缩放448x448 → float32"""
+    """WD14 图像预处理：读取 → RGBA转白底BGR → 填充正方形 → 缩放448x448 → float32
+
+    读取必须走 `imread_any`：`cv2.imread` 在 Windows 上对含中文的路径直接返回 None，
+    而本项目的 safe_filename() 是刻意保留中文的 → 中文名图片会整批打标失败
+    （症状是 `ValueError: 无法读取图像`）。详见 core/image_io.py 的模块说明。
+    """
     import cv2
-    img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+    from tageditor.core.image_io import imread_any
+    img = imread_any(image_path, cv2.IMREAD_UNCHANGED)
     if img is None:
         raise ValueError(f"无法读取图像: {image_path}")
 
@@ -111,7 +118,7 @@ def auto_tag_wd14():
         return jsonify({'tagged': 0, 'skipped': skipped, 'errors': [], 'message': '所有图片已有标签'})
 
     total = len(to_tag)
-    log.warning(f"\n[WD14] 开始自动打标: 共 {total} 张待处理, {skipped} 张已有标签跳过")
+    log.info(f"[WD14] 开始自动打标: 共 {total} 张待处理, {skipped} 张已有标签跳过")
 
     def generate():
         tagged = 0
@@ -196,7 +203,7 @@ def auto_tag_wd14():
                         log.error(f"[WD14] ✗ {filename}: {e}")
                         yield sse_event('error', {'item': filename, 'error': str(e)})
 
-            log.error(f"[WD14] 完成: {tagged} 张成功, {skipped} 张跳过, {error_count} 张失败")
+            log.info(f"[WD14] 完成: {tagged} 张成功, {skipped} 张跳过, {error_count} 张失败")
             yield sse_event('complete', {'tagged': tagged, 'skipped': skipped, 'errors': error_count})
         except Exception as e:
             # 生成器级别的未预期异常：发 fatal，前端能正常收尾
@@ -237,11 +244,11 @@ def auto_caption_vlm():
     skipped = len(all_images) - len(to_process)
 
     if not to_process:
-        return jsonify({'tagged': 0, 'skipped': skipped, 'errors': [],
+        return jsonify({'tagged': 0, 'skipped': skipped, 'empty': 0, 'errors': [],
                         'message': '所有图片已有自然语言描述'})
 
     total = len(to_process)
-    log.warning(f"\n[VLM] 开始生成自然语言描述: 共 {total} 张待处理, {skipped} 张已有描述跳过")
+    log.info(f"[VLM] 开始生成自然语言描述: 共 {total} 张待处理, {skipped} 张已有描述跳过")
 
     from openai import OpenAI
     client = OpenAI(base_url=vcfg['api_url'], api_key=vcfg['api_key'])
@@ -252,7 +259,12 @@ def auto_caption_vlm():
         # 「跳过」的语义（与开头的提示语一致）。旧实现在此处 skipped = 0 把外层变量
         # 遮蔽掉，于是「跳过」在 complete 事件里变成了「模型返回空描述的张数」——
         # 用户看到「跳过 3 张」，实际一张都没有 .nl.txt 需要跳过，无法据此判断问题。
+        #
+        # 但**两者也不能相加**（那是另一半同样的错）：empty 是「模型一个字都没出」，
+        # 意味着这张图永远不会有 .nl.txt、需要人工补，而「已有描述」是完全正常的。
+        # 故 empty 单独计数 + 单独发 error 事件，让它在界面上可见。
         error_count = 0
+        empty_count = 0
         try:
             yield sse_event('progress', {'current': 0, 'total': total,
                             'item': '正在准备处理...'})
@@ -273,12 +285,23 @@ def auto_caption_vlm():
                             ref_tags = content
 
                     # Step 2: VLM 生成自然语言描述
+                    # 统一走 encode_for_vlm：超 4MB / 超 1536px 就缩到 1536 并转 JPEG q90。
+                    # 早先这里是 `base64.b64encode(f.read())` **原图直送**，同一台后端上
+                    # prompt_tool 压、这里不压 —— 4096² 约 21k vision token，1536² 约 3.0k，
+                    # 单图差一万多 token（本地是 prefill 时间，云端是钱），
+                    # 还可能因超服务端 body 上限而整张失败。
+                    from tageditor.core.image_io import encode_for_vlm
                     with open(file_path, 'rb') as f:
-                        img_b64 = base64.b64encode(f.read()).decode('utf-8')
+                        img_raw = f.read()
+                    _img_warns = []
+                    img_b64, img_mime = encode_for_vlm(
+                        img_raw, os.path.splitext(filename)[1], warnings=_img_warns)
+                    for _w in _img_warns:
+                        log.info(f"[VLM] {filename}: {_w}")
 
                     user_content = [
                         {'type': 'image_url',
-                         'image_url': {'url': f'data:image/{os.path.splitext(filename)[1].lstrip(".")};base64,{img_b64}'}},
+                         'image_url': {'url': f'data:{img_mime};base64,{img_b64}'}},
                     ]
 
                     if ref_tags:
@@ -294,6 +317,7 @@ def auto_caption_vlm():
                     if vcfg['thinking'] not in ('on', 'true', '1', 'enabled'):
                         extra['extra_body'] = {'thinking': {'type': 'disabled'}}
 
+                    _t0 = time.perf_counter()
                     response = client.chat.completions.create(
                         model=vcfg['model'],
                         messages=[
@@ -308,6 +332,9 @@ def auto_caption_vlm():
                         timeout=vcfg.get('timeout') or 180,
                         **extra,
                     )
+                    # 指标：单图 VLM 的耗时与 token（usage 由端点返回，不额外花钱）
+                    log_llm_usage('VLM描述', vcfg['model'], time.perf_counter() - _t0, response,
+                                  note=f'file={filename}')
 
                     description = (response.choices[0].message.content or '').strip()
                     if not description:
@@ -320,7 +347,14 @@ def auto_caption_vlm():
                                   f"调大 LLM_VISION_MAX_TOKENS 或关闭思考）")
                         else:
                             log.warning(f"[VLM] △ {filename}: 描述为空, finish={finish}")
-                        skipped += 1
+                        # 空描述**不是**「跳过」：这张图永远不会有 .nl.txt，需要人工补。
+                        # 单独计数并发 error 事件，否则用户只看到「跳过 M 张」，
+                        # 无从分辨「本来就有描述」和「模型一个字没出」。
+                        empty_count += 1
+                        yield sse_event('error', {
+                            'item': filename,
+                            'error': f'模型未生成描述（finish={finish}），该图仍没有 .nl.txt，需重试或人工补写'
+                        })
                         continue
 
                     # 保存到新的 .nl.txt，不覆盖原标签
@@ -334,9 +368,12 @@ def auto_caption_vlm():
                     log.error(f"[VLM] ✗ {filename}: {e}")
                     yield sse_event('error', {'item': filename, 'error': str(e)})
 
-            log.error(f"[VLM] 完成: {tagged} 张成功, {skipped} 张跳过, {error_count} 张失败")
+            log.info(f"[VLM] 完成: {tagged} 张成功, {skipped} 张已有描述跳过, "
+                     f"{empty_count} 张模型未产出, {error_count} 张失败")
+            # 保留 skipped（= 已有 .nl.txt 的张数，向后兼容前端与外部脚本），
+            # 新增 empty 明确区分「模型什么都没出」。
             yield sse_event('complete', {'tagged': tagged, 'skipped': skipped,
-                            'errors': error_count})
+                                         'empty': empty_count, 'errors': error_count})
         except Exception as e:
             yield sse_event('fatal', {'error': f'描述生成异常终止: {e}'})
 

@@ -12,7 +12,6 @@ import json
 import os
 import re
 from tageditor.core.config import get_prompt, USER_AGENT
-import sys
 import time
 import random
 import warnings
@@ -21,6 +20,7 @@ import requests as req
 import urllib3
 from pathlib import Path
 from tageditor.core.config import get_tag_db_config, resolve_api_key
+from tageditor.core.llm_metrics import log_llm_usage
 from tageditor.db.build_tag_db import normalize_tag_key
 import logging
 
@@ -550,11 +550,14 @@ def _llm_thinking_on() -> bool:
 
 
 def _call_llm(client, model: str, system_prompt: str,
-              batch_data: list, temperature: float) -> list:
+              batch_data: list, temperature: float, label: str = '') -> list:
     """调用 LLM，返回 items 列表。
 
     上下文超限 / 输出被 max_tokens 截断时自动将 batch_data 拆半递归重试，
     不再继续用原大小重试。
+
+    label 只用于指标日志（`批量翻译/entity` 等），让「哪一层慢、慢在 prefill 还是
+    生成」可以被直接聚合出来 —— 见 core/llm_metrics.py 的说明。
     """
     max_attempts = 5
     last_error = None
@@ -575,6 +578,7 @@ def _call_llm(client, model: str, system_prompt: str,
             extra = {}
             if not _llm_thinking_on():
                 extra['extra_body'] = {'thinking': {'type': 'disabled'}}
+            _t0 = time.perf_counter()
             response = client.chat.completions.create(
                 model=model,
                 messages=[
@@ -587,6 +591,11 @@ def _call_llm(client, model: str, system_prompt: str,
                 timeout=current_timeout,
                 **extra,
             )
+            _elapsed = time.perf_counter() - _t0
+            # 指标：一次成功调用的真实耗时与 token 用量。这是「那 82 秒固定开销」
+            # 唯一能取证的地方（usage 由端点返回，不额外花钱）。
+            log_llm_usage(label or '批量翻译', model, _elapsed, response,
+                          note=f'batch={len(batch_data)} attempt={attempt + 1}')
             finish = response.choices[0].finish_reason
             raw = response.choices[0].message.content
             # content 为空且被截断 = 额度被思考占满，正式回答一个字没出。
@@ -680,12 +689,20 @@ def _call_llm(client, model: str, system_prompt: str,
                 reason = '输出被 max_tokens 截断' if is_truncated else '上下文超限'
                 mid = len(batch_data) // 2
                 log.warning(f"[LLM] {reason}（batch_size={len(batch_data)} 过大），拆分为 {mid}+{len(batch_data)-mid} 两批递归重试")
-                left = _call_llm(client, model, system_prompt, batch_data[:mid], temperature)
-                right = _call_llm(client, model, system_prompt, batch_data[mid:], temperature)
+                left = _call_llm(client, model, system_prompt, batch_data[:mid], temperature,
+                                 label=f'{label}+拆半' if label else '')
+                right = _call_llm(client, model, system_prompt, batch_data[mid:], temperature,
+                                  label=f'{label}+拆半' if label else '')
                 return left + right
             last_error = e
             if attempt == max_attempts - 1:
-                log.error(f"[LLM] 请求失败，已重试 {max_attempts} 次: {e}")
+                # **把本批标签名打进日志**：原先只有条数与异常文本，于是「哪 8 个标签
+                # 一直失败」无从得知，每轮都会重新烧一次（最坏单批 47 分钟）。
+                _names = [str(t.get('name', '?')) for t in batch_data if isinstance(t, dict)]
+                log.error(f"[LLM] 请求失败，已重试 {max_attempts} 次: {e}"
+                          + (f" | label={label}" if label else '')
+                          + f" | 本批 {len(_names)} 条: {', '.join(_names[:12])}"
+                          + (' …' if len(_names) > 12 else ''))
                 raise
             # 超时类错误要等**更久**再重试，不能立刻重发：
             # llama.cpp 在客户端断开后仍会把这批跑完（日志里 release 才结束），
@@ -874,11 +891,27 @@ def _combine_cn(base_cn: str, ext_cn: str) -> str:
     return ','.join(out)
 
 
-def _apply_results(conn, results: list):
-    """将 LLM 结果写入 SQLite。"""
-    updated = 0
+def _apply_results(conn, results: list) -> set:
+    """把 LLM 结果写入 SQLite，返回**真正写入了至少一个字段的标签名集合**。
+
+    返回「写成功的名字」而不是「处理了几条」，是为了让调用方把续跑历史记准。
+    原先调用方一律 `current_run.update(item['name'] for item in results)`，
+    只要结果里有 name 就记为已处理 —— 而模型完全可能返回一个
+    `chinese_wiki` 为空的条目（没产出该字段）。这类标签于是被 history 永久跳过：
+    实测库里 **677 条有中文名却没有中文 wiki**，其中 **512 条**就是这样被跳过的；
+    而它们的平均 post_count 是 **534**，比同层已完成的 **246** 还高，
+    说明这不是「太冷门翻不出来」，而是系统性漏账。
+
+    名字统一走 normalize_tag_key，与 `_load_tags` 读出的 name 同口径，
+    否则大小写/空格写法不同的条目又会漏记。
+    """
+    written = set()
+    returned = 0
     for item in results:
-        name = item.get("name", "")
+        name = (item.get("name") or "").strip()
+        if not name:
+            continue
+        returned += 1
         base_cn = str(item.get("cn_name", "")).strip()
         ext_cn = str(item.get("extended_cn_name", "")).strip()
         combined = _combine_cn(base_cn, ext_cn)
@@ -893,9 +926,15 @@ def _apply_results(conn, results: list):
                     cn_name=combined if combined else None,
                     cn_wiki=wiki if wiki else None,
                     nsfw=nsfw)
-        updated += 1
+        # 三个字段全空 = 模型这一条什么都没产出，不能算「已处理」
+        if combined or wiki or nsfw is not None:
+            written.add(normalize_tag_key(name))
     conn.commit()
-    return updated
+    if returned > len(written):
+        log.warning(f"[LLM] {returned - len(written)} 条结果没有任何可用字段"
+                    f"（cn_name/extended_cn_name/chinese_wiki/nsfw 全空），"
+                    f"不计入续跑历史，下一轮会重新处理")
+    return written
 
 
 def translate_one_tag(tag_data: dict, db_path: str = None) -> dict:
@@ -943,7 +982,8 @@ def translate_one_tag(tag_data: dict, db_path: str = None) -> dict:
     client = OpenAI(base_url=base_url,
                     api_key=resolve_api_key(os.environ.get('LLM_TEXT_API_KEY', '')))
     results = _call_llm(client, os.environ.get('LLM_TEXT_MODEL', 'default'),
-                        system_prompt, payload, temperature=temperature)
+                        system_prompt, payload, temperature=temperature,
+                        label='单条翻译')
 
     if not results:
         return {'cn_name': '', 'cn_wiki': '', 'nsfw': None}
@@ -1033,42 +1073,50 @@ def run_llm_process(db_path: str = None, preview: bool = False,
 
     current_run = set()
 
+    # ── 三个层各自的批循环 ───────────────────────────────────────────────
+    # **每批单独 try/except + 每批保存 history**，与 Web 路径（translation.py）同口径。
+    # 原先这里既没有 per-batch 兜底、`_save_history` 也只在三个循环全部跑完之后调一次
+    # （见下方「保存历史」），于是 Ctrl-C / 崩溃 / 任意一批 5 次重试耗尽
+    # → **整轮的续跑记录归零**，下次从第 1 批重跑（当前库规模约 6,600 批），
+    # 而重跑会无条件覆盖已翻好的结果（锁定只保护 1 行）。两处实现漂移过，别再分家。
+    def _run_batches(layer_name, tags, system_prompt_key, temperature, make_payloads):
+        for i in range(0, len(tags), batch_size):
+            batch = tags[i:i + batch_size]
+            payload = make_payloads(batch)
+            log.info(f"[LLM] {layer_name} 进度: {min(i + batch_size, len(tags))}/{len(tags)}")
+            try:
+                results = _call_llm(client, model, get_system_prompt(system_prompt_key), payload,
+                                    temperature=temperature, label=f'批量翻译/{system_prompt_key}')
+            except Exception as e:
+                log.error(f"[LLM] {layer_name} 批 {i}-{i + len(batch)} 失败，跳过该批继续: {e}")
+                continue
+            current_run.update(_apply_results(conn, results))
+            # 每批落盘：中断后能从这批之后继续，而不是重跑整轮
+            _save_history(db_path, history | current_run)
+
     # ── Entity 处理 ──────────────────────────────────────────────────────
     if entity_tags:
         log.info(f"\n[LLM] 开始实体处理（{len(entity_tags)} 条）...")
-        for i in range(0, len(entity_tags), batch_size):
-            batch = entity_tags[i:i + batch_size]
-            payload = _build_entity_payloads_batch(batch, tag_to_groups, group_cn_names, bangumi_token, cooc_data)
-            log.info(f"[LLM] Entity 进度: {min(i + batch_size, len(entity_tags))}/{len(entity_tags)}")
-            results = _call_llm(client, model, get_system_prompt('llm_entity'), payload, temperature=0.1)
-            n = _apply_results(conn, results)
-            current_run.update(item["name"] for item in results if item.get("name"))
+        _run_batches('Entity', entity_tags, 'llm_entity', 0.1,
+                     lambda b: _build_entity_payloads_batch(b, tag_to_groups, group_cn_names,
+                                                            bangumi_token, cooc_data))
 
     # ── General 处理 ─────────────────────────────────────────────────────
     if general_tags:
         log.info(f"\n[LLM] 开始常规翻译（{len(general_tags)} 条）...")
-        for i in range(0, len(general_tags), batch_size):
-            batch = general_tags[i:i + batch_size]
-            payload = [_build_general_payload(t, tag_to_groups, group_cn_names, cooc_data)
-                       for t in batch]
-            log.info(f"[LLM] General 进度: {min(i + batch_size, len(general_tags))}/{len(general_tags)}")
-            results = _call_llm(client, model, get_system_prompt('llm_general'), payload, temperature=0.4)
-            _apply_results(conn, results)
-            current_run.update(item["name"] for item in results if item.get("name"))
+        _run_batches('General', general_tags, 'llm_general', 0.4,
+                     lambda b: [_build_general_payload(t, tag_to_groups, group_cn_names, cooc_data)
+                                for t in b])
 
     # ── Fallback 处理 ────────────────────────────────────────────────────
     if fallback_tags:
         log.info(f"\n[LLM] 开始无 Wiki 兜底（{len(fallback_tags)} 条）...")
-        for i in range(0, len(fallback_tags), batch_size):
-            batch = fallback_tags[i:i + batch_size]
-            payload = [_build_general_payload(t, tag_to_groups, group_cn_names, cooc_data)
-                       for t in batch]
-            log.info(f"[LLM] Fallback 进度: {min(i + batch_size, len(fallback_tags))}/{len(fallback_tags)}")
-            results = _call_llm(client, model, get_system_prompt('llm_fallback'), payload, temperature=0.5)
-            _apply_results(conn, results)
-            current_run.update(item["name"] for item in results if item.get("name"))
+        _run_batches('Fallback', fallback_tags, 'llm_fallback', 0.5,
+                     lambda b: [_build_general_payload(t, tag_to_groups, group_cn_names, cooc_data)
+                                for t in b])
 
     # ── 保存历史 ─────────────────────────────────────────────────────────
+    # 正常收尾时的最终落盘（每批已经存过，这里只补一次完整状态与统计）
     if current_run:
         history.update(current_run)
         _save_history(db_path, history)

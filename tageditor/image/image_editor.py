@@ -17,29 +17,42 @@ image_editor_bp = Blueprint('image_editor', __name__)
 _realesrgan_cache = {'upsampler': None, 'model_key': None}
 
 
-def _write_png_atomic(path, img, compression=3):
-    """原子写 PNG：编码到内存 → 写 .tmp → os.replace 覆盖目标。
+def _write_image_atomic(path, img, compression=3):
+    """原子写图片：按**目标扩展名**编码到内存 → 唯一临时文件 → os.replace。
 
-    不用 cv2.imwrite(目标) 的原因有二：
-    1) imwrite 的编码器按**扩展名**推断，写 `x.png.tmp` 会直接失败，没法做临时文件；
-    2) 直接覆写目标时若中途失败（磁盘满/进程被杀/cv2 返回 False），原图已被截断，
-       用户既丢了原图也没拿到新图。imencode 先拿到完整字节再落盘可避免。
-    返回 True/False（与 cv2.imwrite 口径一致）。"""
+    三处都与旧实现不同，每一处都对应一个实测过的问题：
+
+    1) **不用 cv2.imwrite(目标)**：它的编码器按扩展名推断，写 `x.png.tmp` 会直接失败，
+       没法做临时文件；而且直接覆写目标时若中途失败（磁盘满/进程被杀），原图已被截断。
+    2) **临时名唯一 + 按目标路径加锁**：旧实现是 `path + '.tmp'` 固定名且无锁 —— 与
+       `config.write_text_atomic` 注释里记的那个坑完全同形（文本侧实测「4 线程写同一
+       文件 120 次失败 14 次」）。两个请求（双击保存，或批量转色底正跑着时又保存同一张图）
+       会共用一个 .tmp 互相截断 → **用户原图被覆盖成半截 PNG**。现在复用
+       `config.write_bytes_atomic` 的两件套。
+    3) **按扩展名编码**：旧实现无论原名是什么都 `imencode('.png')`，于是
+       `/batch_alpha_to_white` 把 PNG 字节写进了 `x.jpg`，而 `send_from_directory`
+       仍按扩展名声明 `Content-Type: image/jpeg`。浏览器靠内容嗅探多半还能显示，
+       但依赖扩展名的下游（训练脚本按后缀选解码器、图库做格式校验）会误判，
+       体积语义也变了。
+
+    返回 True/False（与 cv2.imwrite 口径一致）。
+    """
     import cv2
-    ok, buf = cv2.imencode('.png', img, [cv2.IMWRITE_PNG_COMPRESSION, compression])
+    ext = os.path.splitext(path)[1].lower()
+    params = []
+    if ext in ('.jpg', '.jpeg'):
+        enc = '.jpg'
+        params = [cv2.IMWRITE_JPEG_QUALITY, 95]
+    elif ext == '.webp':
+        enc = '.webp'
+    else:
+        enc = '.png'
+        params = [cv2.IMWRITE_PNG_COMPRESSION, compression]
+    ok, buf = cv2.imencode(enc, img, params)
     if not ok:
         return False
-    tmp_path = path + '.tmp'
-    try:
-        with open(tmp_path, 'wb') as f:
-            f.write(buf.tobytes())
-        os.replace(tmp_path, path)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+    from tageditor.core.config import write_bytes_atomic
+    write_bytes_atomic(path, buf.tobytes())
     return True
 
 
@@ -106,9 +119,9 @@ def process_image():
     is_same_path = os.path.abspath(os.path.join(upload_dir, filename)) == os.path.abspath(save_path)
 
     try:
-        ret = _write_png_atomic(save_path, img)
+        ret = _write_image_atomic(save_path, img, compression=3)
         if not ret:
-            return jsonify({'success': False, 'error': '图片写入失败（PNG 编码失败）'}), 500
+            return jsonify({'success': False, 'error': '图片写入失败（编码失败）'}), 500
     except Exception as e:
         return jsonify({'success': False, 'error': f'保存失败: {str(e)}'}), 500
 
@@ -141,21 +154,30 @@ def batch_alpha_to_white():
         if os.path.splitext(filename)[1].lstrip('.').lower() == 'gif':
             return jsonify({'success': False, 'error': '不支持 GIF 图片'}), 400
         try:
-            img = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)
+            from tageditor.core.image_io import imread_any
+            img = imread_any(fpath, cv2.IMREAD_UNCHANGED)
             if img is None:
                 return jsonify({'success': False, 'error': '无法读取图片'}), 400
             if not (img.ndim == 3 and img.shape[2] == 4):
                 return jsonify({'success': True, 'message': 'no_alpha'})
             alpha = img[:, :, 3:4] / 255.0
             result = (img[:, :, :3] * alpha + bg_rgb * (1.0 - alpha)).astype(np.uint8)
-            if not _write_png_atomic(fpath, result):
+            if not _write_image_atomic(fpath, result):
                 return jsonify({'success': False, 'error': '图片写入失败'}), 500
             return jsonify({'success': True, 'converted': 1, 'item': filename})
         except Exception as e:
             return jsonify({'success': False, 'error': str(e)}), 500
 
-    # 全部处理：先筛选有 alpha 通道的图片（只存文件名，避免内存占用）
+    # 全部处理：先筛选有 alpha 通道的图片。
+    #
+    # **只看文件头，不整图解码**：旧实现为判断 `shape[2] == 4` 对每张图
+    # `cv2.imread(IMREAD_UNCHANGED)` 整图解码一遍，之后 generator 里再解一遍 ——
+    # 几千张图的目录里，用户点下去后第一个 SSE 字节要等「全库解码一遍」（分钟级），
+    # 期间界面只有「正在扫描图片...」，看起来像卡死；CPU/IO 还翻倍。
+    # has_alpha 三态：True / False / None（判不了）—— None 时退回解码判定，
+    # 不能当 False 跳过，否则真有透明通道的图会被静默漏掉（「完成，转换 0 张」）。
     from tageditor.core.config import get_image_files
+    from tageditor.core.image_io import has_alpha, imread_any
     images = get_image_files(upload_dir)
     alpha_images = []
     for fname in images:
@@ -163,9 +185,13 @@ def batch_alpha_to_white():
         if ext == 'gif':
             continue
         fpath = os.path.join(upload_dir, fname)
-        img = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)
-        if img is not None and img.ndim == 3 and img.shape[2] == 4:
+        known = has_alpha(fpath)
+        if known is True:
             alpha_images.append((fname, fpath))
+        elif known is None:
+            img = imread_any(fpath, cv2.IMREAD_UNCHANGED)
+            if img is not None and img.ndim == 3 and img.shape[2] == 4:
+                alpha_images.append((fname, fpath))
 
     if not alpha_images:
         return jsonify({'success': True, 'message': 'no_alpha', 'converted': 0, 'skipped': len(images)})
@@ -180,7 +206,7 @@ def batch_alpha_to_white():
             yield sse_event('progress', {'current': 0, 'total': total, 'item': '准备开始转换 ' + str(total) + ' 张图片...'})
             for i, (fname, fpath) in enumerate(alpha_images):
                 try:
-                    img = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)
+                    img = imread_any(fpath, cv2.IMREAD_UNCHANGED)
                     if img is None:
                         errors += 1
                         yield sse_event('error', {'item': fname, 'error': '无法读取图片'})
@@ -190,8 +216,8 @@ def batch_alpha_to_white():
                     result = img[:, :, :3] * alpha + bg_rgb * (1.0 - alpha)
                     result = result.astype(np.uint8)
 
-                    if not _write_png_atomic(fpath, result):
-                        raise RuntimeError('图片写入失败 (PNG 编码失败)')
+                    if not _write_image_atomic(fpath, result):
+                        raise RuntimeError('图片写入失败 (编码失败)')
                     converted += 1
                     yield sse_event('progress', {
                         'current': i + 1, 'total': total, 'item': fname
@@ -289,7 +315,9 @@ def upscale_realesrgan():
         return jsonify({'success': False, 'error': '文件不存在或非法路径'}), 400
 
     # 读取原图，校验目标尺寸范围 [原图, 原图*4]
-    img = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)
+    # imread_any：cv2.imread 读不了中文路径（本项目刻意保留中文文件名）
+    from tageditor.core.image_io import imread_any
+    img = imread_any(fpath, cv2.IMREAD_UNCHANGED)
     if img is None:
         return jsonify({'success': False, 'error': '无法读取图片'}), 400
     oh, ow = img.shape[:2]
@@ -365,8 +393,9 @@ def remove_background():
     else:
         bg_color = _parse_bg_color(bg_raw)  # (R,G,B) float32
 
-    # 读取原图
-    img = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)
+    # 读取原图（imread_any：cv2.imread 读不了中文路径）
+    from tageditor.core.image_io import imread_any
+    img = imread_any(fpath, cv2.IMREAD_UNCHANGED)
     if img is None:
         return jsonify({'success': False, 'error': '无法读取图片'}), 400
     # 统一为 3 通道 BGR（BiRefNet 只处理 RGB 内容，alpha 通道在此丢弃）

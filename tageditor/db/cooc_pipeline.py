@@ -6,7 +6,6 @@
   - cooccurrence_clean.parquet  PMI 裁剪后（无向边）
   - tag_artist_cooc.parquet  画师共现（裁剪后）
 """
-import math
 import time
 import json
 import os
@@ -50,6 +49,54 @@ def _checkpoint_dir(db_path: str) -> Path:
     return d
 
 
+# 共现 history 的落盘格式改成**追加式 JSONL**（每行一个标签名）。
+#
+# 原先每次 checkpoint 都 `json.dumps(sorted(history))` 全量重写：
+# 实测 cooc_history.json 有 53,311 个标签、1.08MB，一次 sorted+dumps 约 14ms，
+# 每 20 个标签写一次 → 全量一轮 2,673 次 → **约 38 秒 CPU + 2.89GB 磁盘写入**，
+# 而且是 O(n²)（越到后面越慢）。追加式把这两项都降到可忽略，
+# 顺带更耐崩溃：进程在两行之间被杀，也只是少几个标签，不会得到一个坏 JSON。
+_COOC_CKPT_EVERY = 200  # 每多少个标签落一次盘（原为 20）
+
+
+def _load_cooc_history(history_file: Path) -> set:
+    """读共现 history，兼容两种格式：老的 JSON 数组 / 新的 JSONL。"""
+    if not history_file.exists():
+        return set()
+    try:
+        text = history_file.read_text(encoding='utf-8')
+    except OSError:
+        return set()
+    stripped = text.lstrip()
+    if stripped.startswith('['):
+        try:
+            return set(json.loads(stripped))
+        except Exception:
+            return set()
+    return {line.strip() for line in text.splitlines() if line.strip()}
+
+
+def _append_cooc_history(history_file: Path, names) -> None:
+    """把新增标签**追加**到 JSONL。若磁盘上还是老格式（单个 JSON 数组），先转成 JSONL。
+
+    只追加不重写，所以调用方要传「本次新增」的那部分（见 run_fetch_cooc 里的 newly）。
+    """
+    names = sorted(set(names))
+    if not names:
+        return
+    if history_file.exists():
+        try:
+            if history_file.read_text(encoding='utf-8').lstrip().startswith('['):
+                existing = _load_cooc_history(history_file)
+                history_file.write_text(
+                    ''.join(n + '\n' for n in sorted(existing)), encoding='utf-8')
+        except OSError:
+            pass
+    with open(history_file, 'a', encoding='utf-8') as f:
+        for n in names:
+            f.write(n + '\n')
+
+
 def _load_tags_from_db(db_path: str) -> list[dict]:
     """从 SQLite 加载所有标签。"""
     import sqlite3
@@ -89,10 +136,13 @@ def run_fetch_cooc(db_path: str = None, full_update: bool = False,
 
     cdir = _cooc_dir(db_path)
     raw_parquet = cdir / 'cooccurrence_raw.parquet'
-    raw_csv_legacy = cdir / 'cooccurrence_raw.csv'  # 旧格式，首次写入时清除
-    ckp = _checkpoint_dir(db_path)
+    raw_csv_legacy = cdir / 'cooccurrence_raw.csv'  # 旧格式，首次写入时清除    ckp = _checkpoint_dir(db_path)
     progress_file = ckp / 'cooc_progress.txt'
     history_file = ckp / 'cooc_history.json'
+    # 试满重试次数仍失败的标签单独留痕。原来的实现把它们也写进了 history，
+    # 而增量入口是 `valid_names - history` → **失败标签永久不再重试**，
+    # 共现数据出现无声空洞（/tag_cooc 与 prompt_tool 的 cooc 工具对它永远返回空）。
+    failed_file = ckp / 'cooc_failed.json'
     temp_csv = cdir / 'cooc_temp.csv'
 
     tags = _load_tags_from_db(db_path)
@@ -114,10 +164,7 @@ def run_fetch_cooc(db_path: str = None, full_update: bool = False,
         except ValueError:
             pass
     if history_file.exists():
-        try:
-            history = set(json.loads(history_file.read_text(encoding='utf-8')))
-        except Exception:
-            pass
+        history = _load_cooc_history(history_file)
 
     if full_update:
         target_list = sorted(valid_names)
@@ -151,6 +198,11 @@ def run_fetch_cooc(db_path: str = None, full_update: bool = False,
     batch = []
     done = start_idx
     saved_count = start_idx  # 实际已落盘的计数
+    # 用**集合**而不是下标切片表达进度：`target_list[start_idx:saved_count]` 会把
+    # 中间失败、没拿到数据的标签一并算作已完成（saved_count 只统计成功数，
+    # 切片却按位置取），于是失败标签被写进 history → 增量模式永不重试。
+    ok_tags = set()
+    failed_tags = set()
     api_url = "https://danbooru.donmai.us/related_tag.json"
 
     for i in range(start_idx, total):
@@ -163,6 +215,7 @@ def run_fetch_cooc(db_path: str = None, full_update: bool = False,
         log.info(item_text)
         _emit({'type': 'progress', 'page': i + 1, 'total': total, 'item': item_text})
 
+        fetched = False
         for attempt in range(3):
             try:
                 resp = session.get(api_url, params={'query': tag_a}, timeout=30)
@@ -179,12 +232,17 @@ def run_fetch_cooc(db_path: str = None, full_update: bool = False,
                 pairs = _parse_cooc_response(data, tag_a, valid_names, tag_pc)
                 batch.extend(pairs)
                 done += 1
+                fetched = True
                 break
             except requests.exceptions.RequestException as e:
                 if attempt < 2:
                     time.sleep(2)
                 else:
                     log.error(f"    请求失败: {e}")
+        if fetched:
+            ok_tags.add(tag_a)
+        else:
+            failed_tags.add(tag_a)
 
         time.sleep(0.2 + random.random() * 0.2)
 
@@ -198,10 +256,15 @@ def run_fetch_cooc(db_path: str = None, full_update: bool = False,
                 batch.clear()
             saved_count = done
             progress_file.write_text(str(saved_count))
-            history.update(target_list[start_idx:saved_count])
+            # **只把真正取到数据的标签写进 history**，失败的留给下一轮重试
+            history.update(ok_tags)
             history_file.write_text(json.dumps(sorted(history), ensure_ascii=False))
+            if failed_tags:
+                failed_file.write_text(json.dumps(sorted(failed_tags), ensure_ascii=False))
             if (i + 1) % 20 == 0:
-                log.info(f"  [Checkpoint] 已处理 {saved_count} 个")
+                log.info(f"  [Checkpoint] 已处理 {saved_count} 个"
+                         + (f"，失败 {len(failed_tags)} 个（未记入 history，下轮会重试）"
+                            if failed_tags else ""))
 
     # 合并到主文件
     if temp_csv.exists():
@@ -235,7 +298,12 @@ def run_fetch_cooc(db_path: str = None, full_update: bool = False,
         log.info(f"[Cooc] 共现矩阵已保存: {raw_parquet} ({len(df_all)} 条边)")
         temp_csv.unlink(missing_ok=True)
         progress_file.unlink(missing_ok=True)
-        _emit({'type': 'complete', 'new_count': done})
+        if failed_tags:
+            # 失败标签留在 failed_file 里（且**没有**进 history），下一轮增量会重试。
+            log.warning(f"[Cooc] 本轮有 {len(failed_tags)} 个标签请求失败，"
+                        f"已写入 {failed_file.name} 且未记入 history，下次运行会重试")
+        _emit({'type': 'complete', 'new_count': done, 'failed': len(failed_tags),
+               'failed_file': str(failed_file) if failed_tags else ''})
     else:
         log.info("[Cooc] 没有新数据")
         _emit({'type': 'complete', 'new_count': 0})
@@ -332,12 +400,19 @@ def run_trim_cooc(db_path: str = None, top_k: int = 50,
         _emit({'type': 'progress', 'current': _trim_step[0], 'total': 5, 'item': item})
 
     _trim_emit('正在加载共现数据...')
-    df = pd.read_parquet(raw_parquet)
+    # 只读需要的列 + source/target 用 category dtype：整表全列读实测峰值 937MB
+    # （62.9MB 文件 / 434 万行——字符串列在 pandas 里是 object 指针数组，最吃内存），
+    # 且 OOM 落在「长时间爬取刚成功、准备落盘」这个最坏时刻。选列 + category +
+    # 及时 del 实测把峰值从 937MB 压到 ~550MB（tracemalloc 口径，dry-run 含五档
+    # 统计的额外拷贝；真实落盘路径更低），机器能跑就行，不再依赖运气。
+    df = pd.read_parquet(raw_parquet, columns=['source', 'target', 'frequency'])
     if 'source' not in df.columns:
         msg = "[TrimCooc] 格式错误"
         log.info(msg)
         _emit({'type': 'error', 'message': msg})
         return
+    df['source'] = df['source'].astype('category')
+    df['target'] = df['target'].astype('category')
 
     if _cancelled():
         _emit({'type': 'cancelled'})
@@ -354,6 +429,8 @@ def run_trim_cooc(db_path: str = None, top_k: int = 50,
     valid = (count_target.notna() & count_source.notna() &
              (count_target > 0) & (count_source > 0) & (df["frequency"] > 0))
     df = df[valid].copy()
+    # 过滤后不再需要原始行，及时 del 让 GC 归还（过滤前的 434 万行不归还就白占）
+    del valid, count_target, count_source
     # 过滤后重新取 post_count（确保长度一致）
     count_target = df["target"].map(tag_pc).to_numpy()
     count_source = df["source"].map(tag_pc).to_numpy()
@@ -368,6 +445,7 @@ def run_trim_cooc(db_path: str = None, top_k: int = 50,
     pmi_ratio = (df["frequency"].to_numpy() * D) / count_target
     df["pmi"] = np.where(pmi_ratio > 0, np.log2(pmi_ratio), -100.0)
     df["count"] = (df["frequency"] * count_source).round().astype(int)
+    del pmi_ratio, count_target, count_source
 
     if dry_run:
         log.info(f"\n[TrimCooc] Dry-Run (Top-K={top_k})")
@@ -380,7 +458,9 @@ def run_trim_cooc(db_path: str = None, top_k: int = 50,
                 ft.sort_values(["source", "pmi", "count"], ascending=[True, False, False], inplace=True)
                 top_df = ft.groupby("source", sort=False).head(top_k)
                 final_kept = _fold_undirected(top_df)
+            del ft, top_df    # dry-run 每档都复制一份，不 del 的话峰值被五档叠加抬高
             print(f"  >= {t:<6} {pmi_kept:<12,} {final_kept:<12,}")
+        del df
         return
 
     if _cancelled():

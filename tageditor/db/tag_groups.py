@@ -226,14 +226,14 @@ def run(db_path: str = None, progress_callback=None, cancel_check=None):
         'group_cn_names': group_cn_names,
     }
 
-    # 先写临时文件再重命名覆盖
+    # 先写临时文件再原子覆盖（os.replace，同 _save_checkpoint 的口径）。
+    # 不能先 os.remove(out_path) 再 rename：中间崩溃会连上一份可用数据一起丢掉，
+    # 下次只能从头爬，且共现/标签组相关功能在重爬完成前整体不可用。
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = out_path.with_suffix('.tmp')
     with open(tmp_path, 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
-    if out_path.exists():
-        os.remove(str(out_path))
-    os.rename(str(tmp_path), str(out_path))
+    os.replace(str(tmp_path), str(out_path))
 
     # 清理断点文件
     if progress_file.exists():

@@ -7,7 +7,6 @@ tag.sqlite，筛选 post_count≥100 且 category∈{0,3,4} 的标签写入本�
 import os
 import sqlite3
 import requests
-import time
 from pathlib import Path
 from tageditor.core.config import get_tag_db_config, USER_AGENT
 import logging
@@ -80,11 +79,9 @@ def _download_sqlite(save_path: str, cancel_check=None) -> bool:
             log.info("[SyncTags] 取消下载（下载中）")
             _cleanup()
             return False
-        # 下载完成，重命名覆盖
-        import os as _os
-        if _os.path.exists(save_path):
-            _os.remove(save_path)
-        _os.rename(tmp_path, save_path)
+        # 下载完成，原子覆盖（os.replace，同项目其它落盘口径）。
+        # 不能先 remove 再 rename：中间崩溃会连旧文件一起丢。
+        os.replace(tmp_path, save_path)
         log.info(f"[SyncTags] 下载完成: {os.path.abspath(save_path)}")
         return True
     except Exception as e:
@@ -115,11 +112,14 @@ def run(db_path: str = None, download: bool = True, cancel_check=None):
     sqlite_path = str(base_dir / 'raw' / 'tag.sqlite')
     Path(sqlite_path).parent.mkdir(parents=True, exist_ok=True)
 
-    # 下载
+    # 下载。downloaded_now 记录「本次是否真的下载过」，决定结尾要不要删文件——
+    # 见结尾处的说明：它不是临时文件。
+    downloaded_now = False
     if download and not os.path.exists(sqlite_path):
         ok = _download_sqlite(sqlite_path, cancel_check=cancel_check)
         if not ok:
             return
+        downloaded_now = True
     elif download:
         log.info(f"[SyncTags] tag.sqlite 已存在: {sqlite_path}")
         # 选择：每次都重下？保持简单，检查文件大小，太小就重下
@@ -129,6 +129,7 @@ def run(db_path: str = None, download: bool = True, cancel_check=None):
             ok = _download_sqlite(sqlite_path, cancel_check=cancel_check)
             if not ok:
                 return
+            downloaded_now = True
 
     up_conn = _get_upstream_conn(sqlite_path)
     if up_conn is None:
@@ -219,7 +220,17 @@ def _sync_into(conn, rows, sqlite_path):
             raise
     log.warning(f"[SyncTags] 已更新 {update_count} 条已有标签的 category/post_count")
 
-    # 清理下载的临时文件
-    if os.path.exists(sqlite_path):
+    # 清理**本次下载**的 tag.sqlite。
+    #
+    # 只在真正下载过时才删：这个文件不是临时文件，而是
+    # `build_tag_db.py merge --sqlite <raw/tag.sqlite>` 的**持久数据源**
+    # （merge 靠它补 category/post_count/cn_name）。
+    # 早先这里是无条件 `os.remove`，后果是 `--no-download`（build_tag_db.py 专门为
+    # 「用本地已有文件」把它改成 BooleanOptionalAction 的那个开关）**只能用一次**：
+    # 第一次跑完文件就没了，第二次又得重新下载。实测 data/raw/ 因此长期为空。
+    if downloaded_now and os.path.exists(sqlite_path):
         os.remove(sqlite_path)
-        log.info(f"[SyncTags] 已删除临时文件: {sqlite_path}")
+        log.info(f"[SyncTags] 已删除本次下载的 tag.sqlite: {sqlite_path}")
+    elif os.path.exists(sqlite_path):
+        log.info(f"[SyncTags] 保留本地 tag.sqlite（本次未下载，可给 "
+                 f"`merge --sqlite` 复用）: {sqlite_path}")
