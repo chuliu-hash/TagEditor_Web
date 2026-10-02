@@ -27,13 +27,73 @@ _atomic_path_locks = {}
 _atomic_path_locks_guard = _threading.Lock()
 
 
-def _path_lock(path):
+def path_lock(path):
+    """取某个路径对应的进程内锁（同路径串行化，见 _atomic_path_locks 的说明）。"""
     with _atomic_path_locks_guard:
         lock = _atomic_path_locks.get(path)
         if lock is None:
             lock = _threading.Lock()
             _atomic_path_locks[path] = lock
         return lock
+
+
+def _tmp_name(path):
+    """同目录的唯一临时文件名：pid + 线程 id + 计数器。
+
+    **只带 pid 是不够的** —— Flask 默认多线程，同一进程里两个请求（批量替换在跑、
+    用户又点了保存）会算出同一个临时名而互相覆盖。
+    """
+    dir_name = os.path.dirname(os.path.abspath(path))
+    global _atomic_seq
+    with _atomic_seq_lock:
+        _atomic_seq += 1
+        seq = _atomic_seq
+    return os.path.join(
+        dir_name, '.%s.%d.%d.%d.tmp' % (os.path.basename(path), os.getpid(),
+                                        _threading.get_ident(), seq))
+
+
+def write_bytes_atomic(path, data):
+    """原子写**二进制**文件：唯一临时名 → 同目录 → os.replace 覆盖目标。
+
+    `write_text_atomic` 与本函数是同一套语义，`image_editor._write_png_atomic`
+    也复用它 —— 图片覆写曾经是 `path + '.tmp'` **固定临时名且无锁**，
+    与文本侧那个「实测 4 线程写同一文件 120 次失败 14 次」的坑完全同形：
+    两个请求（双击保存 / 批量转色底跑着时又保存）会共用一个 .tmp 互相截断，
+    把用户原图覆盖成半截 PNG。**同一份教训不要只落在一半的文件类型上。**
+    """
+    lock = path_lock(os.path.abspath(path))
+    with lock:
+        tmp_path = _tmp_name(path)
+        try:
+            with open(tmp_path, 'wb') as f:
+                f.write(data)
+            os.replace(tmp_path, path)
+        except Exception:
+            # 写失败时清掉临时文件，别在 uploads 里留下 .xxx.tmp 垃圾
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    return True
+
+
+def write_text_atomic(path, text, encoding='utf-8'):
+    """原子写文本文件：编码 → 写同目录临时文件 → os.replace 覆盖目标。
+
+    标签文件（.txt / .nl.txt）是用户真正的资产，直接 `open(path, 'w')` 存在两个
+    失败窗口：写入中途进程被杀/磁盘满 → 文件被截断成半截；编码错误在 write 阶段
+    抛出 → 旧内容已被清空。os.replace 在同一文件系统内是原子的，失败时目标文件
+    保持原样（要么全是新内容，要么完全是旧内容）。
+
+    临时文件必须与目标同目录：跨盘/跨文件系统的 os.replace 会退化成复制+删除，
+    不再是原子的。
+
+    实现细节（唯一临时名 + 按路径锁）见 write_bytes_atomic —— 编码放在落盘之前，
+    编码失败时根本不会创建临时文件。
+    """
+    return write_bytes_atomic(path, text.encode(encoding))
 
 
 def load_prompts(prompts_dir='prompts'):
@@ -345,43 +405,3 @@ def is_within_directory(path, base_dir):
     abs_path = os.path.abspath(path)
     abs_base = os.path.abspath(base_dir)
     return os.path.commonpath([abs_path, abs_base]) == abs_base
-
-
-def write_text_atomic(path, text, encoding='utf-8'):
-    """原子写文本文件：写同目录临时文件 → os.replace 覆盖目标。
-
-    标签文件（.txt / .nl.txt）是用户真正的资产，直接 `open(path, 'w')` 存在两个
-    失败窗口：写入中途进程被杀/磁盘满 → 文件被截断成半截；编码错误在 write 阶段
-    抛出 → 旧内容已被清空。os.replace 在同一文件系统内是原子的，失败时目标文件
-    保持原样（要么全是新内容，要么完全是旧内容）。
-
-    临时文件必须与目标同目录：跨盘/跨文件系统的 os.replace 会退化成复制+删除，
-    不再是原子的。
-
-    临时名用 pid + 线程 id + 计数器：**只带 pid 是不够的** —— Flask 默认多线程，
-    同一进程里两个请求（如批量替换正在跑、用户又点了保存）会算出同一个临时名而互相覆盖。
-    再加一层按目标路径的锁：Windows 的 os.replace 在目标被别的线程占用时会抛
-    PermissionError，光靠唯一临时名解决不了（实测 4 线程写同一文件 120 次失败 14 次）。
-    """
-    import threading
-    dir_name = os.path.dirname(os.path.abspath(path))
-    global _atomic_seq
-    lock = _path_lock(os.path.abspath(path))
-    with lock:
-        with _atomic_seq_lock:
-            _atomic_seq += 1
-            seq = _atomic_seq
-        tmp_path = os.path.join(
-            dir_name, '.%s.%d.%d.%d.tmp' % (os.path.basename(path), os.getpid(),
-                                            threading.get_ident(), seq))
-        try:
-            with open(tmp_path, 'w', encoding=encoding) as f:
-                f.write(text)
-            os.replace(tmp_path, path)
-        except Exception:
-            # 写失败时清掉临时文件，别在 uploads 里留下 .xxx.tmp 垃圾
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise

@@ -8,6 +8,7 @@ from tageditor.ops.file_ops import file_ops_bp
 from tageditor.ops.tag_operations import tag_ops_bp
 from tageditor.image.image_editor import image_editor_bp
 from tageditor.translate.prompt_tool import prompt_tool_bp
+from tageditor.translate.prompt_workspace import prompt_workspace_bp, configure as configure_workspace
 import logging
 
 # 日志必须在其它模块开始打日志之前配好。放在这里（import 之后、建 app 之前）：
@@ -24,6 +25,13 @@ UPLOAD_FOLDER = 'uploads'
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 256 * 1024 * 1024  # 256MB
 
+# 提示词优化器的会话存储：与 uploads/ **完全独立** —— 那边是标签编辑的素材
+# （图片 + .txt + .nl.txt），这边是「图 + 输入 + 产出」整体成会话，互不影响。
+#
+# 用模块级 configure() 而不是 app.config：会话落盘发生在 SSE 生成器内部，
+# 那时请求上下文已拆，读 current_app 会抛 Working outside of application context。
+configure_workspace(os.environ.get('PROMPT_WORKSPACE_DIR', 'prompt_workspace'))
+
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
@@ -35,6 +43,7 @@ app.register_blueprint(file_ops_bp)
 app.register_blueprint(tag_ops_bp)
 app.register_blueprint(image_editor_bp)
 app.register_blueprint(prompt_tool_bp)
+app.register_blueprint(prompt_workspace_bp)
 
 
 @app.route('/')
@@ -59,14 +68,25 @@ def editor():
 
 @app.route('/prompt_tool')
 def prompt_tool_page():
-    """提示词优化器页面（图片 + 提示词 + 效果描述 → 结合标签库重调提示词）"""
-    images = get_image_files(app.config['UPLOAD_FOLDER'])
-    return render_template('prompt_tool.html', images=images, image_count=len(images))
+    """提示词优化器页面（参考图工作区 + 提示词 + 优化要求 → 结合标签库重调提示词）。
+
+    **不注入 uploads/ 的图片列表** —— 本页与标签编辑功能完全独立，
+    参考图来自自己的工作区（prompt_workspace/），前端另行 AJAX 拉取。
+    """
+    return render_template('prompt_tool.html')
 
 
 def _preheat_cooc():
     """后台预热共现数据（首次 _load_cooc_data 要 3~6s，纯 CPU/磁盘、不占显存）。
-    预热与首次请求竞争时只是重复读一次，无正确性问题，故无条件开。"""
+    预热与首次请求竞争时只是重复读一次，无正确性问题。
+
+    PREHEAT_COOC 开关（默认 true，保持既有行为）：冷加载实测 4s、Python 堆
+    ~106MB、峰值 ~558MB（5 万标签/87 万关系）。低内存机器可设 false 关掉——
+    关掉后首次请求自己触发加载（多等这几秒），不影响正确性。
+    """
+    if os.environ.get('PREHEAT_COOC', 'true').strip().lower() in ('false', '0', 'no', 'off'):
+        log.info('[预热] 共现数据预热已关闭（PREHEAT_COOC=false），首次请求时再加载')
+        return
     import threading
     import time
 
