@@ -1,0 +1,41 @@
+# 质量/元标签名单（每行一个，大小写不敏感；# 开头与空行忽略）
+#
+# 用途：提示词优化器把标签分类时，命中本名单的判为 quality_meta —— 语义是
+# 「标签库不收 ≠ 编造」。标签库同步只收 category∈{0,3,4} 且 post_count≥100，
+# 所以 masterpiece / highres 这类质量词本来就不在库里；**不能因为「查不到」就把它们删掉**。
+# 提示词里有硬规则禁止这么做，本名单是那份规则的执行依据。
+#
+# 这是一份**给你改的**词表（与 prompts/ 下其它文件一样热更新，保存即生效）：
+# 你自己的底模关键词、惯用的 meta tag 都可以加进来。
+# 本文件缺失或整篇为空时会退回代码里的内置默认（见 prompt_tool._META_TAGS_DEFAULT），
+# 不会静默变成空集合 —— 那会让所有元标签被判成「未收录」，进而被模型当假标签删掉。
+#
+# 语法说明：一行一个标签，行内不要写逗号分隔的多个词。
+masterpiece
+best_quality
+good_quality
+normal_quality
+worst_quality
+low_quality
+bad_quality
+high_quality
+very_best_quality
+very_aesthetic
+aesthetic
+highres
+absurdres
+lowres
+newest
+oldest
+recent
+quality
+bad_proportions
+bad_anatomy
+bad_hands
+very_bad_quality
+error
+jpeg_artifacts
+signature
+watermark
+artist_name
+username

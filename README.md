@@ -27,7 +27,7 @@ run.bat
 
 | 脚本 | 作用 |
 |------|------|
-| `setup.bat` | 装依赖，可重复执行（已装的跳过）。除 `pip install -r requirements.txt` 外，单独处理三个 pip 搞不定的包：`torch`（CUDA 专用源）、`basicsr`（依赖已下架的 `tb-nightly`，需 `--no-deps` 再补运行时依赖）、`onnxruntime-gpu`（需额外 index-url）。**不会降级**已装好的包 |
+| `setup.bat` | 装依赖，可重复执行（已装的跳过）。除 `pip install -r requirements.txt` 外，单独处理特殊包：`torch`（CUDA 专用源）、`basicsr`（依赖已下架的 `tb-nightly`，需 `--no-deps` 再补运行时依赖）。`onnxruntime-gpu` 1.19+ 已发布到 PyPI，无需额外 index-url。**不会降级**已装好的包 |
 | `run.bat` | 启动 + 自动开浏览器。缺 `.env` 时从 `.env.example` 复制并打开记事本；检测端口占用；异常退出时打印日志末尾 |
 | `setup_check.py` | 环境自检，逐项报告哪个功能可用、哪个会降级，**只报告不修改环境** |
 
@@ -120,7 +120,7 @@ python build_tag_db.py stats
 | `LLM_VISION_THINKING` | 思考模式开关。思考模式下服务端会**静默忽略 `temperature`** | `off` |
 | `LLM_VISION_TIMEOUT` | 单次请求超时（秒）。不配则 SDK 默认 600 秒，端点卡住会挂很久 | `180` |
 
-**提示词优化器自己的三项**（`/prompt_tool`，端点复用上面的 `LLM_VISION_*`）：`PROMPT_TOOL_MAX_TOKENS`（`8192`）、`PROMPT_TOOL_THINKING`（`off`）、`PROMPT_TOOL_TIMEOUT`（`180`）。它一轮跑三次调用（规划 / 带图改写 / 未收录修补），输出是逐条 diff，条目多、额度要大。其余检索口径与图片编码上限写死在 `config.py` 的 `_PROMPT_*` 常量。
+**提示词优化器自己的三项**（`/prompt_tool`，端点复用上面的 `LLM_VISION_*`）：`PROMPT_TOOL_MAX_TOKENS`（`8192`）、`PROMPT_TOOL_THINKING`（`off`）、`PROMPT_TOOL_TIMEOUT`（`180`）。它一轮跑三次调用（规划 / 多图改写 / 未收录修补），输出是逐条 diff，条目多、额度要大。另有 `PROMPT_WORKSPACE_DIR`（`prompt_workspace`）指定会话存储位置。其余检索口径与图片编码上限写死在 `config.py` 的 `_PROMPT_*` 常量。
 
 > **API Key 可空**：本地部署的 OpenAI 兼容端点（Ollama / LM Studio / vLLM / llama.cpp）不校验 Key，留空即可 —— 空值由 `config.resolve_api_key()` 归一化为占位串。缺 `API_URL` 仍会报错。
 
@@ -152,6 +152,7 @@ python build_tag_db.py stats
 | `BIREFNET_BASE_DIR` | 背景移除 base 模型目录 | `models/birefnet-base` |
 | `BIREFNET_WEIGHTS` | ToonOut 微调权重 `.pth` | `models/toonout.pth` |
 | `PRELOAD_MODELS` | 启动时预热轻量模型（占内存，默认关） | `false` |
+| `PREHEAT_COOC` | 启动时后台预热共现数据（默认开；实测峰值内存 ~558MB，低内存机器可关） | `true` |
 
 ### 其它
 
@@ -186,11 +187,16 @@ LOG_LEVEL=WARNING python app.py
 ## 测试
 
 ```bash
-python test_invariants.py        # 31 个用例，只用标准库
-python test_invariants.py -v     # 失败时打印 traceback
+python tests/test_invariants.py        # 56 个用例，只用标准库
+python tests/test_invariants.py -v     # 失败时打印 traceback
+python tests/test_mutations.py         # 验证上面的断言「真的测得动」
 ```
 
 不需要网络或标签库。覆盖的是**静默失败**类的不变量（翻译合并去重/拆全角、提示词切分不炸假标签、API Key 归一化、`lookup_tags` 只查主表、原子写、批量操作幂等与精确匹配、`clear_all` 危险默认值防线、Bangumi 熔断、`.env` 与代码的配置一致性，以及若干源码级约定）。改动相关模块后跑一遍。
+
+`tests/test_mutations.py` 是给**改断言的人**用的：它把每条断言对应要守的那行代码改坏，确认断言真的会红。断言写错方向（查调用点而非实现、锚点落在注释上、`in` 只要求「出现过」而实际有两处）时，基线照样全绿，但代码被改坏也不会报警 —— 那种断言等于没写。它会原地改写源文件，跑完自动还原。
+
+> `setup_check.py` 不在 `tests/` 里：它是**环境自检**工具（`setup.bat` 按路径调用），不是测试。
 
 ---
 
@@ -231,11 +237,12 @@ python test_invariants.py -v     # 失败时打印 traceback
 
 ### 提示词优化器（`/prompt_tool`）
 
-图片（可空）+ 当前提示词（可空）+ 中文优化要求（必填）→ 标签 diff + 改写后的自然语言描述。
+参考图（工作区**数量不限**，**勾选**最多 5 张提交）+ 当前提示词（可空）+ 中文优化要求（必填）→ 标签 diff + 改写后的自然语言描述。
 
 - **意图由模型自决**：用户的要求可能是精炼、清理假标签、按图校正、调整动作等，不写死关键词表去猜
 - **本地标签库当词表与校验器**：四工具零 LLM 检索（`search_tags` / `tag_detail` / `cooc` / `tag_groups`），压住模型编造标签的倾向
-- **只产出到页面**，不写入任何文件
+- **参考图分两层**：会话的 `images/` 是**素材库**（随你攒多少张），送模型的那一步才由勾选限到 5 张。勾选的图按工作区顺序**连续编号**为「图1、图2…」，可在优化要求里指代（「用图1 的人物配图2 的动作」）；编号即模型看到的顺序，结果区会列出本次实际送出的清单供核对
+- **只产出到页面**，不写入任何标签文件（会话工作区内自己的 `session.json` / `selection.json` 除外）
 
 ---
 
@@ -281,8 +288,10 @@ python test_invariants.py -v     # 失败时打印 traceback
 ├── app.py                  # 入口，注册 Blueprint + 页面路由 + 共现预热
 ├── build_tag_db.py         # 兼容薄壳：`python build_tag_db.py <子命令>` 仍可用
 ├── run.bat / setup.bat     # 一键启动 / 一键安装
-├── setup_check.py          # 环境自检
-├── test_invariants.py      # 关键不变量测试
+├── setup_check.py          # 环境自检（不是测试，故不在 tests/ 里）
+├── tests/                  # 测试脚本（只用标准库）
+│   ├── test_invariants.py  #   关键不变量测试（「别退回」断言）
+│   └── test_mutations.py   #   变异测试：验证上面的断言真的测得动
 ├── tageditor/              # 后端代码（按功能分层）
 │   ├── core/               基础：配置、日志、SSE 格式化
 │   ├── db/                 数据：标签库构建与爬取

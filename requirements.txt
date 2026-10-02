@@ -1,20 +1,39 @@
+# 版本全部按本机实测可用的 tageditor 环境（Python 3.11）钉死，别再退回不钉版本的写法：
+# 本项目多处依赖「特定组合」才能跑（basicsr 垫片 ↔ torchvision 0.20+、onnxruntime-gpu ↔ cuDNN 9.x）。
 flask==3.1.3
 requests==2.33.1
 numpy==1.26.4
-onnxruntime-gpu==1.18.0  # cuda 12.x, cudnn 8.x: pip install onnxruntime-gpu==1.18.0 --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
+# onnxruntime-gpu 1.26.0 需要 **cuDNN 9.x**（nvidia-cudnn-cu12，不是 cudnn 8.x）。缺这些 DLL 时
+# import 照样成功、get_available_providers() 也照样列出 CUDAExecutionProvider，但真建 session 会
+# 静默回落到 CPU（WD14 慢约 10 倍，且不报错）。setup_check.py 真去建一次 session 验证 settled provider。
+onnxruntime-gpu==1.26.0
 opencv-python==4.13.0.92
 pandas==3.0.2
-python-dateutil
-pyarrow  # 读取 wiki_pages.parquet（构建标签数据库用）
-torch>=1.7
-torchvision
-basicsr>=1.4.2
+python-dateutil==2.9.0.post0
+pyarrow==24.0.0  # 读取 wiki_pages.parquet（构建标签数据库用）
+# Cu121 轮子由 setup.bat 第 3 步从 pytorch 专用源装；这里钉 2.5.1 以匹配 torchvision 0.20.1
+# （torchvision 0.21+ 移除了 basicsr 会碰的 functional_tensor 子模块）。
+torch==2.5.1
+torchvision==0.20.1
+# basicsr 不能直接列在这里：它的元数据钉了已下架的 tb-nightly（PyPI/镜像均已无匹配发行版），
+# 列出来会让整条 `pip install -r requirements.txt` 解析失败、**一个包都装不上**。setup.bat 第 4 步
+# 用 `pip install basicsr==1.4.2 --no-deps` 装它，下面这些是它的运行时依赖（少了 basicsr 是坏的：
+# utils/options.py 就要 yaml，archs 走 addict/lmdb/scipy/scikit-image/tqdm/yapf）：
+# basicsr==1.4.2
+addict==2.4.0
+future==1.0.0
+lmdb==2.2.1
+pyyaml==6.0.3
+scipy==1.14.1
+scikit-image==0.24.0
+tqdm==4.68.3
+yapf==0.43.0
 # LLM/VLM 调用（翻译管线 + 提示词优化器）
-openai
-json-repair  # 模型输出不是严格 JSON 时的兜底解析（prompt_tool._parse_json_loose）
-Pillow       # 提示词优化器送图前的压缩重编码
+openai==2.44.0
+json-repair==0.61.1  # 模型输出不是严格 JSON 时的兜底解析（prompt_tool._parse_json_loose）
+Pillow==12.2.0       # 提示词优化器送图前的压缩重编码
 # 背景移除（BiRefNet/ToonOut）：trust_remote_code 加载 birefnet.py 需要 kornia/einops/timm
-transformers
-kornia
-einops
-timm
+transformers==5.12.1
+kornia==0.8.3
+einops==0.8.2
+timm==1.0.27

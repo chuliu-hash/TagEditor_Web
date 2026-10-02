@@ -1,0 +1,72 @@
+# 最小依赖 CI —— 为什么只装三个包（结论写在前面，依据列在下面）：
+#
+#   flask==3.1.3  numpy==1.26.4  requests==2.33.1
+#
+# 这两个测试脚本本身只用标准库（unittest/pytest 都没有，断言是手写的），
+# 需要装的只有 `import app` 过程中**真的会执行**的模块。逐一核对过导入期：
+#
+#   * app.py                                 -> flask（Flask / render_template）
+#   * tageditor/image/tagger.py              -> numpy（模块级 `import numpy as np`）
+#   * tageditor/image/image_editor.py        -> numpy（模块级 `import numpy as np`）
+#   * tageditor/translate/llm_pipeline.py    -> requests（模块级 `import requests as req`；
+#                                               test_invariants 直接 import 它取 _combine_cn）
+#   * tageditor/core/config.py、core/sse_utils.py、translate/translation.py、
+#     translate/prompt_tool.py、translate/prompt_workspace.py、ops/file_ops.py、
+#     ops/tag_operations.py、db/build_tag_db.py
+#                                            -> 只有 os/json/re/sqlite3/pathlib/threading
+#                                               加 flask，没有第三方重包
+#
+# 其余重量级包（pandas / cv2 / torch / basicsr / transformers / kornia / einops /
+# timm / openai / PIL / pyarrow / json_repair）在这个项目里**一律函数内懒加载**
+# （CLAUDE.md「懒加载」一节），导入期完全不碰：
+#   - pandas 只在 tagger.wd14_load_model、build_tag_db/cooc_pipeline 的读取函数里 import
+#   - cv2 由 file_ops._get_image_size 用 try/except 包着，缺了就走纯头部解析（测试照样过）
+#   - torch/basicsr 只在 Real-ESRGAN 推理路径、transformers/kornia/einops/timm 只在 BiRefNet 路径
+# 所以这里绝不能写 `pip install -r requirements.txt`：那会拉 2.5GB 的 torch 与一大堆
+# CUDA 轮子，而测试一条都用不到，只会把 CI 拖成几十分钟。
+#
+# 测试脚本实际打到的路由也核对过：/prepend_tags /find_replace /clear_all
+# （file_ops + tag_operations，纯文本文件 + sqlite3）与 /prompt_sessions*
+# （prompt_workspace，json + base64），没有一条需要上面那些重包。
+#
+# 版本与 requirements.txt 保持一致（flask / numpy / requests 三行取那里的 pin），
+# 这样 CI 红了就说明代码变了，而不是"CI 环境自己漂了"。
+
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-tests:
+    # 项目是 Windows 专用（setup.bat / run.bat / verify.bat、GBK 代码页约束、
+    # Windows 路径写法与 os.replace 语义），所以就在 windows-latest 上跑；
+    # 换 ubuntu 跑会掩盖这一类问题，也会让 `python tests/xxx.py` 的路径写法失去意义。
+    runs-on: windows-latest
+
+    env:
+      # 测试脚本与源码里大量中文（断言消息、临时文件名）。GitHub Windows runner
+      # 的默认 stdio 编码不是 UTF-8，显式打开可避免 UnicodeEncodeError 之类的假失败；
+      # 同时也让 tests/test_mutations.py 读写源码时的编码假设与本地一致。
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: 'utf-8'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'   # 与 conda env tageditor 一致（CLAUDE.md 写明 3.11）
+
+      - name: Install minimal deps (flask + numpy + requests only)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install flask==3.1.3 numpy==1.26.4 requests==2.33.1
+
+      - name: tests/test_invariants.py
+        run: python tests/test_invariants.py
+
+      - name: tests/test_mutations.py
+        run: python tests/test_mutations.py

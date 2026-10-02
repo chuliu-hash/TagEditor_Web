@@ -7,6 +7,9 @@
 
 # ===== 运行时用户数据（按需生成，不入库）=====
 uploads/
+
+# 提示词优化器的参考图工作区（与 uploads/ 独立，纯临时参考素材）
+prompt_workspace/
 translation_cache.json
 
 # ===== 标签数据库（由 build_tag_db.py 构建/增量更新，体积大不入库）=====
@@ -22,6 +25,10 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# test_mutations.py 变异期间的原文件备份（正常跑完会自己删掉；
+# 被强杀才会留下，下次运行会用它还原 —— 不排除就会有人误提交）
+*.mutbak
 
 # ===== 日志 =====
 *.log

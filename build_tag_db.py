@@ -19,4 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tageditor.db.build_tag_db import main  # noqa: E402
 
 if __name__ == '__main__':
-    main()
+    # **必须透传 main() 的返回值**：`init` 的破坏性守卫（库非空且没给 --yes）
+    # 靠返回 1 表达「拒绝执行」，薄壳若只写 `main()`，退出码会被吞成 0，
+    # 脚本/CI 就分不出「跑成功了」和「被拦下了」。
+    sys.exit(main() or 0)
