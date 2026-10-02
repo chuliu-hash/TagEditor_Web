@@ -6,6 +6,9 @@
     <title>Danbooru 标签查询</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <!-- 四页共享的前端工具函数（escapeHtml/通知/确认框/Esc 关弹窗/DText 缩略图）。
+         必须先于内联脚本：行内 onclick 与初始化代码引用这里的函数。 -->
+    <script src="/static/js/tageditor-common.js"></script>
     <script>
         tailwind.config = {
             theme: {
@@ -292,6 +295,31 @@
         </div>
     </div>
 
+    <!-- 统一确认弹窗（替代浏览器原生 confirm） -->
+    <!-- 原生 confirm 是浏览器进程的模态框，**不被 _anyModalOpen() 感知**（它不是
+         div.fixed.inset-0），于是「弹着确认框」的这段时间里，全局快捷键与其它遮罩判定
+         都以为页面上没有弹窗。四页统一用这个自绘确认框，样式与 tag_editor/prompt_tool 相同。
+         层级取 z-[70]：本页的弹窗（用户新标签 / 浏览记录 / 标签组 / 进度）都是 z-[60]，
+         而确认框是从它们**里面**弹出来的（删新标签、清浏览记录），沿用 z-50 会被整个盖住 ——
+         点删除看起来毫无反应。 -->
+    <div id="confirm-modal" class="fixed inset-0 bg-black/40 z-[70] flex items-center justify-center hidden" onclick="if(event.target===this)closeConfirm()">
+        <div class="bg-white rounded-xl shadow-xl w-96 p-6">
+            <div class="flex items-start gap-3">
+                <div id="confirm-icon-wrap" class="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center flex-shrink-0">
+                    <i id="confirm-icon" class="fa fa-exclamation-triangle text-red-500"></i>
+                </div>
+                <div class="flex-1 pt-1">
+                    <h3 id="confirm-title" class="text-base font-semibold text-gray-800 mb-1">确认操作</h3>
+                    <p id="confirm-message" class="text-sm text-gray-500 leading-relaxed"></p>
+                </div>
+            </div>
+            <div class="flex justify-end gap-2 mt-5">
+                <button id="confirm-cancel-btn" class="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" onclick="confirmCancel()">取消</button>
+                <button id="confirm-ok-btn" class="px-4 py-2 text-sm text-white rounded-lg transition-colors bg-red-500 hover:bg-red-600" onclick="confirmOk()">确定</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 通知 -->
     <div id="notification" class="fixed bottom-5 right-5 px-5 py-3 rounded-lg shadow-lg transform translate-y-20 opacity-0 transition-all duration-300 flex items-center z-50 text-sm"></div>
 
@@ -437,69 +465,8 @@
             }
             showTagDetail(tag);
         }
-        // DText 图片懒加载：用 Danbooru API 获取大图 URL
-        function _dtextLoadThumbnails(container) {
-            var imgs = (container || document).querySelectorAll('.dtext-post-thumb[data-media-id]');
-            imgs.forEach(function(img) {
-                if (img.dataset.loaded) return;
-                img.dataset.loaded = '1';
-                var mediaId = img.dataset.mediaId;
-                var mediaType = img.dataset.mediaType || 'post';
-                if (mediaType === 'asset') {
-                    // !asset: 依次尝试 posts 搜索 → media_assets API → fallback 图标
-                    _loadAssetThumbnail(img, mediaId);
-                } else {
-                    fetch('https://danbooru.donmai.us/posts/' + mediaId + '.json')
-                        .then(function(r) { return r.json(); })
-                        .then(function(data) {
-                            var src = data.large_file_url || data.preview_file_url || data.url;
-                            if (src) {
-                                img.src = src;
-                                img.style.display = '';
-                            } else {
-                                img.style.display = 'none';
-                            }
-                        })
-                        .catch(function() { img.style.display = 'none'; });
-                }
-            });
-        }
-        function _loadAssetThumbnail(img, mediaId) {
-            // 尝试1: posts 搜索（media_asset_id）
-            fetch('https://danbooru.donmai.us/posts.json?tags=media_asset_id:' + mediaId + '&limit=1')
-                .then(function(r) { return r.json(); })
-                .then(function(data) {
-                    var post = Array.isArray(data) ? data[0] : null;
-                    if (post && post.large_file_url) {
-                        img.src = post.large_file_url;
-                        img.style.display = '';
-                        return;
-                    }
-                    // 尝试2: media_assets API
-                    fetch('https://danbooru.donmai.us/media_assets/' + mediaId + '.json')
-                        .then(function(r2) { return r2.json(); })
-                        .then(function(data2) {
-                            var ma = data2.media_asset || data2;
-                            var src = null;
-                            if (ma.variant_download_urls) {
-                                var v = ma.variant_download_urls;
-                                src = v.preview || v['180x180'] || v.large || v.original;
-                            }
-                            if (!src) src = ma.large_file_url || ma.preview_file_url || ma.file_url;
-                            if (!src && ma.md5 && ma.file_ext) {
-                                src = 'https://cdn.donmai.us/preview/' + ma.md5.substring(0,2) + '/' + ma.md5.substring(2,4) + '/' + ma.md5 + '.' + ma.file_ext;
-                            }
-                            if (src) {
-                                img.src = src;
-                                img.style.display = '';
-                            } else {
-                                img.style.display = 'none';
-                            }
-                        })
-                        .catch(function() { img.style.display = 'none'; });
-                })
-                .catch(function() { img.style.display = 'none'; });
-        }
+        // _dtextLoadThumbnails / _loadAssetThumbnail 在 /static/js/tageditor-common.js
+        // （四页共享；标签编辑页的详情卡也渲染 DText 缩略图）
 
         let _detailState = {tag: '', enWiki: '', cnWiki: '', tab: 'en'};
         let _searchSeq = 0;  // 搜索序列守卫，丢弃过期响应避免快速搜索时旧结果覆盖新结果
@@ -610,15 +577,7 @@
             if (!dropdown.contains(e.target) && !searchBox) closeSearchDropdown();
         });
 
-        // 输入时实时搜索（防抖 200ms），空输入时关闭下拉
-        function debounce(fn, wait) {
-            let timer = null;
-            return function() {
-                clearTimeout(timer);
-                const args = arguments, ctx = this;
-                timer = setTimeout(function() { fn.apply(ctx, args); }, wait);
-            };
-        }
+        // 输入时实时搜索（防抖 200ms，debounce 在 tageditor-common.js），空输入时关闭下拉
         function liveSearch() {
             const keyword = document.getElementById('search-input').value.trim();
             // 清空输入时也要清历史容器：下拉只是加 hidden 类，内容还在，
@@ -688,6 +647,11 @@
             .then(data => {
                 if (seq !== _searchSeq) return;  // 过期响应（用户已发起新搜索），丢弃
                 if (data.error) {
+                    // 出错时必须一并清掉分页状态与历史命中：滚动处理器只看
+                    //「_searchRendered >= _searchResults.length」，不清的话上次那 200 条
+                    //（可能只渲染了 50 条）会被继续追加到「请求失败」下面，↑/↓ 也会高亮陈旧结果。
+                    _searchResults = []; _searchRendered = 0; _searchSel = -1;
+                    clearHistoryMatches();
                     resultsEl.innerHTML = '<div class="p-4 text-center text-red-400 text-sm">' + escapeHtml(data.error) + '</div>';
                     return;
                 }
@@ -710,6 +674,10 @@
             })
             .catch(() => {
                 if (seq !== _searchSeq) return;
+                // 同 data.error 分支：失败要清掉上一次的分页状态与历史命中，
+                // 否则滚动会把上一批结果追加到「请求失败」下面
+                _searchResults = []; _searchRendered = 0; _searchSel = -1;
+                clearHistoryMatches();
                 resultsEl.innerHTML = '<div class="p-4 text-center text-red-400 text-sm">请求失败</div>';
             });
         }
@@ -1269,19 +1237,29 @@
             });
         }
         function utDelete(name) {
-            if (!confirm('删除新标签「' + name + '」？')) return;
-            fetch('/user_tags/delete', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({name: name})
-            })
-            .then(r => r.json())
-            .then(data => {
-                if (data.error) { showNotification(data.error, 'error'); return; }
-                showNotification('已删除', 'success');
-                loadUserTags();
-            })
-            .catch(() => showNotification('删除失败', 'error'));
+            // 用页面自己的确认框（原来是原生 confirm）：原生框不被 _anyModalOpen() 感知，
+            // 且它挡在前面时页面看起来「有弹窗、谁都没拦」。确认框是异步的，
+            // 所以删除逻辑整段挪进 onOk —— 这里没有同步返回值可判。
+            showConfirm({
+                title: '删除新标签',
+                message: '删除新标签「' + name + '」？',
+                danger: true,
+                okText: '删除',
+                onOk: function() {
+                    fetch('/user_tags/delete', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({name: name})
+                    })
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.error) { showNotification(data.error, 'error'); return; }
+                        showNotification('已删除', 'success');
+                        loadUserTags();
+                    })
+                    .catch(() => showNotification('删除失败', 'error'));
+                }
+            });
         }
 
         function enterWikiEditMode() {
@@ -1676,9 +1654,12 @@
                             } else if (currentEventType === 'fatal') {
                                 streamFinished = true;
                                 _stopOpTimer();
-                                bar.style.width = '100%';
+                                // 不把条拉满（口径与 prompt_tool.html 的 fatal 分支一致）：
+                                // 满格配着「5 / 6 · 83%」是在同时说「全跑完了」和「停在第 5 步」。
+                                // 停在失败处变红，条与文字一致，红色本身就表示已结束。
                                 bar.classList.remove('bg-primary'); bar.classList.add('bg-red-500');
                                 itemEl.textContent = data.error;
+                                document.getElementById('progress-subtitle').textContent = '失败';
                                 cancelBtn.classList.add('hidden');
                                 closeBtn.classList.remove('hidden');
                                 if (onComplete) onComplete(data);
@@ -1862,11 +1843,20 @@
         }
         function clearHistory() {
             if (!_historyLoad().length) return;
-            if (!confirm('清空全部浏览记录？')) return;   // 同页 utDelete 的既有口径
-            _history = [];
-            _historySave();
-            renderHistory();
-            showNotification('已清空浏览记录', 'success');
+            // 同 utDelete：改用页面自己的确认框（原生 confirm 不被 _anyModalOpen() 感知，
+            // 弹着它的时候页面以为没有弹窗）。确认框是异步的，清理逻辑走 onOk。
+            showConfirm({
+                title: '清空浏览记录',
+                message: '清空全部浏览记录？',
+                danger: true,
+                okText: '清空',
+                onOk: function() {
+                    _history = [];
+                    _historySave();
+                    renderHistory();
+                    showNotification('已清空浏览记录', 'success');
+                }
+            });
         }
 
         // ── 搜索下拉里混入历史命中 ────────────────────────────────────────────
@@ -1909,26 +1899,65 @@
             showTagDetail(encodeURIComponent(it.name));
         }
 
-        // === 工具 ===
-        let _notifyTimer = null;
-        function showNotification(message, type) {
-            const n = document.getElementById('notification');
-            const colors = {success:'bg-green-500 text-white',error:'bg-red-500 text-white',warning:'bg-amber-500 text-white',info:'bg-blue-500 text-white'};
-            n.className = 'fixed bottom-5 right-5 px-5 py-3 rounded-lg shadow-lg flex items-center z-50 transition-all duration-300 text-sm ' + (colors[type]||colors.info);
-            n.textContent = message;
-            n.style.transform = 'translateY(0)'; n.style.opacity = '1';
-            if (_notifyTimer) clearTimeout(_notifyTimer);
-            _notifyTimer = setTimeout(() => { n.style.transform = 'translateY(20px)'; n.style.opacity = '0'; _notifyTimer = null; }, 3000);
+        // === 统一确认弹窗（替代浏览器原生 confirm）===
+        // 用法：showConfirm({title, message, danger, okText, cancelText, onOk, onCancel})
+        //   danger: true 用红色警告样式（删除/清空），false 用蓝色普通样式
+        // 是**异步**的：确认结果走 onOk / onCancel 回调，没有同步返回值 ——
+        // 原先 `if (!confirm(...)) return;` 那种写法必须整段挪进 onOk 里。
+        let _confirmOnOk = null, _confirmOnCancel = null;
+        function showConfirm(opts) {
+            const o = opts || {};
+            document.getElementById('confirm-title').textContent = o.title || '确认操作';
+            document.getElementById('confirm-message').textContent = o.message || '';
+            const okBtn = document.getElementById('confirm-ok-btn');
+            const cancelBtn = document.getElementById('confirm-cancel-btn');
+            okBtn.textContent = o.okText || '确定';
+            cancelBtn.textContent = o.cancelText || '取消';
+            const danger = o.danger !== false;
+            okBtn.className = 'px-4 py-2 text-sm text-white rounded-lg transition-colors ' +
+                (danger ? 'bg-red-500 hover:bg-red-600' : 'bg-primary hover:bg-primary/90');
+            const icon = document.getElementById('confirm-icon');
+            const iconWrap = document.getElementById('confirm-icon-wrap');
+            if (danger) {
+                icon.className = 'fa fa-exclamation-triangle text-red-500';
+                iconWrap.className = 'w-10 h-10 rounded-full bg-red-50 flex items-center justify-center flex-shrink-0';
+            } else {
+                icon.className = 'fa fa-question-circle text-primary';
+                iconWrap.className = 'w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0';
+            }
+            _confirmOnOk = o.onOk || null;
+            // onCancel：点「取消」按钮时执行（遮罩/Esc 关闭视为纯取消，不触发 onCancel）
+            _confirmOnCancel = o.onCancel || null;
+            document.getElementById('confirm-modal').classList.remove('hidden');
         }
+        // closeConfirm / confirmOk / confirmCancel / _anyModalOpen 在
+        // /static/js/tageditor-common.js（四页共享，改一处即全局生效）
 
-        // 先归一化 null/undefined：调用点会传后端原样回传的字段（data.error 等），
-        // String(undefined) 得到字面量 "undefined" 虽不抛错，但把 undefined 渲染成
-        // 可见文本同样是错的。& 必须最先替换，否则后面插入的实体会被二次转义。
-        function escapeHtml(str) {
-            return String(str == null ? '' : str)
-                .replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
-                .replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        }
+        // === Esc 关弹窗（四页一致的行为） ===
+        // 「关哪一层」= 文档序最后一个可见遮罩（同层级时后出现的在上层）。判定「有没有弹窗」
+        // 走 _anyModalOpen 的结构化口径，不手写 id 清单。
+        // 表里点名每个弹窗的关闭函数，因为关闭动作不只是加 hidden；没点到的（以后新加的弹窗）
+        // 走通用兜底「直接隐藏」，所以不会出现「新弹窗 Esc 关不掉」。
+        // **Esc 不能等同于 confirmCancel**：确认框的「取消」按钮带业务回调（如删标签/清记录），
+        // Esc 只等价于点遮罩 —— 关掉弹窗、保留当前内容、不做任何操作，故这里走 closeConfirm()。
+        // 值为 null = 这个弹窗 Esc 不关：进度弹窗跑着时被关掉就再也看不到进度、也找不到「中断」。
+        // escCloseModal 本体在 tageditor-common.js（四页共享）；这张映射是**页面特定**的。
+        const _ESC_CLOSERS = {
+            'confirm-modal': closeConfirm,      // 注意：不是 confirmCancel
+            'tag-group-modal': closeGroupModal,
+            'usertags-modal': closeUserTagsModal,
+            'history-modal': closeHistoryModal,
+            'progress-modal': null
+        };
+        document.addEventListener('keydown', function(e) {
+            if (e.key !== 'Escape') return;
+            if (e.ctrlKey || e.metaKey || e.altKey) return;   // 带修饰键的组合留给浏览器
+            // 搜索下拉的 Esc（onSearchKeydown，挂在输入框上）先于这里执行；
+            // 下拉不是遮罩层，没有弹窗时这里直接放行，不影响它
+            if (escCloseModal()) e.preventDefault();
+        });
+
+        // showNotification / escapeHtml 在 /static/js/tageditor-common.js（四页共享）
 
         // 页面加载后聚焦搜索框（来自 #newtag= 跳转时不抢焦点，交给新标签输入框）
         if (!_applyHashAction()) {

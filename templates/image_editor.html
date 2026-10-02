@@ -6,6 +6,8 @@
     <title>图片编辑器</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <!-- 四页共享的前端工具函数（escapeHtml/通知/确认框/Esc 关弹窗）。必须先于内联脚本。 -->
+    <script src="/static/js/tageditor-common.js"></script>
     <script>
         tailwind.config = {
             theme: {
@@ -59,6 +61,9 @@
                 <button id="btn-remove-bg" class="flex items-center justify-center bg-accent hover:bg-accent/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs disabled:opacity-40 disabled:cursor-not-allowed" onclick="openRemoveBgModal()" title="ToonOut 背景移除">
                     <i class="fa fa-eraser mr-1.5"></i> 背景移除
                 </button>
+                <button id="btn-brush" class="flex items-center justify-center bg-primary hover:bg-primary/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs disabled:opacity-40 disabled:cursor-not-allowed" onclick="toggleBrushMode()" title="Alpha 修补笔刷：擦除误留背景 / 恢复误删前景（透明底图片可用）">
+                    <i class="fa fa-paint-brush mr-1.5"></i> Alpha 修补
+                </button>
                 <button id="btn-alpha" class="flex items-center justify-center bg-accent hover:bg-accent/90 text-white font-medium py-1.5 px-3 rounded-lg cursor-pointer transition-all text-xs disabled:opacity-40 disabled:cursor-not-allowed" onclick="openAlphaModal()" title="透明转色底">
                     <i class="fa fa-adjust mr-1.5"></i> 透明转色底
                 </button>
@@ -69,7 +74,7 @@
                     <i class="fa fa-save mr-1.5"></i> 保存
                 </button>
                 <a href="/" class="flex items-center justify-center bg-white hover:bg-gray-50 text-gray-600 font-medium py-1.5 px-3 rounded-lg transition-all text-xs border border-gray-300" onclick="navigateAway('/'); return false;">
-                    <i class="fa fa-book mr-1.5"></i> Danbooru 查询
+                    <i class="fa fa-book mr-1.5"></i> Danbooru 标签查询
                 </a>
                 <a id="link-to-tags" href="/tag_editor" class="flex items-center justify-center bg-white hover:bg-gray-50 text-gray-600 font-medium py-1.5 px-3 rounded-lg transition-all text-xs border border-gray-300" onclick="return navigateToTags()">
                     <i class="fa fa-tags mr-1.5"></i> 标签编辑
@@ -99,9 +104,9 @@
                 <!-- 裁剪参数条（仅裁剪模式显示） -->
                 <div id="crop-toolbar" class="hidden px-3 py-2 bg-gray-50 border-b border-gray-200 flex items-center gap-2 text-xs flex-wrap">
                     <span class="text-gray-500 font-medium">裁剪目标</span>
-                    <input id="crop-w" type="number" value="512" min="1" step="1" class="w-16 px-2 py-1 border border-gray-300 rounded text-center focus:outline-none focus:border-primary" onchange="onCropTargetChange()">
+                    <input id="crop-w" type="number" value="512" min="1" step="1" title="裁剪目标宽度（像素）" aria-label="裁剪目标宽度（像素）" class="w-16 px-2 py-1 border border-gray-300 rounded text-center focus:outline-none focus:border-primary" onchange="onCropTargetChange()">
                     <span class="text-gray-400">×</span>
-                    <input id="crop-h" type="number" value="768" min="1" step="1" class="w-16 px-2 py-1 border border-gray-300 rounded text-center focus:outline-none focus:border-primary" onchange="onCropTargetChange()">
+                    <input id="crop-h" type="number" value="768" min="1" step="1" title="裁剪目标高度（像素）" aria-label="裁剪目标高度（像素）" class="w-16 px-2 py-1 border border-gray-300 rounded text-center focus:outline-none focus:border-primary" onchange="onCropTargetChange()">
                     <div class="h-4 w-px bg-gray-300 mx-1"></div>
                     <button class="px-2 py-1 bg-white border border-gray-300 rounded hover:bg-gray-100 transition-colors" onclick="setCropPreset(512,512)">512²</button>
                     <button class="px-2 py-1 bg-white border border-gray-300 rounded hover:bg-gray-100 transition-colors" onclick="setCropPreset(768,768)">768²</button>
@@ -109,6 +114,29 @@
                     <span class="text-gray-400 hidden sm:inline">拖角缩放 · 拖体移动</span>
                     <button id="btn-crop-ok" class="ml-auto px-4 py-1.5 bg-primary text-white rounded text-sm font-medium hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed" onclick="executeCrop()" disabled>
                         <i class="fa fa-check mr-1.5"></i>确定裁剪
+                    </button>
+                </div>
+                <!-- Alpha 修补笔刷参数条（仅笔刷模式显示）。
+                     「恢复」必须先有 rmbgSourceCanvas 快照（进模式时存），否则按钮不可用——
+                     没有快照的恢复没有数据来源，画了也是空的。 -->
+                <div id="brush-toolbar" class="hidden px-3 py-2 bg-gray-50 border-b border-gray-200 flex items-center gap-2 text-xs flex-wrap">
+                    <span class="text-gray-500 font-medium">笔刷</span>
+                    <label class="flex items-center gap-1 cursor-pointer">
+                        <input type="radio" name="brush-mode" value="erase" checked class="cursor-pointer" onchange="updateBrushCursor()"> 擦除
+                    </label>
+                    <label class="flex items-center gap-1 cursor-pointer">
+                        <input type="radio" name="brush-mode" value="restore" class="cursor-pointer" onchange="updateBrushCursor()"> 恢复
+                    </label>
+                    <div class="h-4 w-px bg-gray-300 mx-1"></div>
+                    <span class="text-gray-500">大小</span>
+                    <input id="brush-size" type="range" min="4" max="80" value="24" step="2" class="w-24 cursor-pointer" oninput="document.getElementById('brush-size-val').textContent = this.value">
+                    <span id="brush-size-val" class="text-gray-500 w-6 text-center">24</span>
+                    <span class="text-gray-400 hidden sm:inline">涂抹擦掉误留 / 涂回原图像素</span>
+                    <button id="btn-brush-undo" class="ml-auto px-3 py-1.5 bg-white border border-gray-300 rounded text-sm font-medium hover:bg-gray-100 transition-colors disabled:opacity-40 disabled:cursor-not-allowed" onclick="brushUndo()" disabled>
+                        <i class="fa fa-undo mr-1.5"></i>撤销
+                    </button>
+                    <button id="btn-brush-ok" class="px-4 py-1.5 bg-primary text-white rounded text-sm font-medium hover:bg-primary/90 transition-colors" onclick="toggleBrushMode()">
+                        <i class="fa fa-check mr-1.5"></i>完成
                     </button>
                 </div>
                 <div id="editor-area" class="flex-1 min-h-0 flex items-center justify-center bg-gray-100 overflow-hidden" style="cursor:default">
@@ -151,7 +179,7 @@
             <h3 class="text-lg font-semibold text-gray-800 mb-4">透明转色底</h3>
             <div class="flex items-center gap-3 mb-4">
                 <span class="text-sm text-gray-600">底色</span>
-                <input type="color" id="alpha-bg-color" value="#ffffff" class="w-10 h-10 rounded border border-gray-300 cursor-pointer p-0 bg-transparent">
+                <input type="color" id="alpha-bg-color" value="#ffffff" title="透明区域要合成的底色" aria-label="透明区域要合成的底色" class="w-10 h-10 rounded border border-gray-300 cursor-pointer p-0 bg-transparent">
             </div>
             <div class="mb-5">
                 <p class="text-sm text-gray-600 mb-2">处理范围</p>
@@ -187,7 +215,7 @@
             </div>
             <div id="removebg-color-row" class="flex items-center gap-3 mb-5 hidden">
                 <span class="text-sm text-gray-600">底色</span>
-                <input type="color" id="removebg-bg-color" value="#ffffff" class="w-10 h-10 rounded border border-gray-300 cursor-pointer p-0 bg-transparent">
+                <input type="color" id="removebg-bg-color" value="#ffffff" title="背景移除后要合成的底色" aria-label="背景移除后要合成的底色" class="w-10 h-10 rounded border border-gray-300 cursor-pointer p-0 bg-transparent">
             </div>
             <div class="flex justify-end gap-2">
                 <button class="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg text-sm font-medium transition-colors" onclick="closeRemoveBgModal()">取消</button>
@@ -204,9 +232,9 @@
             <h3 class="text-lg font-semibold text-gray-800 mb-1">缩放图像</h3>
             <p class="text-xs text-gray-400 mb-4">保持原宽高比，宽高联动</p>
             <div class="flex items-center gap-2 mb-4">
-                <input id="scale-w" type="number" min="1" class="w-20 px-2 py-1 border border-gray-300 rounded text-center focus:outline-none focus:border-primary" oninput="onScaleWChange()">
+                <input id="scale-w" type="number" min="1" title="缩放目标宽度（像素）" aria-label="缩放目标宽度（像素）" class="w-20 px-2 py-1 border border-gray-300 rounded text-center focus:outline-none focus:border-primary" oninput="onScaleWChange()">
                 <span class="text-gray-400">×</span>
-                <input id="scale-h" type="number" min="1" class="w-20 px-2 py-1 border border-gray-300 rounded text-center focus:outline-none focus:border-primary" oninput="onScaleHChange()">
+                <input id="scale-h" type="number" min="1" title="缩放目标高度（像素）" aria-label="缩放目标高度（像素）" class="w-20 px-2 py-1 border border-gray-300 rounded text-center focus:outline-none focus:border-primary" oninput="onScaleHChange()">
                 <span class="text-xs text-gray-400">px</span>
             </div>
             <div class="mb-5">
@@ -233,9 +261,9 @@
             <h3 class="text-lg font-semibold text-gray-800 mb-1">超清放大</h3>
             <p class="text-xs text-gray-400 mb-4">Real-ESRGAN 4x 超分，目标尺寸 1~4 倍</p>
             <div class="flex items-center gap-2 mb-3">
-                <input id="upscale-w" type="number" min="1" class="w-20 px-2 py-1 border border-gray-300 rounded text-center focus:outline-none focus:border-primary" oninput="onUpscaleWChange()">
+                <input id="upscale-w" type="number" min="1" title="放大目标宽度（像素）" aria-label="放大目标宽度（像素）" class="w-20 px-2 py-1 border border-gray-300 rounded text-center focus:outline-none focus:border-primary" oninput="onUpscaleWChange()">
                 <span class="text-gray-400">×</span>
-                <input id="upscale-h" type="number" min="1" class="w-20 px-2 py-1 border border-gray-300 rounded text-center focus:outline-none focus:border-primary" oninput="onUpscaleHChange()">
+                <input id="upscale-h" type="number" min="1" title="放大目标高度（像素）" aria-label="放大目标高度（像素）" class="w-20 px-2 py-1 border border-gray-300 rounded text-center focus:outline-none focus:border-primary" oninput="onUpscaleHChange()">
                 <span class="text-xs text-gray-400">px</span>
             </div>
             <p id="upscale-hint" class="text-xs text-gray-400 mb-2"></p>
@@ -278,7 +306,7 @@
     </div>
 
     <!-- 统一确认弹窗（替代浏览器原生 confirm） -->
-    <div id="confirm-modal" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center hidden" onclick="if(event.target===this)closeConfirm()">
+    <div id="confirm-modal" class="fixed inset-0 bg-black/40 z-[70] flex items-center justify-center hidden" onclick="if(event.target===this)closeConfirm()">
         <div class="bg-white rounded-xl shadow-xl w-96 p-6">
             <div class="flex items-start gap-3">
                 <div id="confirm-icon-wrap" class="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center flex-shrink-0">
@@ -370,21 +398,8 @@
             _confirmOnCancel = o.onCancel || null;
             document.getElementById('confirm-modal').classList.remove('hidden');
         }
-        function closeConfirm() {
-            document.getElementById('confirm-modal').classList.add('hidden');
-            _confirmOnOk = null;
-            _confirmOnCancel = null;
-        }
-        function confirmOk() {
-            const cb = _confirmOnOk;
-            closeConfirm();
-            if (cb) cb();
-        }
-        function confirmCancel() {
-            const cb = _confirmOnCancel;
-            closeConfirm();
-            if (cb) cb();
-        }
+        // closeConfirm / confirmOk / confirmCancel 在 /static/js/tageditor-common.js
+        // （四页共享，改一处即全局生效）
 
         // 统一离开当前页导航：未保存编辑时弹自定义确认窗（保存/放弃/取消）
         function navigateAway(url) {
@@ -482,6 +497,8 @@
             editorDirty = false;
             cropRect = null;
             dragMode = null;
+            // 切图时退出笔刷模式：快照与撤销栈都是上一张图的，留着会在新图上涂错像素
+            if (brushMode) exitBrushMode();
             updateNavUI();
             loadImageIntoEditor(allImages[index]);
             // 预取下一张图片字节到浏览器缓存（不带 ?t= 缓存破坏，因为下一张是独立文件未编辑过），
@@ -510,17 +527,37 @@
         function navigatePrev() { navigateTo(currentIndex - 1); }
         function navigateNext() { navigateTo(currentIndex + 1); }
 
-        // 弹窗是否打开：所有弹窗都是「fixed inset-0 ... hidden」的遮罩层。
+        // _anyModalOpen 在 /static/js/tageditor-common.js（四页共享）。
         // 旧版的箭头键处理不看弹窗状态，于是「未保存修改」确认框弹出时按 →，
         // 图片会在遮罩底下真的被切走（而确认框还停在屏幕上问你要不要放弃），
         // 用户点「取消」也没用了——那张图的编辑已经丢了。
-        function _anyModalOpen() {
-            const overlays = document.querySelectorAll('div.fixed.inset-0');
-            for (let i = 0; i < overlays.length; i++) {
-                if (!overlays[i].classList.contains('hidden')) return true;
-            }
-            return false;
-        }
+
+        // === Esc 关弹窗（四页一致的行为） ===
+        // 「关哪一层」= 文档序最后一个可见遮罩（同层级时后出现的在上层，与
+        // prompt_tool 删会话那条注释里核对过的层级口径相同），不复用手写 id 清单去判
+        // 「有没有弹窗」——那正是 _anyModalOpen 存在的意义（漏一个就会在遮罩底下误触发）。
+        // 表里点名每个弹窗的关闭函数，因为关闭动作不只是加 hidden：确认框要清掉回调，
+        // 以后哪个弹窗的关闭还要做别的事也在这里接上；没点到的（新加的弹窗）走通用兜底
+        // 「直接隐藏」，所以不会出现「新弹窗 Esc 关不掉」。
+        // **Esc ≠ confirmCancel**：确认框的「取消/放弃修改」按钮带业务回调
+        //（本页 navigateTo 的 onOk/onCancel 会真的放弃编辑并切图），Esc 只等价于点遮罩 ——
+        // 关掉弹窗、保留编辑、不做任何跳转。
+        // 值为 null = 这个弹窗 Esc 不关：进度弹窗跑着时被关掉就再也看不到进度了，
+        // 而且本页的关闭按钮是 `location.reload()`，任务中途按 Esc 等于连页面一起刷新掉。
+        const _ESC_CLOSERS = {
+            'confirm-modal': closeConfirm,
+            'alpha-modal': closeAlphaModal,
+            'remove-bg-modal': closeRemoveBgModal,
+            'scale-modal': closeScaleModal,
+            'upscale-modal': closeUpscaleModal,
+            'progress-modal': null
+        };
+        // escCloseModal 本体在 tageditor-common.js（四页共享）；这张映射是**页面特定**的。
+        document.addEventListener('keydown', function(e) {
+            if (e.key !== 'Escape') return;
+            if (e.ctrlKey || e.metaKey || e.altKey) return;   // 带修饰键的组合留给浏览器
+            if (escCloseModal()) e.preventDefault();
+        });
 
         document.addEventListener('keydown', function(e) {
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
@@ -532,6 +569,9 @@
                 e.preventDefault(); navigatePrev();
             } else if (e.key === 'ArrowRight' || e.key === 'j' || e.key === 'J') {
                 e.preventDefault(); navigateNext();
+            } else if (e.key === 'b' || e.key === 'B') {
+                // B 进入/退出 Alpha 修补笔刷（无透明通道时函数内部自行提示）
+                e.preventDefault(); toggleBrushMode();
             }
         });
 
@@ -539,6 +579,10 @@
         // bypassCache: 文件已被编辑覆盖后需强制刷新（加 ?t=）。导航切换默认 false 以复用预加载缓存。
         function loadImageIntoEditor(filename, bypassCache) {
             const img = document.getElementById('editor-img');
+            // 换图后 alpha 检测缓存失效（上一张有透明不代表这一张有）
+            delete img.dataset.hasAlpha;
+            // 新图上笔刷快照已失效：保存成功后的预览刷新也走这里，强制退出笔刷模式
+            if (brushMode) exitBrushMode();
             // 清理上一次放大产生的 objectURL（若 displayImg 当前用的是 blob URL）
             if (_displayObjectUrl) {
                 URL.revokeObjectURL(_displayObjectUrl);
@@ -676,6 +720,8 @@
         // 窗口大小变化时重新同步 canvas
         const resizeObserver = new ResizeObserver(function() {
             if (currentIndex >= 0 && originalImage) {
+                // fitImageToEditor 会 clearRect 显示层，未烘焙的笔画会丢——先烘焙再 fit
+                if (brushMode) bakeBrushToImg();
                 // fitImageToEditor 内部已按新画布尺寸重置裁剪框
                 fitImageToEditor();
                 updateButtonStates();
@@ -746,6 +792,8 @@
         // 进入/退出裁剪模式
         function toggleCropMode() {
             if (currentIndex < 0) return;
+            // 互斥共用 canvas：进裁剪先退出笔刷模式（反向互斥在 toggleBrushMode 内）
+            if (!cropMode && brushMode) exitBrushMode();
             cropMode = !cropMode;
             const toolbar = document.getElementById('crop-toolbar');
             if (toolbar) toolbar.classList.toggle('hidden', !cropMode);
@@ -918,6 +966,15 @@
                 showNotification('请先保存或重置当前编辑，再进行旋转', 'warning');
                 return;
             }
+            // 捕获发起旋转时的索引。旋转结果要等 dataURL 解码完（大图几十到几百 ms）才在
+            // onload 里落地，窗口期内用户完全可能翻页；而 editorDirty 原先只在 onload 里
+            // 置位，navigateTo 的守卫此刻看到的还是 false —— 它不拦，旧图的像素随后会被
+            // saveImage() 按**新的** currentIndex 写到新文件名上，原图不可撤销地被覆盖。
+            // 故：发起时就置 dirty（从源头挡住切图）+ 快照索引，回调里再比对一次，
+            // 索引变了就整体放弃落盘。写法与 runUpscale / runRemoveBg 的守卫一致。
+            const opIndex = currentIndex;
+            editorDirty = true;
+            updateButtonStates();
             const rad = degrees * Math.PI / 180;
             const srcW = originalImage.naturalWidth;
             const srcH = originalImage.naturalHeight;
@@ -941,11 +998,23 @@
 
             const rotatedImg = new Image();
             rotatedImg.onload = function() {
+                // 索引变了 = 用户已在确认框里选了「放弃修改」并切走：本次旋转结果作废，
+                // 既不落到新图上，也不触发自动保存（保存取的是调用时的 currentIndex）
+                if (currentIndex !== opIndex) {
+                    showNotification('已切换到其他图片，旋转结果已丢弃', 'warning');
+                    return;
+                }
                 originalImage = rotatedImg;
                 cropRect = null;
-                editorDirty = true;
                 const displayImg = document.getElementById('editor-img');
                 displayImg.onload = function() {
+                    // 二次校验：解码期间用户可能又切了图（saveImage 在这里才取 currentIndex）
+                    if (currentIndex !== opIndex) return;
+                    // 结果落地的这一刻重新置 dirty：置位已提前到发起时，而这段窗口里用户
+                    // 可能抢先点了「保存」——那次保存导出的是还没换上的旧图，却把 dirty 清成了
+                    // false；不重新置位，旋转结果会被 saveImage 的 `if (!editorDirty) return;`
+                    // 直接跳过（或者被当成已保存），静默丢掉。
+                    editorDirty = true;
                     fitImageToEditor();
                     updateImageInfo();
                     updateButtonStates();
@@ -960,6 +1029,12 @@
         // === 裁剪操作（前端 Canvas，直接裁出框覆盖区域，框大小即输出分辨率） ===
         function executeCrop() {
             if (!cropRect || !originalImage) return;
+
+            // 同 rotateImage：裁剪结果是异步 onload 落地的，期间若切了图，旧图会挂到新文件上。
+            // 发起时就快照索引 + 置 dirty（挡住切图），回调里比对索引、不符则放弃。
+            const opIndex = currentIndex;
+            editorDirty = true;
+            updateButtonStates();
 
             const img = document.getElementById('editor-img');
             const scaleX = originalImage.naturalWidth / img.clientWidth;
@@ -982,11 +1057,21 @@
             // 更新 originalImage 和显示图片为裁剪后的结果
             const croppedImg = new Image();
             croppedImg.onload = function() {
+                // 索引变了 = 用户已放弃修改并切走：裁剪结果作废（不覆盖新图预览、不设 dirty）
+                if (currentIndex !== opIndex) {
+                    showNotification('已切换到其他图片，裁剪结果已丢弃', 'warning');
+                    return;
+                }
                 originalImage = croppedImg;
-                editorDirty = true;
                 // 同步 img src 后等它渲染完再同步 canvas
                 const displayImg = document.getElementById('editor-img');
                 displayImg.onload = function() {
+                    // 二次校验：解码期间用户可能又切了图（保存取的是调用时的 currentIndex）
+                    if (currentIndex !== opIndex) return;
+                    // 结果落地的这一刻重新置 dirty：置位已提前到发起时，这中间用户若抢先点了
+                    //「保存」（导出的是还没换上的旧图，却把 dirty 清成 false），裁剪结果会被
+                    // 当成已保存、切图即静默丢失。
+                    editorDirty = true;
                     fitImageToEditor();
                     updateImageInfo();
                     updateButtonStates();
@@ -1046,6 +1131,11 @@
         // 缩放：整图重采样到目标尺寸（有损，与裁剪的无损不同）
         function scaleImage(targetW, targetH) {
             if (!originalImage) return;
+            // 同 rotateImage / executeCrop：结果是异步 onload 落地的，期间切图会把旧图写到新文件上。
+            // 发起时快照索引 + 置 dirty，回调里比对索引、不符则放弃。
+            const opIndex = currentIndex;
+            editorDirty = true;
+            updateButtonStates();
             const tempCanvas = document.createElement('canvas');
             tempCanvas.width = targetW;
             tempCanvas.height = targetH;
@@ -1055,10 +1145,19 @@
             tempCtx.drawImage(originalImage, 0, 0, targetW, targetH);
             const scaledImg = new Image();
             scaledImg.onload = function() {
+                // 索引变了 = 用户已放弃修改并切走：缩放结果作废
+                if (currentIndex !== opIndex) {
+                    showNotification('已切换到其他图片，缩放结果已丢弃', 'warning');
+                    return;
+                }
                 originalImage = scaledImg;
-                editorDirty = true;
                 const displayImg = document.getElementById('editor-img');
                 displayImg.onload = function() {
+                    // 二次校验：解码期间用户可能又切了图（保存取的是调用时的 currentIndex）
+                    if (currentIndex !== opIndex) return;
+                    // 同 executeCrop：落地的这一刻重新置 dirty，避免这段窗口里抢先保存
+                    // 把这一轮缩放结果当成「已保存」而静默丢掉
+                    editorDirty = true;
                     fitImageToEditor();
                     updateImageInfo();
                     updateButtonStates();
@@ -1208,6 +1307,11 @@
                         editorDirty = true;
                         const displayImg = document.getElementById('editor-img');
                         displayImg.onload = function() {
+                            // 落地时**重新**置脏：从上面置位到这里还有一次异步解码跳转，
+                            // 用户在这几十毫秒里抢先点「保存」会把 editorDirty 清成 false，
+                            // 而那时保存的是**旧**像素 → 界面显示「已保存」但磁盘上仍是旧图。
+                            // 与 rotateImage/executeCrop/scaleImage 三处同口径。
+                            editorDirty = true;
                             fitImageToEditor();
                             updateImageInfo();
                             _upscaleBusy = false;
@@ -1312,6 +1416,8 @@
                         editorDirty = true;
                         const displayImg = document.getElementById('editor-img');
                         displayImg.onload = function() {
+                            // 同 runUpscale：落地时重新置脏，堵住「抢先保存 → 显示已保存但磁盘是旧图」的窗口
+                            editorDirty = true;
                             fitImageToEditor();
                             updateImageInfo();
                             _removebgBusy = false;
@@ -1340,6 +1446,255 @@
                     showNotification(err.message || '请求失败', 'error');
                 });
         }
+
+        // ===== Alpha 修补笔刷 =====
+        // 「擦除」= destination-out 把涂抹区域 alpha 涂成 0；
+        // 「恢复」= source-atop 把 rmbgSourceCanvas（发起笔刷前的原图快照）像素涂回。
+        // 纯前端：后端零改动，保存仍走现有 saveImage()（导出的是 img 元素）。
+        let brushMode = false;          // 是否处于笔刷模式
+        let brushPainting = false;      // 正在涂抹（mousedown~mouseup）
+        let brushLast = null;           // 上一笔画点（显示坐标），用于连线
+        let brushUndoStack = [];        // 撤销栈：每笔开始前的 img.src dataURL，上限 20
+        let rmbgSourceCanvas = null;    // 恢复笔刷的数据来源：进模式时的原图快照
+        const BRUSH_UNDO_MAX = 20;
+
+        function brushType() {
+            const el = document.querySelector('input[name="brush-mode"]:checked');
+            return (el && el.value) || 'erase';
+        }
+
+        function brushRadius() {
+            return Math.max(2, parseInt(document.getElementById('brush-size').value) || 24) / 2;
+        }
+
+        // 图片是否有 alpha 通道（检测一次后缓存在 dataset，避免每笔重复扫描）
+        // 先缩到长边 ≤1024 再扫：全分辨率的 getImageData 在 6000×4000 上是 96MB 的
+        // 像素数组外加一次全图 drawImage，主线程会冻住数百 ms~数秒，而首张图按下 B
+        // 就要付一次这个代价。判定方向不变（只看有没有 alpha < 255 的像素），
+        // 缩采样最多把 alpha 边界糊掉，不影响「这张图有没有透明区域」的结论。
+        const ALPHA_SCAN_MAX_SIDE = 1024;
+        function imgHasAlpha() {
+            const img = document.getElementById('editor-img');
+            if (!img || !img.src || !img.naturalWidth) return false;
+            if (img.dataset.hasAlpha !== undefined) return img.dataset.hasAlpha === '1';
+            try {
+                const scale = Math.min(1, ALPHA_SCAN_MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+                const w = Math.max(1, Math.round(img.naturalWidth * scale));
+                const h = Math.max(1, Math.round(img.naturalHeight * scale));
+                const c = document.createElement('canvas');
+                c.width = w; c.height = h;
+                const ctx = c.getContext('2d');
+                ctx.drawImage(img, 0, 0, w, h);
+                const d = ctx.getImageData(0, 0, w, h).data;
+                let has = false;
+                for (let i = 3; i < d.length; i += 4) {
+                    if (d[i] < 255) { has = true; break; }
+                }
+                img.dataset.hasAlpha = has ? '1' : '0';
+                return has;
+            } catch (e) {
+                // 跨域画布污染等异常按「无 alpha」处理（本图 src 都是同源/ blob，正常不会触发）
+                return false;
+            }
+        }
+
+        function toggleBrushMode() {
+            if (currentIndex < 0 || !originalImage) return;
+            if (!brushMode) {
+                if (!imgHasAlpha()) {
+                    showNotification('当前图片没有透明通道（先做背景移除或使用透明 PNG）', 'warning');
+                    return;
+                }
+                // 互斥共用 canvas：进笔刷先退出裁剪模式
+                if (cropMode) toggleCropMode();
+                if (!enterBrushMode()) return;
+            } else {
+                exitBrushMode();
+            }
+        }
+
+        function enterBrushMode() {
+            // 恢复笔刷的数据来源：把当前 img 拷进离屏 canvas。必须在涂抹之前存，
+            // 否则「恢复」涂回来的是已擦除的图（等于没恢复）。
+            const img = document.getElementById('editor-img');
+            try {
+                rmbgSourceCanvas = document.createElement('canvas');
+                rmbgSourceCanvas.width = img.naturalWidth;
+                rmbgSourceCanvas.height = img.naturalHeight;
+                rmbgSourceCanvas.getContext('2d').drawImage(img, 0, 0);
+            } catch (e) {
+                rmbgSourceCanvas = null;
+                showNotification('无法读取当前图片像素，Alpha 修补不可用', 'error');
+                return false;
+            }
+            brushMode = true;
+            brushUndoStack = [];
+            document.getElementById('brush-toolbar').classList.remove('hidden');
+            updateBrushCursor();
+            updateBrushUndoButton();
+            updateButtonStates();
+            return true;
+        }
+
+        function exitBrushMode() {
+            brushMode = false;
+            brushPainting = false;
+            brushLast = null;
+            brushUndoStack = [];
+            rmbgSourceCanvas = null;
+            document.getElementById('brush-toolbar').classList.add('hidden');
+            // 笔画已实时烘焙进 img，覆盖层清掉即可
+            const canvas = document.getElementById('editor-canvas');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            editorArea.style.cursor = 'default';
+            editorCanvas.style.cursor = 'default';
+            updateButtonStates();
+        }
+
+        // 涂抹中/悬停的光标：恢复用 cell（目标是被涂回的前景），擦除用 crosshair
+        function updateBrushCursor() {
+            if (!brushMode) return;
+            const cur = brushType() === 'restore' ? 'cell' : 'crosshair';
+            editorArea.style.cursor = cur;
+            editorCanvas.style.cursor = cur;
+        }
+
+        function updateBrushUndoButton() {
+            document.getElementById('btn-brush-undo').disabled = brushUndoStack.length === 0;
+        }
+
+        // 显示坐标 → 原图像素坐标（canvas 与 img 同尺寸，复用 executeCrop 的换算）
+        function brushImgCoords(x, y) {
+            const img = document.getElementById('editor-img');
+            const b = imgBoundsInCanvas();
+            const sx = originalImage.naturalWidth / img.clientWidth;
+            const sy = originalImage.naturalHeight / img.clientHeight;
+            return {
+                x: (x - b.x) * sx,
+                y: (y - b.y) * sy,
+                r: brushRadius() * ((sx + sy) / 2)
+            };
+        }
+
+        // 在离屏画布上按原图分辨率画一笔（烘焙用，不丢显示精度）
+        function paintStrokeOn(offCtx, from, to) {
+            offCtx.lineCap = 'round';
+            offCtx.lineJoin = 'round';
+            offCtx.lineWidth = to.r * 2;
+            offCtx.beginPath();
+            offCtx.moveTo(from.x, from.y);
+            offCtx.lineTo(to.x, to.y);
+            offCtx.stroke();
+        }
+
+        // 把显示 canvas 上未烘焙的笔画按 scale 烘焙进 img（每笔结束后调用）
+        // 幂等：烘焙后清空显示 canvas，重复调用无副作用
+        function bakeBrushToImg() {
+            const canvas = document.getElementById('editor-canvas');
+            const img = document.getElementById('editor-img');
+            if (canvas.width === 0 || canvas.height === 0 || !img.naturalWidth) return;
+            const b = imgBoundsInCanvas();
+            const sx = originalImage.naturalWidth / img.clientWidth;
+            const sy = originalImage.naturalHeight / img.clientHeight;
+
+            const off = document.createElement('canvas');
+            off.width = img.naturalWidth; off.height = img.naturalHeight;
+            const octx = off.getContext('2d');
+            octx.drawImage(img, 0, 0);
+
+            // 显示层笔画 → 原图分辨率：把显示 canvas 平移到图片内容原点后整体放大
+            octx.save();
+            octx.setTransform(sx, 0, 0, sy, -b.x * sx, -b.y * sy);
+            octx.drawImage(canvas, 0, 0);
+            octx.restore();
+
+            const dataUrl = off.toDataURL('image/png');
+            img.dataset.hasAlpha = '1';  // 涂抹必然产生透明像素，跳过下次全图检测
+            // 先绑 onload 再设 src（缓存命中时同步加载会错过 onload）
+            img.onload = function() {
+                fitImageToEditor();
+                updateButtonStates();
+            };
+            img.src = dataUrl;
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+
+        function brushUndo() {
+            if (!brushUndoStack.length) return;
+            const prev = brushUndoStack.pop();
+            const img = document.getElementById('editor-img');
+            img.onload = function() {
+                fitImageToEditor();
+                updateButtonStates();
+            };
+            img.src = prev;
+            delete img.dataset.hasAlpha;  // 撤销后重新检测
+            updateBrushUndoButton();
+        }
+
+        editorArea?.addEventListener('mousedown', function(e) {
+            if (!brushMode || e.button !== 0) return;
+            if (editorScale > 1) return;   // 缩放时禁用画笔（同裁剪）
+            const p = getCanvasCoords(e);
+            // 每笔开始前把当前状态压栈（烘焙后的 img.src 即上一笔结果）
+            brushUndoStack.push(document.getElementById('editor-img').src);
+            if (brushUndoStack.length > BRUSH_UNDO_MAX) brushUndoStack.shift();
+            updateBrushUndoButton();
+            brushPainting = true;
+            brushLast = p;
+            drawBrushDot(p);
+            e.preventDefault();
+        });
+
+        function drawBrushDot(p) {
+            const canvas = document.getElementById('editor-canvas');
+            const ctx = canvas.getContext('2d');
+            const c = brushImgCoords(p.x, p.y);
+            ctx.save();
+            applyBrushComposite(ctx);
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, brushRadius(), 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+
+        // 显示层与烘焙层用同一 composite：擦除 destination-out / 恢复 source-atop
+        function applyBrushComposite(ctx) {
+            if (brushType() === 'restore') {
+                ctx.globalCompositeOperation = 'source-atop';
+                ctx.fillStyle = ctx.createPattern(rmbgSourceCanvas, 'no-repeat');
+            } else {
+                ctx.globalCompositeOperation = 'destination-out';
+                ctx.fillStyle = '#000';
+            }
+        }
+
+        document.addEventListener('mousemove', function(e) {
+            if (!brushMode || !brushPainting) return;
+            const p = getCanvasCoords(e);
+            const canvas = document.getElementById('editor-canvas');
+            const ctx = canvas.getContext('2d');
+            ctx.save();
+            applyBrushComposite(ctx);
+            ctx.lineWidth = brushRadius() * 2;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.beginPath();
+            ctx.moveTo(brushLast.x, brushLast.y);
+            ctx.lineTo(p.x, p.y);
+            ctx.stroke();
+            ctx.restore();
+            brushLast = p;
+        });
+
+        document.addEventListener('mouseup', function() {
+            if (!brushMode || !brushPainting) return;
+            brushPainting = false;
+            brushLast = null;
+            bakeBrushToImg();   // 每笔结束立即烘焙，后续保存/导出走现有逻辑
+        });
 
         // 预设/输入变更：更新目标分辨率并重置裁剪框
         function setCropPreset(w, h) {
@@ -1418,6 +1773,13 @@
             const btn = document.getElementById('btn-alpha');
             btn.disabled = true;
             btn.innerHTML = '<i class="fa fa-spinner fa-spin mr-1.5"></i> 处理中...';
+            // 这两个状态必须声明在 runAlphaBatch 这一层，不能放进下面的 .then 回调里：
+            // handleProgressEvent 是 runAlphaBatch 的函数声明（与 fetch 同级），而闭包是词法的 ——
+            // 它看不见回调内部的 let，赋值会落到一个隐式全局上，finishStream 读到的却仍是
+            // 回调内那个永远是 null 的局部变量（表现是兜底文案只会说「未收到完成信号」，
+            // 真实异常无处可查）。放在这一层，事件处理器与兜底读的才是同一对变量。
+            let streamCompleted = false;  // 是否收到 complete/fatal 这类「有结论的收尾」事件
+            let streamError = null;       // 错误信息（error 事件累积 / fatal 事件的 data.error）
 
             fetch('/batch_alpha_to_white?color=' + encodeURIComponent(color), {method: 'POST'})
             .then(r => {
@@ -1442,8 +1804,6 @@
                 const reader = body.getReader();
                 const decoder = new TextDecoder();
                 let buf = '';
-                let streamCompleted = false;  // 是否收到 complete 事件（handleProgressEvent 内置位）
-                let streamError = null;       // 错误信息（handleProgressEvent 的 error 事件累积）
 
                 function finishStream() {
                     if (streamCompleted) return;  // 已由 complete 事件正常收尾，无需兜底
@@ -1516,6 +1876,26 @@
                     el.classList.remove('hidden');
                     el.innerHTML += '<div>' + escapeHtml(data.item) + ': ' + escapeHtml(data.error) + '</div>';
                     streamError = (data.item ? data.item + ': ' : '') + (data.error || '');  // 记录最近错误，供中断兜底引用
+                } else if (type === 'fatal') {
+                    // 后端批量转换异常终止时会发 fatal（image_editor.py 里那个 except 分支）。
+                    // 旧版不认这个事件 → 落到 finishStream() 兜底，用户只看到
+                    // 「连接异常中断：未收到完成信号」，真实异常被整个丢掉。
+                    // 这里记进 streamError（兜底文案会引用它，见 finishStream），
+                    // 同时立刻在进度区把真实原因显示出来。
+                    streamCompleted = true;  // 是「有结论的结束」，别再叠一句「未收到完成信号」
+                    streamError = data.error || '批量处理异常终止';
+                    const el = document.getElementById('progress-errors');
+                    el.classList.remove('hidden');
+                    el.innerHTML += '<div>' + escapeHtml(streamError) + '</div>';
+                    document.getElementById('progress-bar').classList.remove('bg-primary');
+                    document.getElementById('progress-bar').classList.add('bg-red-500');
+                    document.getElementById('progress-subtitle').textContent = '处理异常终止';
+                    document.getElementById('progress-item').textContent = '';
+                    document.getElementById('progress-close').classList.remove('hidden');
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fa fa-adjust mr-1.5"></i> 透明转色底';
+                    // 刷新预览：异常前已转换的图片可能已经落盘
+                    if (currentIndex >= 0) loadImageIntoEditor(allImages[currentIndex], true);
                 } else if (type === 'complete') {
                     streamCompleted = true;  // 标记正常完成，done 触发时 finishStream 跳过错误兜底
                     document.getElementById('progress-bar').style.width = '100%';
@@ -1536,7 +1916,12 @@
         function openProgressModal(title, subtitle) {
             document.getElementById('progress-title').textContent = title;
             document.getElementById('progress-subtitle').textContent = subtitle;
-            document.getElementById('progress-bar').style.width = '0%';
+            const bar = document.getElementById('progress-bar');
+            bar.style.width = '0%';
+            // fatal 会把条染红，下一轮必须染回主色 —— 否则这次跑得好好的，
+            // 条却还是上一轮的红色，看着像又失败了
+            bar.classList.remove('bg-red-500');
+            bar.classList.add('bg-primary');
             document.getElementById('progress-count').textContent = '0 / 0';
             document.getElementById('progress-percent').textContent = '0%';
             document.getElementById('progress-item').textContent = '';
@@ -1624,6 +2009,8 @@
             editorDirty = false;
             cropRect = null;
             dragMode = null;
+            // 重置丢弃全部编辑：笔刷快照与撤销栈一并作废
+            if (brushMode) exitBrushMode();
             // 退出裁剪模式
             if (cropMode) {
                 cropMode = false;
@@ -1658,19 +2045,15 @@
             removeBgBtn.innerHTML = _removebgBusy
                 ? '<i class="fa fa-spinner fa-spin mr-1.5"></i> 移除中...'
                 : '<i class="fa fa-eraser mr-1.5"></i> 背景移除';
+            // Alpha 修补按钮：仿 btn-crop 的 toggle 文案；与暂存态不冲突（它修饰的就是暂存结果）
+            const brushBtn = document.getElementById('btn-brush');
+            brushBtn.disabled = currentIndex < 0 || _removebgBusy;
+            brushBtn.innerHTML = brushMode
+                ? '<i class="fa fa-times mr-1.5"></i> 退出修补'
+                : '<i class="fa fa-paint-brush mr-1.5"></i> Alpha 修补';
         }
 
-        // === 通知 ===
-        let _notifyTimer = null;
-        function showNotification(message, type) {
-            const n = document.getElementById('notification');
-            const colors = {success:'bg-green-500 text-white',error:'bg-red-500 text-white',warning:'bg-amber-500 text-white',info:'bg-blue-500 text-white'};
-            n.className = 'fixed bottom-5 right-5 px-5 py-3 rounded-lg shadow-lg flex items-center z-50 transition-all duration-300 text-sm ' + (colors[type]||colors.info);
-            n.textContent = message;
-            n.style.transform = 'translateY(0)'; n.style.opacity = '1';
-            if (_notifyTimer) clearTimeout(_notifyTimer);
-            _notifyTimer = setTimeout(() => { n.style.transform = 'translateY(20px)'; n.style.opacity = '0'; _notifyTimer = null; }, 3000);
-        }
+        // showNotification / escapeHtml 在 /static/js/tageditor-common.js（四页共享）
 
         // === 工具 ===
         function navigateToTags() {
@@ -1679,10 +2062,6 @@
                 : '/tag_editor';
             navigateAway(target);
             return false;  // 阻止 a 标签默认跳转（由 navigateAway 处理）
-        }
-
-        function escapeHtml(str) {
-            return str.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         }
 
         // 防止刷新丢失
@@ -1694,9 +2073,16 @@
         (function() {
             const ci = document.getElementById('alpha-bg-color');
             if (!ci) return;
-            const saved = localStorage.getItem('alpha_bg_color');
-            if (saved) ci.value = saved;
-            ci.addEventListener('change', function() { localStorage.setItem('alpha_bg_color', this.value); });
+            // localStorage 在隐私模式/配额满时会抛 SecurityError —— 这段在顶层脚本里，
+            // 后面还有「初始化」（文件列表 + 导航），不包住的话异常会中断整个脚本，
+            // 表现是文件列表一片空白。读写各包一层，坏了只是记不住颜色。
+            try {
+                const saved = localStorage.getItem('alpha_bg_color');
+                if (saved) ci.value = saved;
+            } catch (e) {}
+            ci.addEventListener('change', function() {
+                try { localStorage.setItem('alpha_bg_color', this.value); } catch (e) {}
+            });
         })();
 
         // 裁剪目标分辨率记忆
@@ -1713,7 +2099,10 @@
         // 初始化
         if (allImages.length > 0) {
             rebuildFileList();
-            const hashName = decodeURIComponent(window.location.hash.slice(1));
+            // hash 里可能有裸 `%`（手工改地址栏、别的工具拼的链接）→ decodeURIComponent 抛
+            // URIError，异常会中断初始化，文件列表与导航全都不执行。解不开就按空 hash 处理。
+            let hashName = '';
+            try { hashName = decodeURIComponent(window.location.hash.slice(1)); } catch (e) { hashName = ''; }
             const hashIndex = hashName ? allImages.indexOf(hashName) : -1;
             navigateTo(hashIndex >= 0 ? hashIndex : 0);
             // 延迟启动 ResizeObserver，确保 DOM 稳定

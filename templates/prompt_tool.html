@@ -6,6 +6,8 @@
     <title>提示词优化</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <!-- 四页共享的前端工具函数（escapeHtml/通知/确认框/Esc 关弹窗）。必须先于内联脚本。 -->
+    <script src="/static/js/tageditor-common.js"></script>
     <script>
         tailwind.config = {
             theme: {
@@ -53,11 +55,18 @@
             font-size: 0.75rem;
         }
         .pt-row:hover { filter: brightness(0.97); }
-        .pt-row[data-op="keep"]   { background: #f8fafc; border-color: #e2e8f0; }
+        /* 没有 [data-op="keep"] 的规则：保留行不渲染（见 renderDiff），
+           它只留在 _ptDiff 里参与最终提示词合成，不会出现在列表上 */
         .pt-row[data-op="add"]    { background: #f0fdf4; border-color: #bbf7d0; }
         .pt-row[data-op="remove"] { background: #fef2f2; border-color: #fecaca; }
         .pt-row[data-op="modify"] { background: #eff6ff; border-color: #bfdbfe; }
         .pt-row.is-off { opacity: 0.45; }
+
+        /* 参考图缩略图：未勾选（本次不送模型）的整格置灰 */
+        .pt-img.is-off img { opacity: 0.35; }
+        .pt-img.is-off .pt-img-name { color: #cbd5e1; }
+        .pt-img.is-off:hover img { opacity: 0.6; }
+        .pt-img-check { cursor: pointer; }
         .pt-row code {
             font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
             font-size: 0.75rem;
@@ -70,7 +79,6 @@
             font-weight: 600;
             white-space: nowrap;
         }
-        .pt-row[data-op="keep"]   .badge { background: #e2e8f0; color: #475569; }
         .pt-row[data-op="add"]    .badge { background: #16a34a; color: #fff; }
         .pt-row[data-op="remove"] .badge { background: #dc2626; color: #fff; }
         .pt-row[data-op="modify"] .badge { background: #2563eb; color: #fff; }
@@ -97,14 +105,14 @@
         <div class="container mx-auto px-4 py-3 flex justify-between items-center">
             <div class="flex items-center gap-3">
                 <div class="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
-                    <i class="fa fa-wand-magic-sparkles text-primary"></i>
+                    <i class="fa fa-magic text-primary"></i>
                 </div>
                 <h1 class="text-xl font-bold text-dark">提示词优化</h1>
                 <span class="text-xs text-gray-400 hidden sm:inline">以标签库为知识库，结合图片重调提示词</span>
             </div>
             <div class="flex items-center gap-2">
                 <a href="/" class="flex items-center justify-center bg-white hover:bg-gray-50 text-gray-600 font-medium py-1.5 px-3 rounded-lg transition-all text-xs border border-gray-300">
-                    <i class="fa fa-book mr-1.5"></i> 标签查询
+                    <i class="fa fa-book mr-1.5"></i> Danbooru 标签查询
                 </a>
                 <a href="/tag_editor" class="flex items-center justify-center bg-white hover:bg-gray-50 text-gray-600 font-medium py-1.5 px-3 rounded-lg transition-all text-xs border border-gray-300">
                     <i class="fa fa-tags mr-1.5"></i> 标签编辑
@@ -120,33 +128,57 @@
     <main class="flex-grow container mx-auto px-4 py-3">
         <div class="flex gap-3 h-[calc(100vh-80px)]">
 
-            <!-- 左栏：图片 -->
-            <div class="w-56 shrink-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+            <!-- 左栏：会话（参考图 + 会话历史） -->
+            <div class="w-64 shrink-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
                 <div class="px-3 py-2 border-b border-gray-100 flex items-center justify-between">
-                    <span class="text-xs font-semibold text-gray-600">图片</span>
-                    <span id="pt-image-counter" class="text-xs text-gray-400">0 / 0</span>
-                </div>
-                <form action="/upload" method="post" enctype="multipart/form-data" class="px-3 py-2 border-b border-gray-100">
-                    <input type="hidden" name="next" value="prompt_tool">
-                    <input id="pt-upload-input" type="file" name="files" multiple accept="image/*,.txt"
-                           class="hidden" onchange="this.form.submit()">
-                    <button type="button" onclick="document.getElementById('pt-upload-input').click()"
-                            class="w-full py-1.5 text-xs bg-primary hover:bg-primary/90 text-white rounded-lg transition-colors">
-                        <i class="fa fa-upload mr-1"></i> 上传图片
-                    </button>
-                </form>
-                <div class="px-3 py-2 border-b border-gray-100">
-                    <input id="pt-filter" type="text" placeholder="筛选文件名..." oninput="renderFileList()"
-                           class="w-full px-2 py-1 border border-gray-300 rounded-lg text-xs focus:outline-none focus:border-primary">
-                </div>
-                <div id="pt-file-list" class="pt-scroll flex-1 overflow-y-auto px-2 py-1"></div>
-                <div class="border-t border-gray-100 p-2">
-                    <div class="h-28 bg-gray-50 rounded-lg flex items-center justify-center overflow-hidden mb-1">
-                        <img id="pt-preview-img" class="max-h-28 max-w-full object-contain hidden" alt="">
-                        <span id="pt-preview-empty" class="text-xs text-gray-400">未选择图片</span>
+                    <span class="text-xs font-semibold text-gray-600">会话</span>
+                    <!-- 这两个按钮**必须带文字**：早先是两枚 w-6 h-6 的纯图标按钮，
+                         而图标名写成了 FA6 的（页面引的是 FA 4.7）→ 渲染成空白方块，
+                         用户反馈「好像没有会话记录这个功能」。图标已修，但纯图标 +
+                         只靠 title 提示的可发现性仍然太差，所以补上文字 label。 -->
+                    <div class="flex items-center gap-1">
+                        <button onclick="openSessionsModal()" title="会话记录：查看 / 切换 / 删除历史会话"
+                                class="h-6 px-2 rounded border border-gray-300 text-gray-600 hover:bg-gray-50 text-[11px] flex items-center gap-1">
+                            <i class="fa fa-history"></i><span>记录</span>
+                        </button>
+                        <button onclick="newSession()" title="新开会话：一块空白工作台"
+                                class="h-6 px-2 rounded border border-gray-300 text-gray-600 hover:bg-gray-50 text-[11px] flex items-center gap-1">
+                            <i class="fa fa-plus"></i><span>新建</span>
+                        </button>
                     </div>
-                    <div id="pt-current-name" class="text-xs text-gray-600 truncate mb-1">—</div>
-                    <div id="pt-nl-badge" class="text-xs text-gray-400"></div>
+                </div>
+
+                <!-- 参考图工作区 -->
+                <div class="px-3 py-2 border-b border-gray-100">
+                    <div class="flex items-center justify-between mb-1.5">
+                        <span class="text-xs font-medium text-gray-600">参考图</span>
+                        <span id="pt-image-counter" class="text-xs text-gray-400">已选 0 / 5</span>
+                    </div>
+                    <input id="pt-upload-input" type="file" multiple accept="image/*" class="hidden">
+                    <div class="flex gap-1">
+                        <button type="button" onclick="document.getElementById('pt-upload-input').click()"
+                                class="flex-1 py-1.5 text-xs bg-primary hover:bg-primary/90 text-white rounded-lg transition-colors">
+                            <i class="fa fa-upload mr-1"></i> 添加
+                        </button>
+                        <button type="button" onclick="clearImages()" title="清空参考图"
+                                class="px-2 py-1.5 text-xs bg-white hover:bg-gray-50 text-gray-600 border border-gray-300 rounded-lg transition-colors">
+                            <i class="fa fa-trash"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 参考图缩略图网格：勾选决定本次送哪几张；编号即提示词里的「图1/图2」。
+                     两列 + `content-start`：单列时格子有 216px 宽，而竖图（实测这批
+                     全是 0.31~0.78 的立绘）按宽度铺满需要近 700px 高，`object-cover`
+                     于是把上下裁掉近九成 —— 只剩中间一条，等于看不见内容。
+                     `content-start` 是必需的：不加的话 grid 行会被 flex-1 的高度均分，
+                     几张图会被撑成几个大格子。 -->
+                <div id="pt-image-grid" class="pt-scroll flex-1 overflow-y-auto p-2 grid grid-cols-2 gap-2 content-start"></div>
+
+                <div class="border-t border-gray-100 px-3 py-2">
+                    <!-- 占位文案不能写「未保存」：本页**没有保存功能**（结果只供复制），
+                         这句话会让人回头找保存按钮。updateSessionInfo 会立刻换成 sid。 -->
+                    <div id="pt-session-info" class="text-xs text-gray-400 truncate">会话加载中…</div>
                 </div>
             </div>
 
@@ -154,10 +186,7 @@
             <div class="flex-1 min-w-0 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
                 <div class="px-4 py-2 border-b border-gray-100 flex items-center justify-between shrink-0">
                     <span class="text-xs font-semibold text-gray-600">输入</span>
-                    <button id="pt-merge-nl" onclick="mergeNlIntoPrompt()"
-                            class="hidden text-xs text-primary hover:underline">
-                        <i class="fa fa-plus-circle mr-0.5"></i>并入该图的自然语言描述
-                    </button>
+                    <span class="text-xs text-gray-400">本页与标签编辑独立，不读取任何标签文件</span>
                 </div>
                 <div class="pt-scroll flex-1 overflow-y-auto p-4 flex flex-col gap-3">
                     <div>
@@ -214,6 +243,7 @@
                 </div>
                 <div class="pt-scroll flex-1 overflow-y-auto p-3 flex flex-col gap-3">
                     <div id="pt-warnings" class="hidden"></div>
+                    <div id="pt-ref-images" class="hidden"></div>
                     <div id="pt-summary" class="hidden text-xs text-gray-700 bg-blue-50 border border-blue-100 rounded-lg p-2.5"></div>
 
                     <div>
@@ -261,7 +291,7 @@
     </main>
 
     <!-- 确认弹窗 -->
-    <div id="confirm-modal" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center hidden" onclick="if(event.target===this)closeConfirm()">
+    <div id="confirm-modal" class="fixed inset-0 bg-black/40 z-[70] flex items-center justify-center hidden" onclick="if(event.target===this)closeConfirm()">
         <div class="bg-white rounded-xl shadow-xl w-96 p-6">
             <div class="flex items-start gap-3">
                 <div id="confirm-icon-wrap" class="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center flex-shrink-0">
@@ -300,14 +330,38 @@
         </div>
     </div>
 
+    <!-- 会话记录弹窗 -->
+    <div id="sessions-modal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <!-- 尺寸：列表项有三行文字（标题/要求/时间）加两个按钮，512px 时文字被截得
+             只剩几个字，认不出会话。放到 2xl 后标题（40 字符）与要求（60 字符）基本
+             能整行显示；高度也放到 85vh，一屏能多看几条。 -->
+        <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col">
+            <div class="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+                <span class="text-sm font-semibold text-gray-700">会话记录</span>
+                <button onclick="closeSessionsModal()" title="关闭会话记录" aria-label="关闭会话记录" class="w-7 h-7 rounded hover:bg-gray-100 text-gray-500">
+                    <i class="fa fa-times"></i>
+                </button>
+            </div>
+            <div id="pt-sessions-list" class="pt-scroll flex-1 overflow-y-auto p-3 flex flex-col gap-2"></div>
+            <div class="px-4 py-2 border-t border-gray-100 text-[11px] text-gray-400">
+                删除会话会连同它的参考图一起删除（会话是一个整体）
+            </div>
+        </div>
+    </div>
+
     <!-- 通知 -->
     <div id="notification" class="fixed bottom-5 right-5 px-5 py-3 rounded-lg shadow-lg transform translate-y-20 opacity-0 transition-all duration-300 flex items-center z-50 text-sm"></div>
 
     <script>
         // === 状态 ===
-        var _images = {{ images | tojson }};
-        var _current = '';        // 当前图片文件名
-        var _origNl = '';         // 当前图原有 .nl.txt（用于「并入」与覆盖确认）
+        var _sid = '';            // 当前会话 ID（服务端生成，白名单格式）
+        // 当前会话的参考图：[{name, selected, submit_index}]。顺序即工作区顺序。
+        // `submit_index` 由服务端算好（勾选的按序 1..K，未勾选为 0）—— 它是
+        // **送模型的编号**，前端只负责显示，绝不自己数：自己数就会出现「界面上的
+        // 图2」与「模型看到的图2」不是同一张，而用户把「用图2 的动作」写在了
+        // 会持久化的优化要求里，错了是静默的。
+        var _images = [];
+        var _maxSubmit = 5;       // 单次提交上限（工作区不限量），由后端下发
         var _ptDiff = [];         // diff 行数据（DOM 由它渲染，勾选态存在对象里）
         var _ptFinalDirty = false;// 用户手改过 #pt-final-prompt
         var _ptResult = null;     // 最近一次 complete 结果
@@ -315,25 +369,8 @@
         var CAT_NAMES = {0: '通用', 1: '艺术家', 3: '版权', 4: '角色', 5: '元数据'};
         var OP_NAMES = {keep: '保留', add: '新增', remove: '删除', modify: '修改'};
 
-        // === 通知 ===
-        var _notifyTimer = null;
-        function showNotification(message, type) {
-            var n = document.getElementById('notification');
-            var colors = {success:'bg-green-500 text-white',error:'bg-red-500 text-white',warning:'bg-amber-500 text-white',info:'bg-blue-500 text-white'};
-            n.className = 'fixed bottom-5 right-5 px-5 py-3 rounded-lg shadow-lg flex items-center z-50 transition-all duration-300 text-sm ' + (colors[type] || colors.info);
-            n.textContent = message;
-            n.style.transform = 'translateY(0)'; n.style.opacity = '1';
-            if (_notifyTimer) clearTimeout(_notifyTimer);
-            _notifyTimer = setTimeout(function() {
-                n.style.transform = 'translateY(20px)'; n.style.opacity = '0'; _notifyTimer = null;
-            }, 3000);
-        }
-
-        function escapeHtml(str) {
-            return String(str == null ? '' : str)
-                .replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
-                .replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        }
+        // showNotification / escapeHtml / showConfirm / closeConfirm / confirmOk /
+        // confirmCancel / _anyModalOpen 在 /static/js/tageditor-common.js（四页共享）
 
         // === 确认弹窗 ===
         var _confirmOnOk = null, _confirmOnCancel = null;
@@ -361,90 +398,429 @@
             _confirmOnCancel = o.onCancel || null;
             document.getElementById('confirm-modal').classList.remove('hidden');
         }
-        function closeConfirm() {
-            document.getElementById('confirm-modal').classList.add('hidden');
-            _confirmOnOk = null; _confirmOnCancel = null;
-        }
-        function confirmOk() { var cb = _confirmOnOk; closeConfirm(); if (cb) cb(); }
-        function confirmCancel() { var cb = _confirmOnCancel; closeConfirm(); if (cb) cb(); }
 
-        // === 文件列表 ===
-        function renderFileList() {
-            var kw = (document.getElementById('pt-filter').value || '').trim().toLowerCase();
-            var box = document.getElementById('pt-file-list');
-            var list = _images.filter(function(n) {
-                return !kw || n.toLowerCase().indexOf(kw) >= 0;
-            });
-            var html = '';
-            for (var i = 0; i < list.length; i++) {
-                var n = list[i];
-                var on = n === _current;
-                // 文件名走 data-* + 事件委托（不在 onclick 里拼字符串：含引号的文件名会拼坏 JS，
-                // 且 escapeHtml 已把 ' 转成 &#39;，再转义也救不回来）
-                html += '<div class="pt-file-item px-2 py-1 rounded cursor-pointer text-xs truncate ' +
-                    (on ? 'bg-primary/10 text-primary font-medium' : 'text-gray-600 hover:bg-gray-50') +
-                    '" data-name="' + escapeHtml(n) + '" title="' + escapeHtml(n) + '">' + escapeHtml(n) + '</div>';
-            }
-            box.innerHTML = html || '<div class="text-xs text-gray-400 p-2">没有匹配的图片</div>';
-            var idx = _images.indexOf(_current);
-            document.getElementById('pt-image-counter').textContent =
-                (idx >= 0 ? (idx + 1) : 0) + ' / ' + _images.length;
-        }
-
-        // 事件委托：文件项的 data-name 只在点击时读，不进 JS 字符串
-        document.getElementById('pt-file-list').addEventListener('click', function(e) {
-            var item = e.target.closest('.pt-file-item');
-            if (item) selectImage(item.dataset.name);
+        // === Esc 关弹窗（四页一致的行为） ===
+        // 「关哪一层」= 文档序最后一个可见遮罩：本页 #sessions-modal 与 #confirm-modal 同为
+        // z-50，后出现的在上层，按文档序取正好等于视觉上的最上层（deleteSession 里那条
+        // 「必须先关列表弹窗」的注释核对过同一件事）。判定「有没有弹窗」走 _anyModalOpen 的
+        // 结构化口径，不手写 id 清单。表里点名各弹窗的关闭函数；没点到的走通用兜底
+        //「直接隐藏」，所以以后新加的弹窗也自动能被 Esc 关掉。
+        // **Esc 不能等同于 confirmCancel**：确认框的「取消」按钮带业务回调
+        //（switchSession / deleteSession 的 onCancel 会重新打开会话列表），
+        // Esc 只等价于点遮罩 —— 关掉弹窗、不触发任何回调。
+        // 值为 null = 这个弹窗 Esc 不关：进度弹窗跑着时被关掉就再也看不到进度、
+        // 也找不到「中断」按钮了。
+        // escCloseModal 本体在 tageditor-common.js；这张映射是**页面特定**的。
+        var _ESC_CLOSERS = {
+            'confirm-modal': closeConfirm,      // 注意：不是 confirmCancel
+            'sessions-modal': closeSessionsModal,
+            'progress-modal': null
+        };
+        document.addEventListener('keydown', function(e) {
+            if (e.key !== 'Escape') return;
+            if (e.ctrlKey || e.metaKey || e.altKey) return;   // 带修饰键的组合留给浏览器
+            if (escCloseModal()) e.preventDefault();
         });
 
-        function selectImage(name) {
-            _current = name;
-            _origNl = '';
-            var img = document.getElementById('pt-preview-img');
-            var empty = document.getElementById('pt-preview-empty');
-            if (name) {
-                img.src = '/uploads/' + encodeURIComponent(name);
-                img.classList.remove('hidden');
-                empty.classList.add('hidden');
-                location.hash = encodeURIComponent(name);
-            } else {
-                img.removeAttribute('src');
-                img.classList.add('hidden');
-                empty.classList.remove('hidden');
+        // === 参考图工作区（当前会话内的图，与标签编辑的 uploads/ 无关）===
+        function renderImageGrid() {
+            var box = document.getElementById('pt-image-grid');
+            var html = '';
+            for (var i = 0; i < _images.length; i++) {
+                var it = _images[i];
+                var sel = it.selected;
+                // 编号是**语义**不是装饰：用户会说「用图1 的人物配图2 的动作」，
+                // 所以它显示的是 submit_index（服务端算的送模型序号），不是 i+1 ——
+                // 勾选变化会让这个号重排，正是为了让它始终等于模型看到的顺序。
+                html += '<div class="pt-img relative group' + (sel ? '' : ' is-off') + '">' +
+                    '<div class="relative">' +
+                    '<input type="checkbox" class="pt-img-check absolute top-1 left-1 z-10 w-4 h-4 accent-primary"' +
+                        (sel ? ' checked' : '') +
+                        ' title="勾选后本次会送给模型（最多 ' + _maxSubmit + ' 张）"' +
+                        ' onclick="event.stopPropagation()" onchange="toggleImage(' + i + ', this.checked)">' +
+                    (sel ? '<div class="absolute bottom-1 left-1 z-10 px-1.5 h-4 rounded bg-black/70 text-white ' +
+                        'text-[10px] font-bold flex items-center">图' + it.submit_index + '</div>' : '') +
+                    '<button onclick="deleteImage(' + i + ')" title="移除这张参考图（连同它的勾选）" ' +
+                        'class="absolute top-1 right-1 z-10 w-5 h-5 rounded-full bg-black/60 text-white ' +
+                        'text-[10px] opacity-0 group-hover:opacity-100 transition-opacity">' +
+                        '<i class="fa fa-times"></i></button>' +
+                    // `object-contain`（不是 cover）是**不裁图**的关键：参考图多半是竖图，
+                    // cover 会为了填满格子把上下裁掉。留白处用浅灰底兜着，看着是「完整的一张」，
+                    // 不是「一条切片」。框子取 2/3 竖比例，正好接近常见人像，留白最少。
+                    '<img src="' + escapeHtml(imageUrl(it.name)) + '" alt="" ' +
+                        'class="w-full aspect-[2/3] object-contain rounded-lg border border-gray-200 bg-gray-50">' +
+                    '</div>' +
+                    '<div class="pt-img-name text-[10px] text-gray-400 truncate mt-0.5" title="' +
+                        escapeHtml(it.name) + '">' + escapeHtml(it.name) + '</div>' +
+                '</div>';
             }
-            document.getElementById('pt-current-name').textContent = name || '—';
-            document.getElementById('pt-nl-badge').textContent = '';
-            document.getElementById('pt-merge-nl').classList.add('hidden');
-            renderFileList();
-            if (name) loadCaptionFor(name);
+            box.innerHTML = html ||
+                '<div class="text-xs text-gray-400 p-2 leading-relaxed">' +
+                '还没有参考图。<br>可以一次添加很多张（数量不限），再勾选其中最多 ' + _maxSubmit +
+                ' 张送给模型。<br><b>勾选后才能用编号指代</b>（如「用图1 的人物配图2 的动作」），' +
+                '编号按勾选后的顺序重新排。</div>';
+            renderImageCounter();
         }
 
-        // 选图后预填：标签行 + （若有）.nl.txt 供一键并入
-        function loadCaptionFor(name) {
-            fetch('/get_caption/' + encodeURIComponent(name))
+        // 计数器要同时说清「勾了几张」与「工作区有几张」—— 两个数字现在各管一件事，
+        // 只说「0 / 5」会让人以为图丢了（工作区里明明摆着 8 张）
+        function renderImageCounter() {
+            var el = document.getElementById('pt-image-counter');
+            var n = 0;
+            for (var i = 0; i < _images.length; i++) if (_images[i].selected) n++;
+            // 必须带「已选」，否则「3 / 5」会被读成「5 张里的第 3 张」而不是
+            // 「勾了 3 张、上限 5 张」（工作区张数另说，所以另外用括号标出）
+            el.textContent = '已选 ' + n + ' / ' + _maxSubmit + '（共 ' + _images.length + ' 张）';
+            // 工作区有图却一张没勾时转琥珀色：这一轮会以纯文本模式跑，用户该知道。
+            // 空工作区不转 —— 那只是「还没加图」，标成警告是虚惊。
+            var warn = (n === 0 && _images.length > 0);
+            el.className = 'text-xs ' + (warn ? 'text-amber-600 font-medium' : 'text-gray-400');
+        }
+
+        function imageUrl(name) {
+            return '/prompt_sessions/' + encodeURIComponent(_sid) +
+                   '/images/' + encodeURIComponent(name);
+        }
+
+        function applyImages(data) {
+            _images = (data.images || []).map(function(x) {
+                return {name: x.name, selected: !!x.selected, submit_index: x.submit_index || 0};
+            });
+            if (data.max_submit) _maxSubmit = data.max_submit;
+            renderImageGrid();
+        }
+
+        // 勾选/取消一张参考图。上限在**本地**先拦一道（勾第 6 张直接拒绝、不发请求），
+        // 因为服务端虽然也会拦，但那时勾选框已经被浏览器画成选中态了 —— 用户看到
+        // 「勾上了又弹回来」比「根本勾不上」更困惑。
+        function toggleImage(idx, checked) {
+            if (!_images[idx]) return;
+            if (checked) {
+                var n = 0, i;
+                for (i = 0; i < _images.length; i++) if (_images[i].selected) n++;
+                if (n >= _maxSubmit) {
+                    showNotification('单次最多提交 ' + _maxSubmit + ' 张参考图，请先取消一张', 'warning');
+                    // change 事件触发时复选框已经被浏览器画成选中了，必须重画回真实状态
+                    renderImageGrid();
+                    return;
+                }
+            }
+            // 提交**变化后的完整清单**而不是「翻转这一张」：服务端据此重算编号，
+            // 少一次「两端各自维护增量」的漂移
+            var names = [], j;
+            for (j = 0; j < _images.length; j++) {
+                if (j === idx ? checked : _images[j].selected) names.push(_images[j].name);
+            }
+            var sid = _sid;
+            fetch('/prompt_sessions/' + encodeURIComponent(sid) + '/images/select',
+                  {method: 'POST', headers: {'Content-Type': 'application/json'},
+                   body: JSON.stringify({names: names})})
                 .then(function(r) { return r.json(); })
                 .then(function(data) {
-                    if (name !== _current) return;   // 切图竞态
-                    var ta = document.getElementById('pt-prompt-input');
-                    var tags = (data.caption || '').replace(/\s+$/, '');
-                    ta.value = tags;
-                    _origNl = (data.nl_caption || '').trim();
-                    document.getElementById('pt-nl-badge').textContent =
-                        _origNl ? '已有自然语言描述（' + _origNl.length + ' 字）' : '无自然语言描述文件';
-                    document.getElementById('pt-merge-nl').classList.toggle('hidden', !_origNl);
+                    if (sid !== _sid) return;      // 会话已切走，本次响应作废
+                    if (data.error) {
+                        showNotification(data.error, 'error');
+                        // _images 仍是服务端上一次确认的状态，重画即回到真实状态
+                        renderImageGrid();
+                        return;
+                    }
+                    applyImages(data);
                 })
-                .catch(function() { showNotification('读取标签失败', 'error'); });
+                .catch(function() {
+                    if (sid !== _sid) return;
+                    showNotification('保存勾选失败', 'error');
+                    renderImageGrid();
+                });
         }
 
-        function mergeNlIntoPrompt() {
-            if (!_origNl) return;
-            var ta = document.getElementById('pt-prompt-input');
-            var head = ta.value.trim();
-            // 已经是两段式时只替换描述段，避免叠加两份描述
-            var nl = head.indexOf('\n');
-            if (nl >= 0) head = head.slice(0, nl).trim();
-            ta.value = head + '\n' + _origNl;
-            showNotification('已并入自然语言描述', 'success');
+        function uploadImages(fileList) {
+            if (!fileList || !fileList.length) return;
+            if (!_sid) { showNotification('会话未就绪，请点左栏顶部的「新开会话」', 'warning'); return; }
+            // 记住这次请求属于哪个会话：上传期间用户可能已经切走，
+            // 旧会话的图清单写进新会话会让「图1/图2」与实际送模型的图**静默错位**
+            var sid = _sid;
+            var fd = new FormData();
+            for (var i = 0; i < fileList.length; i++) fd.append('files', fileList[i]);
+            fetch('/prompt_sessions/' + encodeURIComponent(sid) + '/images',
+                  {method: 'POST', body: fd})
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (sid !== _sid) return;      // 会话已切走，本次响应作废
+                    if (data.error) { showNotification(data.error, 'error'); return; }
+                    applyImages(data);
+                    var n = (data.added || []).length;
+                    var auto = (data.auto_selected || []).length;
+                    if (n) showNotification('已添加 ' + n + ' 张参考图' +
+                                            (auto ? '（已自动勾选 ' + auto + ' 张）' : ''), 'success');
+                    // 补不满要说清为什么：用户传了 3 张却只勾上 1 张时不解释，
+                    // 他会以为剩下那 2 张随机没被选上（其实是已达单次上限）
+                    if (data.auto_skipped) {
+                        showNotification('新增的 ' + data.auto_skipped + ' 张未勾选（已达单次上限 '
+                                         + _maxSubmit + ' 张，可先取消勾选其它图）', 'warning');
+                    }
+                    // 被拒的要逐条说清原因（格式不对），否则用户只看到「没加上」
+                    (data.rejected || []).forEach(function(msg) {
+                        showNotification('未添加：' + msg, 'warning');
+                    });
+                })
+                .catch(function() { showNotification('上传失败', 'error'); });
+        }
+
+        function deleteImage(idx) {
+            // _images 是对象数组，取名字必须走 .name —— 直接传对象会拼出 [object Object]
+            var name = _images[idx] && _images[idx].name;
+            if (!name) return;
+            var sid = _sid;
+            fetch('/prompt_sessions/' + encodeURIComponent(sid) + '/images/delete',
+                  {method: 'POST', headers: {'Content-Type': 'application/json'},
+                   body: JSON.stringify({name: name})})
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (sid !== _sid) return;
+                    if (data.error) { showNotification(data.error, 'error'); return; }
+                    applyImages(data);
+                })
+                .catch(function() { showNotification('删除失败', 'error'); });
+        }
+
+        function clearImages() {
+            if (!_images.length) return;
+            showConfirm({
+                title: '清空参考图', danger: true, okText: '清空',
+                message: '将移除此会话的全部 ' + _images.length + ' 张参考图及其勾选状态'
+                         + '（不影响会话记录与结果）。',
+                onOk: function() {
+                    var sid = _sid;
+                    fetch('/prompt_sessions/' + encodeURIComponent(sid) + '/images/clear',
+                          {method: 'POST'})
+                        .then(function(r) { return r.json(); })
+                        .then(function(data) {
+                            if (sid !== _sid) return;
+                            if (data.error) { showNotification(data.error, 'error'); return; }
+                            applyImages(data);
+                            showNotification('已清空参考图', 'success');
+                        })
+                        .catch(function() { showNotification('清空失败', 'error'); });
+                }
+            });
+        }
+
+        // === 会话 ===
+        // 会话加载的序列号：只认最后一次发起的加载。
+        // 连点两次「加载」时两个 fetch 会竞争，后回来的决定 _sid / 图区 / 结果面板 ——
+        // 用户看到的会是**先点的那个**会话（并且地址栏被改成它）。同 tag_editor.html
+        // 的 loadSeq：过期响应直接丢弃。
+        var _sessionSeq = 0;
+
+        function loadSession(sid, then, onFail) {
+            var seq = ++_sessionSeq;
+            fetch('/prompt_sessions/' + encodeURIComponent(sid))
+                .then(function(r) { return r.json(); })
+                .then(function(resp) {
+                    if (seq !== _sessionSeq) return;      // 已有更新的加载发起，丢弃本次
+                    if (resp.error) {
+                        showNotification(resp.error, 'error');
+                        if (onFail) onFail();
+                        return;
+                    }
+                    _sid = resp.sid;
+                    applyImages(resp);
+                    var d = resp.data || {};
+                    setInputs(d.prompt || '', d.request || '');
+                    // 结果面板：有结果就还原，没有就清空（切会话不该残留上一个会话的 diff）
+                    if (d.result) renderResult(d.result);
+                    else clearResultPanel();
+                    updateSessionInfo(d);
+                    try { history.replaceState(null, '', '?sid=' + encodeURIComponent(_sid)); } catch (e) {}
+                    if (then) then();
+                })
+                .catch(function() {
+                    if (seq !== _sessionSeq) return;
+                    showNotification('加载会话失败', 'error');
+                    if (onFail) onFail();
+                });
+        }
+
+        // 会话里存下来的输入（只有**跑过一轮**才会存）。切会话/新开会话会把输入框
+        // 覆盖掉，未运行的输入无法找回 —— 靠这两个值判断「有没有没跑的输入」。
+        var _loadedPrompt = '', _loadedRequest = '';
+
+        function setInputs(prompt, request) {
+            document.getElementById('pt-prompt-input').value = prompt;
+            document.getElementById('pt-request-input').value = request;
+            _loadedPrompt = prompt;
+            _loadedRequest = request;
+        }
+
+        function inputsDirty() {
+            return document.getElementById('pt-prompt-input').value !== _loadedPrompt ||
+                   document.getElementById('pt-request-input').value !== _loadedRequest;
+        }
+
+        function updateSessionInfo(d) {
+            var el = document.getElementById('pt-session-info');
+            var t = (d && d.updated_at) || '';
+            el.textContent = _sid + (t ? ' · ' + t : '');
+            el.title = _sid;
+        }
+
+        function clearResultPanel() {
+            _ptResult = null; _ptDiff = []; _ptFinalDirty = false;
+            document.getElementById('pt-summary').classList.add('hidden');
+            document.getElementById('pt-summary').textContent = '';
+            document.getElementById('pt-input-mode').classList.add('hidden');
+            document.getElementById('pt-intent-badge').classList.add('hidden');
+            document.getElementById('pt-warnings').classList.add('hidden');
+            document.getElementById('pt-caption').value = '';
+            document.getElementById('pt-caption-note').textContent = '';
+            document.getElementById('pt-caption-hint').textContent = '';
+            document.getElementById('pt-caption-hint').classList.add('hidden');
+            // 检索计划面板与它的计数必须一起清：这两处只有 renderPlan 会写，
+            // 漏了就会留着**上一个会话**的「点 N 个工具 · 命中 M 条」与工具命中列表，
+            // 而 diff/描述都已清空 —— 用户会把上一个会话的结论当成这次的
+            document.getElementById('pt-cand-count').textContent = '';
+            document.getElementById('pt-candidates-panel').innerHTML = '';
+            // 「本次送模型」清单同理：它属于刚跑完的那一轮。留着会在新会话里显示
+            // 上一个会话的「图1 a.png」，而图区已经换成另一个会话的图了 ——
+            // 正是这条清单本要消除的那种错位，留着它就等于自己造一个
+            renderRefImages([]);
+            renderDiff();
+            regenFinal(true);
+        }
+
+        function newSession() {
+            var n = _images.length;
+            var unsaved = inputsDirty();
+            showConfirm({
+                title: '新开会话', danger: false, okText: '新建',
+                // 文案必须说清「空的也包括图」：图属于会话，新会话是一块空白工作台。
+                // 早先这里写「参考图不会被清空」，而代码切到的是空会话、图从工作区里
+                // 消失了 —— 用户按字面理解会以为图还在，切过去发现没了（实测对不上）。
+                // 另一半是**输入框**：没跑过的输入不在任何会话里，一并说清。
+                message: '将开始一块空白工作台（含参考图）。当前会话' +
+                         (n ? '（含它的 ' + n + ' 张参考图与结果）' : '') +
+                         '已保存在会话记录里，可随时加载回来。' +
+                         (unsaved ? '（输入框里还没运行的内容会丢失）' : ''),
+                onOk: function() {
+                    fetch('/prompt_sessions/new', {method: 'POST'})
+                        .then(function(r) { return r.json(); })
+                        .then(function(data) {
+                            if (data.error) { showNotification(data.error, 'error'); return; }
+                            // 新会话是空工作台，图区随之为空（旧会话的图仍在原会话目录里，
+                            // 加载回来即可）。想「同一组图换个要求」不必新建会话：
+                            // 直接改优化要求重跑即可，结果会覆盖在本会话上
+                            _sid = data.sid;
+                            applyImages(data);
+                            setInputs('', '');
+                            clearResultPanel();
+                            updateSessionInfo({});
+                            try { history.replaceState(null, '', '?sid=' + encodeURIComponent(_sid)); } catch (e) {}
+                            showNotification('已新建会话', 'success');
+                        })
+                        .catch(function() { showNotification('新建会话失败', 'error'); });
+                }
+            });
+        }
+
+        // 会话记录弹窗
+        function openSessionsModal() {
+            fetch('/prompt_sessions')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    var box = document.getElementById('pt-sessions-list');
+                    var list = data.sessions || [];
+                    var html = '';
+                    for (var i = 0; i < list.length; i++) {
+                        var s = list[i];
+                        var cur = s.sid === _sid;
+                        html += '<div class="flex items-center gap-3 p-2.5 rounded-lg border ' +
+                            (cur ? 'border-primary bg-primary/5' : 'border-gray-200 hover:bg-gray-50') + '">' +
+                            // 缩略图保持 `object-cover`（不是 contain）：48px 见方下 contain 会把
+                            // 竖图缩成一根细条，它只要说明「这个会话有图」，不指望看清内容 ——
+                            // 与工作区那批必须完整显示的参考图是两个用途
+                            (s.thumb
+                                ? '<img src="' + escapeHtml('/prompt_sessions/' + encodeURIComponent(s.sid) + '/images/' + encodeURIComponent(s.thumb)) + '" class="w-12 h-12 shrink-0 object-cover rounded">'
+                                : '<div class="w-12 h-12 shrink-0 rounded bg-gray-100 flex items-center justify-center text-gray-300"><i class="fa fa-image"></i></div>') +
+                            '<div class="flex-1 min-w-0">' +
+                                // 标题答「这是哪份提示词」（= 提示词的标签行，服务端现算），
+                                // 第二行答「这轮让它干什么」（= 优化要求），两者互补 ——
+                                // 早先标题取的是要求，同一份提示词迭代三轮就并排出现三条
+                                // 互不相干的标题，认不出是同一个角色的图。
+                                '<div class="text-xs font-medium text-gray-700 truncate" title="' +
+                                    escapeHtml(s.title) + '">' + escapeHtml(s.title) + '</div>' +
+                                (s.request
+                                    ? '<div class="text-[10px] text-gray-500 truncate" title="' +
+                                        escapeHtml(s.request) + '">要求 · ' + escapeHtml(s.request) + '</div>'
+                                    : '') +
+                                '<div class="text-[10px] text-gray-400 truncate">' +
+                                    escapeHtml(s.updated_at || s.created_at || '') +
+                                    ' · ' + s.image_count + ' 张图' + (s.has_result ? ' · 有结果' : '') + '</div>' +
+                            '</div>' +
+                            '<button onclick="switchSession(' + i + ')" class="px-2 py-1 text-xs rounded ' +
+                                (cur ? 'bg-primary text-white' : 'bg-white border border-gray-300 text-gray-600 hover:bg-gray-50') + '">' +
+                                (cur ? '当前' : '加载') + '</button>' +
+                            '<button onclick="deleteSession(' + i + ')" title="删除会话及其参考图" ' +
+                                'class="w-7 h-7 rounded text-red-500 hover:bg-red-50 text-xs"><i class="fa fa-trash"></i></button>' +
+                        '</div>';
+                    }
+                    box.innerHTML = html || '<div class="text-xs text-gray-400 p-2">还没有会话记录</div>';
+                    _sessionsCache = list;
+                    document.getElementById('sessions-modal').classList.remove('hidden');
+                })
+                .catch(function() { showNotification('读取会话记录失败', 'error'); });
+        }
+
+        var _sessionsCache = [];
+        function closeSessionsModal() {
+            document.getElementById('sessions-modal').classList.add('hidden');
+        }
+        function switchSession(idx) {
+            var s = _sessionsCache[idx];
+            if (!s) return;
+            closeSessionsModal();
+            if (s.sid === _sid) return;
+            var go = function() { loadSession(s.sid); };
+            // 输入框里没跑过的内容不会被存进任何会话（只有跑完一轮才落盘），
+            // 切走就找不回来了 —— 先问一句，别静默丢用户写的东西
+            if (inputsDirty()) {
+                showConfirm({
+                    title: '切换会话', danger: false, okText: '切换',
+                    message: '输入框里的提示词/优化要求还没运行过，切换后会丢失（只有运行过的内容才会存进会话）。',
+                    onOk: go,
+                    onCancel: function() { openSessionsModal(); }   // 取消 → 回到列表，别把用户丢在空页面上
+                });
+                return;
+            }
+            go();
+        }
+        function deleteSession(idx) {
+            var s = _sessionsCache[idx];
+            if (!s) return;
+            // **必须先关会话记录弹窗**：#sessions-modal 与 #confirm-modal 都是 z-50，
+            // 而它在 DOM 里更靠后 —— 同层级时后出现的在上层。不关的话确认框被它整块盖住，
+            // 点垃圾桶看起来「没反应」，删除会话这个入口实际不可用（实测核对过层级与顺序）。
+            closeSessionsModal();
+            showConfirm({
+                title: '删除会话', danger: true, okText: '删除',
+                message: '将删除「' + s.title + '」及其 ' + s.image_count + ' 张参考图，不可恢复。',
+                onOk: function() {
+                    fetch('/prompt_sessions/' + encodeURIComponent(s.sid) + '/delete', {method: 'POST'})
+                        .then(function(r) { return r.json(); })
+                        .then(function(data) {
+                            if (data.error) { showNotification(data.error, 'error'); return; }
+                            showNotification('已删除会话', 'success');
+                            if (s.sid === _sid) {
+                                // 删掉的正是当前会话：切到剩下的第一个，没有就新建一个空的
+                                if ((data.sessions || []).length) loadSession(data.sessions[0].sid);
+                                else newSession();
+                            } else {
+                                openSessionsModal();
+                            }
+                        })
+                        .catch(function() { showNotification('删除失败', 'error'); });
+                },
+                onCancel: function() { openSessionsModal(); }
+            });
         }
 
         // === 运行 ===
@@ -456,8 +832,11 @@
                 showNotification('请填写优化要求（告诉模型怎么改这份提示词）', 'warning');
                 return;
             }
+            // init 有兜底（会话不存在会自动新建），走到这里说明是别的问题，
+            // 别写「请稍候」——没有任何东西在加载，那会让人白等
+            if (!_sid) { showNotification('会话未就绪，请点左栏顶部的「新开会话」', 'warning'); return; }
             var body = {
-                image: _current || '',
+                sid: _sid,
                 prompt: prompt,
                 request: request,
                 options: {
@@ -472,6 +851,11 @@
         function renderResult(data) {
             // executeWithProgress 在中断/失败时也会回调 onComplete({}) —— 只有完整的结果才渲染
             if (!data || !('diff' in data) || !('caption' in data)) return;
+            // 新一轮结果到达 = 之前那份「最终提示词」的手改已经没有意义了（它属于旧的
+            // diff）。不清这个标志的话，下面 onCaptionInput() 里的 regenFinal() 会以为
+            // 用户有未保存的手改而弹确认框 —— 紧接着本函数又 regenFinal(true) 强行覆盖，
+            // 于是那个框既没用（点哪个都一样）又常常被进度弹窗盖住，关掉后才冒出来。
+            _ptFinalDirty = false;
             _ptResult = data;
             _ptDiff = (data.diff || []).map(function(d) {
                 return {
@@ -492,12 +876,36 @@
             ib.textContent = intent ? '要求类型：' + intent : '';
             ib.classList.toggle('hidden', !intent);
             renderPlan(data.plan, data.tool_results);
+            renderRefImages(data.reference_images || []);
             renderWarnings(data.warnings || []);
             document.getElementById('pt-caption').value = data.caption || '';
             document.getElementById('pt-caption-note').textContent = data.caption_note || '';
             renderDiff();
             onCaptionInput();
             regenFinal(true);
+            // 后端已把结果写进会话；这里刷新侧栏时间戳，让「已保存」可见
+            updateSessionInfo({updated_at: '刚刚'});
+        }
+
+        // 本次真正送进模型的参考图清单（编号 + 文件名）。
+        // 勾选制下「模型看到了哪几张」不再等于「工作区里有哪几张」，而用户在优化要求里
+        // 写的是「图N」—— 把对应关系摆在结果旁边，让他能当场核对，而不是等发现
+        // 人物与动作张冠李戴了再回头猜。
+        function renderRefImages(list) {
+            var box = document.getElementById('pt-ref-images');
+            if (!list.length) {
+                box.classList.add('hidden'); box.innerHTML = '';
+                box.classList.remove('text-xs', 'text-gray-500', 'bg-gray-50', 'border',
+                                     'border-gray-200', 'rounded-lg', 'p-2');
+                return;
+            }
+            var parts = [];
+            for (var i = 0; i < list.length; i++) {
+                parts.push('<span class="whitespace-nowrap"><b class="text-gray-700">图'
+                           + list[i].index + '</b> ' + escapeHtml(list[i].name) + '</span>');
+            }
+            box.className = 'text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-lg p-2 flex flex-wrap gap-x-3 gap-y-1';
+            box.innerHTML = '<span class="text-gray-400">本次送模型：</span>' + parts.join('');
         }
 
         function renderWarnings(list) {
@@ -520,10 +928,16 @@
 
         function renderDiff() {
             var box = document.getElementById('pt-diff-list');
-            document.getElementById('pt-diff-empty').classList.toggle('hidden', _ptDiff.length > 0);
             var html = '';
+            var shown = 0;
             for (var i = 0; i < _ptDiff.length; i++) {
                 var d = _ptDiff[i];
+                // 保留项不渲染：一轮里通常大半都是 keep（53 条里可能只有 5 条真的动了），
+                // 混在列表里会把增删改淹掉。数据照旧留在 _ptDiff 里（最终提示词要它）。
+                // **不能改用过滤后的新下标** —— toggleRow / applySuggestion 都拿下标
+                // 回查 _ptDiff，压紧下标会让它们操作到别的行（静默改错标签）。
+                if (d.op === 'keep') continue;
+                shown++;
                 var nameHtml;
                 if (d.op === 'modify') {
                     nameHtml = '<code class="text-gray-400 line-through">' + escapeHtml(d.from) + '</code>' +
@@ -570,6 +984,18 @@
                     '</span></label>';
             }
             box.innerHTML = html;
+            // 空状态有两种，别复用同一句话：没跑过 vs 跑过但没有任何改动。
+            // 后者若不说明，用户看着空白面板会以为这一轮失败了。
+            var emptyEl = document.getElementById('pt-diff-empty');
+            if (_ptDiff.length === 0) {
+                emptyEl.textContent = '还没有结果。填好左边的提示词与优化要求后点「调整提示词」。';
+                emptyEl.classList.remove('hidden');
+            } else if (shown === 0) {
+                emptyEl.textContent = '本次没有任何标签改动（' + _ptDiff.length + ' 条全部保留）。';
+                emptyEl.classList.remove('hidden');
+            } else {
+                emptyEl.classList.add('hidden');
+            }
             var st2 = {keep: 0, add: 0, remove: 0, modify: 0};
             for (var j = 0; j < _ptDiff.length; j++) st2[_ptDiff[j].op] = (st2[_ptDiff[j].op] || 0) + 1;
             document.getElementById('pt-diff-stats').textContent =
@@ -791,6 +1217,9 @@
                 count.textContent = ''; pct.textContent = '';
                 itemEl.textContent = '';
                 errBox.innerHTML = ''; errBox.classList.add('hidden');
+                // 提示框被 complete 借去显示 warnings 时会转成琥珀色，下一轮必须转回
+                // 错误色 —— 否则这次真出错了，红框还是上一轮的暖色调
+                errBox.classList.remove('text-amber-700', 'bg-amber-50');
                 closeBtn.classList.add('hidden');
                 cancelBtn.classList.remove('hidden');
                 modal.classList.remove('hidden');
@@ -799,7 +1228,8 @@
             function finalize(success, subtitleText) {
                 if (seq !== _progressSeq) return;
                 if (!success) {
-                    bar.style.width = '100%';
+                    // 与 fatal 同一条口径：红色表示已结束，但条**不拉满** ——
+                    // 停在失败/中断处，才和左边「5 / 6 · 83%」的文字对得上
                     bar.classList.remove('bg-primary'); bar.classList.add('bg-red-500');
                 }
                 document.getElementById('progress-subtitle').textContent = subtitleText;
@@ -868,17 +1298,49 @@
                                 streamFinished = true;
                                 bar.style.width = '100%';
                                 pct.textContent = '100%';
-                                itemEl.textContent = '';
-                                if (summaryFn) {
-                                    document.getElementById('progress-subtitle').textContent = summaryFn(data);
-                                }
+                                // 阶段计数也要跟上：complete 不带 total，取最后一个
+                                // progress 的。否则左边停在「5 / 6」右边写着 100%，
+                                // 两处自相矛盾，看着像卡在第五步没跑完。
+                                var _tn = (_lastProgress && _lastProgress.total) || 6;
+                                count.textContent = _tn + ' / ' + _tn;
                                 cancelBtn.classList.add('hidden');
                                 closeBtn.classList.remove('hidden');
                                 if (onComplete) onComplete(data);
+                                var _warns = data.warnings || [];
+                                var _sub = document.getElementById('progress-subtitle');
+                                if (_warns.length) {
+                                    // 有提示就留在屏幕上等用户读：自动关掉会让「本次未勾选
+                                    // 参考图」这类说明一闪而过，而它恰恰解释了结果为什么不对
+                                    itemEl.textContent = '';
+                                    _sub.textContent = '完成（有 ' + _warns.length + ' 条提示）';
+                                    errBox.innerHTML = '';
+                                    errBox.classList.remove('hidden', 'text-red-600', 'bg-red-50');
+                                    errBox.classList.add('text-amber-700', 'bg-amber-50');
+                                    for (var _wi = 0; _wi < _warns.length; _wi++) {
+                                        var _wd = document.createElement('div');
+                                        _wd.textContent = '· ' + _warns[_wi];
+                                        errBox.appendChild(_wd);
+                                    }
+                                } else {
+                                    itemEl.textContent = '';
+                                    // 兜底写「完成」：调用点传 null 时（本页就是）
+                                    // 若不兜底，这句会一直停在「正在准备...」直到弹窗
+                                    // 关掉 —— 完成态配「正在准备」自相矛盾
+                                    _sub.textContent = summaryFn ? summaryFn(data) : '完成';
+                                    // 结果已经渲染在右侧面板了，弹窗没必要再挡着。留 0.9 秒
+                                    // 让进度条走满，再自动关。seq 守卫：这 0.9 秒里若又开了
+                                    // 新一轮（seq 变了），别把新弹窗关掉。
+                                    setTimeout(function() {
+                                        if (seq === _progressSeq) closeProgressModal();
+                                    }, 900);
+                                }
                             } else if (currentEventType === 'fatal') {
                                 streamFinished = true;
-                                bar.style.width = '100%';
+                                // 不把条拉满：满格配着「5 / 6 · 83%」的文字是在同时说
+                                // 「全跑完了」和「停在第 5 步」两件事。停在失败处变红，
+                                // 条与文字一致，一眼看出挂在哪一步；红色本身就表示已结束。
                                 bar.classList.remove('bg-primary'); bar.classList.add('bg-red-500');
+                                document.getElementById('progress-subtitle').textContent = '失败';
                                 itemEl.textContent = data.error;
                                 cancelBtn.classList.add('hidden');
                                 closeBtn.classList.remove('hidden');
@@ -942,12 +1404,54 @@
         }
 
         // === 初始化 ===
+        // 会话从服务端拉：?sid= 指定则加载它，否则恢复最近一个；一个都没有就新建。
+        // 用 URL 参数而不是 localStorage —— 会话本来就存在服务端，前端不该再存一份
+        // （两份状态必然不一致，且 localStorage 在隐私模式下会抛异常）。
         (function init() {
-            var h = decodeURIComponent(location.hash.replace(/^#/, ''));
-            if (h && _images.indexOf(h) >= 0) selectImage(h);
-            else if (_images.length) selectImage(_images[0]);
-            else renderFileList();
+            document.getElementById('pt-upload-input').addEventListener('change', function(e) {
+                uploadImages(e.target.files);
+                e.target.value = '';   // 清掉，否则连续选同一个文件不会再触发 change
+            });
+            var want = '';
+            try {
+                want = new URLSearchParams(location.search).get('sid') || '';
+            } catch (e) { want = ''; }
+
+            if (want) {
+                // 地址栏里的 sid 可能已经不存在（书签 / 历史记录 / 会话被删过）。
+                // 不能停在这种状态：页面看起来是好的，但每次点「运行」只弹一句
+                // 「会话未就绪」，用户不知道该干什么。落到新建一个空会话，页面立刻可用。
+                loadSession(want, null, function() {
+                    showNotification('该会话不存在（可能已被删除），已新建一个空会话', 'warning');
+                    newSessionQuiet();
+                });
+                return;
+            }
+            fetch('/prompt_sessions')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.current) loadSession(data.current);
+                    else newSessionQuiet();
+                })
+                .catch(function() { newSessionQuiet(); });
         })();
+
+        // 静默新建（首次进入且一个会话都没有时用：不弹确认框，用户还没干什么）
+        function newSessionQuiet() {
+            fetch('/prompt_sessions/new', {method: 'POST'})
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    // 与 newSession 一样要挡 error：否则 _sid 变成 undefined，
+                    // 侧栏显示 "undefined"、后续请求全打到 /prompt_sessions/undefined/...
+                    if (data.error) { showNotification(data.error, 'error'); return; }
+                    _sid = data.sid;
+                    applyImages(data);
+                    setInputs('', '');
+                    updateSessionInfo({});
+                    try { history.replaceState(null, '', '?sid=' + encodeURIComponent(_sid)); } catch (e) {}
+                })
+                .catch(function() { showNotification('初始化失败，请刷新页面', 'error'); });
+        }
     </script>
 </body>
 </html>
