@@ -199,11 +199,25 @@
         </div>
     </div>
 
-    <!-- 背景移除弹窗（ToonOut/BiRefNet） -->
+    <!-- 背景移除弹窗（ToonOut/BiRefNet，可选 SAM2 描点门控） -->
     <div id="remove-bg-modal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 hidden">
-        <div class="bg-white rounded-xl shadow-xl w-80 p-6">
+        <div class="bg-white rounded-xl shadow-xl w-96 p-6">
             <h3 class="text-lg font-semibold text-gray-800 mb-1">背景移除</h3>
             <p class="text-xs text-gray-400 mb-4">ToonOut（BiRefNet）动漫背景移除</p>
+
+            <!-- 识别方式：自动 = 整图前景全留（旧行为）；SAM2 描点 = 用户点选目标 -->
+            <div class="mb-5">
+                <p class="text-sm text-gray-600 mb-2">识别方式</p>
+                <label class="flex items-start gap-2 text-sm text-gray-700 mb-1.5 cursor-pointer">
+                    <input type="radio" name="removebg-detect" value="auto" checked class="mt-0.5 cursor-pointer">
+                    <span>自动<span class="text-xs text-gray-400 block">整图识别前景，认错时无法干预</span></span>
+                </label>
+                <label id="removebg-detect-sam2-label" class="flex items-start gap-2 text-sm text-gray-700 cursor-pointer">
+                    <input type="radio" name="removebg-detect" value="sam2" class="mt-0.5 cursor-pointer">
+                    <span>SAM2 描点<span id="removebg-sam2-hint" class="text-xs text-gray-400 block">点选要保留/排除的人物，再抠图</span></span>
+                </label>
+            </div>
+
             <div class="mb-5">
                 <p class="text-sm text-gray-600 mb-2">输出模式</p>
                 <label class="flex items-center gap-2 text-sm text-gray-700 mb-1.5 cursor-pointer">
@@ -224,6 +238,32 @@
                 </button>
             </div>
         </div>
+    </div>
+
+    <!-- SAM2 描点工具条（仅描点模式显示，与裁剪/笔刷共用覆盖层 canvas 互斥） -->
+    <div id="sam2-toolbar" class="hidden px-3 py-2 bg-gray-50 border-b border-gray-200 flex items-center gap-2 text-xs flex-wrap">
+        <span class="text-gray-500 font-medium">描点</span>
+        <span class="text-gray-400">左键=保留 · Shift/右键=排除</span>
+        <span id="sam2-point-count" class="text-gray-500">0 个锚点</span>
+        <div class="h-4 w-px bg-gray-300 mx-1"></div>
+        <span class="text-gray-500">候选</span>
+        <div id="sam2-candidates" class="flex gap-1"></div>
+        <div class="h-4 w-px bg-gray-300 mx-1"></div>
+        <button id="btn-sam2-undo" class="px-2 py-1 bg-white border border-gray-300 rounded hover:bg-gray-100 transition-colors disabled:opacity-40 disabled:cursor-not-allowed" onclick="sam2UndoPoint()" disabled>
+            <i class="fa fa-undo mr-1"></i>撤销点
+        </button>
+        <button id="btn-sam2-clear" class="px-2 py-1 bg-white border border-gray-300 rounded hover:bg-gray-100 transition-colors disabled:opacity-40 disabled:cursor-not-allowed" onclick="sam2ClearPoints()" disabled>
+            <i class="fa fa-times mr-1"></i>清除
+        </button>
+        <button id="btn-sam2-invert" class="px-2 py-1 bg-white border border-gray-300 rounded hover:bg-gray-100 transition-colors disabled:opacity-40 disabled:cursor-not-allowed" onclick="sam2ToggleInvert()" disabled title="切换「保留选中的」/「排除选中的」">
+            <i class="fa fa-exchange mr-1"></i><span id="sam2-invert-label">保留选中</span>
+        </button>
+        <button id="btn-sam2-ok" class="ml-auto px-4 py-1.5 bg-accent text-white rounded text-sm font-medium hover:bg-accent/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed" onclick="sam2Apply()" disabled>
+            <i class="fa fa-eraser mr-1.5"></i>按此遮罩移除
+        </button>
+        <button class="px-3 py-1.5 bg-gray-200 hover:bg-gray-300 rounded text-sm font-medium transition-colors" onclick="exitSam2Mode()">
+            退出
+        </button>
     </div>
 
     <!-- 缩放图像弹窗（保持比例） -->
@@ -497,8 +537,10 @@
             editorDirty = false;
             cropRect = null;
             dragMode = null;
-            // 切图时退出笔刷模式：快照与撤销栈都是上一张图的，留着会在新图上涂错像素
+            // 切图时退出笔刷/描点模式：快照、撤销栈、锚点都是上一张图的，
+            // 留着会在新图上涂错像素、或把上一张的 mask 叠到新图上（静默错位）
             if (brushMode) exitBrushMode();
+            if (_sam2Mode) exitSam2Mode();
             updateNavUI();
             loadImageIntoEditor(allImages[index]);
             // 预取下一张图片字节到浏览器缓存（不带 ?t= 缓存破坏，因为下一张是独立文件未编辑过），
@@ -581,8 +623,9 @@
             const img = document.getElementById('editor-img');
             // 换图后 alpha 检测缓存失效（上一张有透明不代表这一张有）
             delete img.dataset.hasAlpha;
-            // 新图上笔刷快照已失效：保存成功后的预览刷新也走这里，强制退出笔刷模式
+            // 新图上笔刷快照/描点锚点已失效：保存成功后的预览刷新也走这里，强制退出
             if (brushMode) exitBrushMode();
+            if (_sam2Mode) exitSam2Mode();
             // 清理上一次放大产生的 objectURL（若 displayImg 当前用的是 blob URL）
             if (_displayObjectUrl) {
                 URL.revokeObjectURL(_displayObjectUrl);
@@ -792,8 +835,10 @@
         // 进入/退出裁剪模式
         function toggleCropMode() {
             if (currentIndex < 0) return;
-            // 互斥共用 canvas：进裁剪先退出笔刷模式（反向互斥在 toggleBrushMode 内）
+            // 互斥共用 canvas：进裁剪先退出笔刷/描点模式
+            //（反向互斥在 toggleBrushMode 与 enterSam2Mode 内）
             if (!cropMode && brushMode) exitBrushMode();
+            if (!cropMode && _sam2Mode) exitSam2Mode();
             cropMode = !cropMode;
             const toolbar = document.getElementById('crop-toolbar');
             if (toolbar) toolbar.classList.toggle('hidden', !cropMode);
@@ -1369,8 +1414,317 @@
             const bgColor = mode === 'color'
                 ? document.getElementById('removebg-bg-color').value
                 : 'transparent';
+            const detect = document.querySelector('input[name="removebg-detect"]:checked').value;
             closeRemoveBgModal();
+            if (detect === 'sam2') {
+                // 描点模式：先让用户点选目标，再带着锚点走 /remove_background
+                enterSam2Mode(bgColor);
+                return;
+            }
             runRemoveBg(bgColor);
+        }
+
+        // ===== SAM2 描点门控（背景移除的交互式前置）=====
+        // 分工：SAM2 决定「抠谁」（用户点选），ToonOut 决定「边缘多精细」（模型能力）。
+        // alpha_out = ToonOut(img) * gate(SAM2_mask)，门控在服务端算（见 birefnet_utils.apply_gate）。
+        //
+        // 状态与守卫（与 Alpha 笔刷同款，别省）：
+        //   _sam2Seq  —— 预测请求的序号守卫。用户连点多次 / 已切图时，过期响应必须丢弃，
+        //                否则会把上一张图的 mask 叠到当前图上（静默错位）。
+        //   _sam2Mode —— 与裁剪/笔刷模式互斥（三者共用覆盖层 canvas）。
+        let _sam2Mode = false;
+        let _sam2Points = [];      // [{x, y, label}] 显示坐标 + 1=保留/0=排除
+        let _sam2Cands = [];       // 候选 mask 的 PNG objectURL（最多 3 个）
+        let _sam2CandIdx = 0;
+        let _sam2Invert = false;   // false=保留选中, true=排除选中
+        let _sam2Seq = 0;
+        let _sam2MaskUrl = null;   // 当前叠加预览的 mask objectURL
+        let _sam2BgColor = 'transparent';
+
+        function enterSam2Mode(bgColor) {
+            if (currentIndex < 0 || !originalImage) return;
+            _sam2BgColor = bgColor || 'transparent';
+            // 三者互斥：描点与裁剪、Alpha 笔刷共用 #editor-canvas
+            if (cropMode) toggleCropMode();
+            if (brushMode) exitBrushMode();
+            _sam2Mode = true;
+            _sam2Points = [];
+            _sam2Cands = [];
+            _sam2CandIdx = 0;
+            _sam2Invert = false;
+            document.getElementById('sam2-toolbar').classList.remove('hidden');
+            updateSam2Toolbar();
+            editorArea.style.cursor = 'crosshair';
+            editorCanvas.style.cursor = 'crosshair';
+            showNotification('正在加载 SAM2 模型（首次约 10 秒）...', 'info');
+            // 预热：加载模型 + 算好 embedding，之后每次点击才是实时的
+            const idx = currentIndex;
+            fetch('/sam2_load?target=' + encodeURIComponent(allImages[idx]), {method: 'POST'})
+                .then(r => r.json())
+                .then(d => {
+                    if (currentIndex !== idx) return;   // 已切图：丢弃
+                    if (!d.success) {
+                        showNotification(d.error || 'SAM2 加载失败', 'error');
+                        sam2MarkUnavailable(d.error || '');
+                        return;
+                    }
+                    showNotification('SAM2 就绪，点击人物开始描点', 'success');
+                })
+                .catch(() => showNotification('SAM2 加载请求失败', 'error'));
+        }
+
+        // SAM2 不可用时把选项置灰并说明原因——不能只让按钮点了没反应
+        function sam2MarkUnavailable(reason) {
+            const label = document.getElementById('removebg-detect-sam2-label');
+            const radio = label.querySelector('input');
+            radio.disabled = true;
+            label.classList.add('opacity-50');
+            document.getElementById('removebg-sam2-hint').textContent =
+                reason ? reason.slice(0, 80) : '不可用（未安装 sam2 或权重缺失）';
+            exitSam2Mode();
+        }
+
+        function exitSam2Mode() {
+            _sam2Mode = false;
+            _sam2Points = [];
+            _sam2Cands = [];
+            _sam2CandIdx = 0;
+            document.getElementById('sam2-toolbar').classList.add('hidden');
+            revokeSam2Cands();
+            clearSam2Overlay();
+            editorArea.style.cursor = 'default';
+            editorCanvas.style.cursor = 'default';
+            updateSam2Toolbar();
+        }
+
+        function updateSam2Toolbar() {
+            const n = _sam2Points.length;
+            document.getElementById('sam2-point-count').textContent = n + ' 个锚点';
+            const has = n > 0;
+            document.getElementById('btn-sam2-undo').disabled = !has;
+            document.getElementById('btn-sam2-clear').disabled = !has;
+            document.getElementById('btn-sam2-invert').disabled = !has;
+            document.getElementById('btn-sam2-ok').disabled = !has;
+            document.getElementById('sam2-invert-label').textContent =
+                _sam2Invert ? '排除选中' : '保留选中';
+        }
+
+        function revokeSam2Cands() {
+            _sam2Cands.forEach(u => { try { URL.revokeObjectURL(u); } catch (e) {} });
+            _sam2Cands = [];
+        }
+
+        // 显示坐标 → 原图像素坐标（canvas 与 img 同尺寸，复用裁剪的换算）
+        function sam2ImgPoint(p) {
+            const img = document.getElementById('editor-img');
+            const b = imgBoundsInCanvas();
+            const sx = originalImage.naturalWidth / img.clientWidth;
+            const sy = originalImage.naturalHeight / img.clientHeight;
+            return [(p.x - b.x) * sx, (p.y - b.y) * sy];
+        }
+
+        // 锚点点选：左键 = 保留(1)，Shift+左键 或 右键 = 排除(0)
+        editorArea?.addEventListener('mousedown', function(e) {
+            if (!_sam2Mode) return;
+            if (editorScale > 1) return;
+            const isRight = e.button === 2;
+            if (e.button !== 0 && !isRight) return;
+            const p = getCanvasCoords(e);
+            const label = (isRight || e.shiftKey) ? 0 : 1;
+            _sam2Points.push({x: p.x, y: p.y, label: label});
+            drawSam2Overlay();
+            updateSam2Toolbar();
+            runSam2Predict();
+            e.preventDefault();
+        });
+        // 右键要能用，必须屏蔽浏览器菜单
+        editorArea?.addEventListener('contextmenu', function(e) {
+            if (_sam2Mode) e.preventDefault();
+        });
+
+        function runSam2Predict() {
+            if (!_sam2Points.length) return;
+            const seq = ++_sam2Seq;      // 序号守卫：过期响应丢弃
+            const idx = currentIndex;
+            const filename = allImages[idx];
+            const pts = _sam2Points.map(p => sam2ImgPoint(p));
+            const labels = _sam2Points.map(p => p.label);
+            fetch('/sam2_predict', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({target: filename, points: pts, labels: labels,
+                                      index: _sam2CandIdx})
+            })
+            .then(r => {
+                const ct = r.headers.get('Content-Type') || '';
+                if (ct.indexOf('application/json') >= 0) {
+                    return r.json().then(d => { throw new Error(d.error || '预测失败'); });
+                }
+                return r.blob();
+            })
+            .then(blob => {
+                // 二次校验：请求期间用户可能已切图或又点了别处
+                if (seq !== _sam2Seq || currentIndex !== idx) return;
+                showSam2Mask(URL.createObjectURL(blob));
+            })
+            .catch(err => {
+                if (seq !== _sam2Seq) return;
+                showNotification(err.message || 'SAM2 预测失败', 'error');
+            });
+        }
+
+        // 把 mask 作为半透明红色叠加层显示（不修改图片本身，仅预览）
+        function showSam2Mask(url) {
+            clearSam2Overlay();
+            _sam2MaskUrl = url;
+            const canvas = document.getElementById('editor-canvas');
+            const ctx = canvas.getContext('2d');
+            const img = document.getElementById('editor-img');
+            const b = imgBoundsInCanvas();
+            const m = new Image();
+            m.onload = function() {
+                // 在图片内容矩形内绘制：mask 是原图分辨率，缩放到显示尺寸
+                ctx.save();
+                ctx.globalAlpha = 0.45;
+                ctx.drawImage(m, b.x, b.y, b.w, b.h);
+                ctx.restore();
+                drawSam2Points(ctx);
+            };
+            m.src = url;
+        }
+
+        function drawSam2Points(ctx) {
+            _ctx = ctx;
+            drawSam2DotsOnly(ctx);
+        }
+        let _ctx = null;
+
+        function drawSam2DotsOnly(ctx) {
+            const r = 5;
+            _sam2Points.forEach(p => {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+                ctx.fillStyle = p.label === 1 ? '#22c55e' : '#ef4444';
+                ctx.fill();
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = '#ffffff';
+                ctx.stroke();
+            });
+        }
+
+        // 重画整个覆盖层：mask 预览 + 锚点。mask 图已 load 过，直接复用 Image
+        function drawSam2Overlay() {
+            const canvas = document.getElementById('editor-canvas');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (_sam2MaskUrl) {
+                const img = document.getElementById('editor-img');
+                const b = imgBoundsInCanvas();
+                const m = new Image();
+                m.onload = function() {
+                    ctx.save();
+                    ctx.globalAlpha = 0.45;
+                    ctx.drawImage(m, b.x, b.y, b.w, b.h);
+                    ctx.restore();
+                    drawSam2DotsOnly(ctx);
+                };
+                m.src = _sam2MaskUrl;
+            } else {
+                drawSam2DotsOnly(ctx);
+            }
+        }
+
+        function clearSam2Overlay() {
+            if (_sam2MaskUrl) {
+                try { URL.revokeObjectURL(_sam2MaskUrl); } catch (e) {}
+                _sam2MaskUrl = null;
+            }
+            const canvas = document.getElementById('editor-canvas');
+            canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+        }
+
+        function sam2UndoPoint() {
+            _sam2Points.pop();
+            clearSam2Overlay();
+            updateSam2Toolbar();
+            if (_sam2Points.length) runSam2Predict();
+            else { _sam2Cands.forEach(u => URL.revokeObjectURL(u)); _sam2Cands = []; }
+        }
+        function sam2ClearPoints() {
+            _sam2Points = [];
+            _sam2CandIdx = 0;
+            clearSam2Overlay();
+            revokeSam2Cands();
+            updateSam2Toolbar();
+        }
+        function sam2ToggleInvert() {
+            _sam2Invert = !_sam2Invert;
+            updateSam2Toolbar();
+        }
+
+        // 按当前遮罩执行背景移除（带门控）。锚点重新发给后端，不传 mask。
+        function sam2Apply() {
+            if (!_sam2Points.length) return;
+            const idx = currentIndex;
+            const filename = allImages[idx];
+            const pts = _sam2Points.map(p => sam2ImgPoint(p));
+            const labels = _sam2Points.map(p => p.label);
+            const gateMode = _sam2Invert ? 'exclude' : 'include';
+            const url = '/remove_background?target=' + encodeURIComponent(filename) +
+                        '&bg_color=' + encodeURIComponent(_sam2BgColor) +
+                        '&gate_mode=' + gateMode +
+                        '&gate_index=' + _sam2CandIdx +
+                        '&points=' + encodeURIComponent(JSON.stringify(pts)) +
+                        '&labels=' + encodeURIComponent(JSON.stringify(labels));
+            _removebgBusy = true;
+            updateButtonStates();
+            fetch(url, {method: 'POST'})
+                .then(r => {
+                    const ct = r.headers.get('Content-Type') || '';
+                    if (ct.indexOf('application/json') >= 0) {
+                        return r.json().then(d => { throw new Error(d.error || '背景移除失败'); });
+                    }
+                    if (!r.ok) return r.text().then(t => { throw new Error(t || '服务器错误'); });
+                    return r.blob();
+                })
+                .then(blob => {
+                    if (currentIndex !== idx) { _removebgBusy = false; updateButtonStates(); return; }
+                    exitSam2Mode();
+                    const objectUrl = URL.createObjectURL(blob);
+                    const newImg = new Image();
+                    newImg.onload = function() {
+                        if (currentIndex !== idx) {
+                            URL.revokeObjectURL(objectUrl);
+                            _removebgBusy = false; updateButtonStates(); return;
+                        }
+                        originalImage = newImg;
+                        editorDirty = true;
+                        const displayImg = document.getElementById('editor-img');
+                        displayImg.onload = function() {
+                            fitImageToEditor();
+                            updateImageInfo();
+                            _removebgBusy = false;
+                            updateButtonStates();
+                            showNotification('背景移除完成（SAM2 描点），点击保存以覆盖原图', 'info');
+                        };
+                        if (_displayObjectUrl && _displayObjectUrl !== objectUrl) {
+                            URL.revokeObjectURL(_displayObjectUrl);
+                        }
+                        _displayObjectUrl = objectUrl;
+                        displayImg.src = objectUrl;
+                    };
+                    newImg.onerror = function() {
+                        URL.revokeObjectURL(objectUrl);
+                        _removebgBusy = false; updateButtonStates();
+                        showNotification('结果解码失败', 'error');
+                    };
+                    newImg.src = objectUrl;
+                })
+                .catch(err => {
+                    _removebgBusy = false;
+                    updateButtonStates();
+                    showNotification(err.message || '请求失败', 'error');
+                });
         }
         // 后端 ToonOut 背景移除，前端暂存（editorDirty），点保存才覆盖原图
         function runRemoveBg(bgColor) {
@@ -1505,8 +1859,9 @@
                     showNotification('当前图片没有透明通道（先做背景移除或使用透明 PNG）', 'warning');
                     return;
                 }
-                // 互斥共用 canvas：进笔刷先退出裁剪模式
+                // 互斥共用 canvas：进笔刷先退出裁剪/描点模式
                 if (cropMode) toggleCropMode();
+                if (_sam2Mode) exitSam2Mode();
                 if (!enterBrushMode()) return;
             } else {
                 exitBrushMode();
@@ -2009,8 +2364,9 @@
             editorDirty = false;
             cropRect = null;
             dragMode = null;
-            // 重置丢弃全部编辑：笔刷快照与撤销栈一并作废
+            // 重置丢弃全部编辑：笔刷快照、描点锚点一并作废
             if (brushMode) exitBrushMode();
+            if (_sam2Mode) exitSam2Mode();
             // 退出裁剪模式
             if (cropMode) {
                 cropMode = false;
@@ -2047,10 +2403,15 @@
                 : '<i class="fa fa-eraser mr-1.5"></i> 背景移除';
             // Alpha 修补按钮：仿 btn-crop 的 toggle 文案；与暂存态不冲突（它修饰的就是暂存结果）
             const brushBtn = document.getElementById('btn-brush');
-            brushBtn.disabled = currentIndex < 0 || _removebgBusy;
+            brushBtn.disabled = currentIndex < 0 || _removebgBusy || _sam2Mode;
             brushBtn.innerHTML = brushMode
                 ? '<i class="fa fa-times mr-1.5"></i> 退出修补'
                 : '<i class="fa fa-paint-brush mr-1.5"></i> Alpha 修补';
+            // 描点模式进行中：裁剪与旋转也禁用（三者都要独占覆盖层/落盘语义）
+            if (_sam2Mode) {
+                document.getElementById('btn-crop').disabled = true;
+                document.getElementById('btn-rotate').disabled = true;
+            }
         }
 
         // showNotification / escapeHtml 在 /static/js/tageditor-common.js（四页共享）

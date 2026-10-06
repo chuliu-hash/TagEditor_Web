@@ -37,3 +37,6 @@ transformers==5.12.1
 kornia==0.8.3
 einops==0.8.2
 timm==1.0.27
+# SAM2 描点门控（背景移除时点选要抠的人物）：需 Python ≥3.10。
+# 依赖 hydra-core/iopath/tqdm；torch/torchvision 用上面钉的版本即可。
+sam2==1.1.0

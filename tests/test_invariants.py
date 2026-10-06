@@ -708,8 +708,8 @@ def test_nav_link_to_danbooru_page_has_one_name():
 _FA47_ICONS = frozenset("""
     adjust arrow-down arrow-right arrow-up bar-chart book caret-down caret-up
     check chevron-down chevron-left chevron-right clipboard columns crop database
-    desktop diamond download eraser exclamation-circle exclamation-triangle expand
-    external-link eye eye-slash file-text-o folder-open history i-cursor image
+    desktop diamond download eraser exchange exclamation-circle exclamation-triangle
+    expand external-link eye eye-slash file-text-o folder-open history i-cursor image
     info-circle keyboard-o language link lock long-arrow-right magic paint-brush
     pencil picture-o plus plus-square question-circle refresh repeat rotate-left
     save search sort-asc sort-desc spin spinner tag tags times trash undo unlock
@@ -2071,6 +2071,152 @@ def test_rebuild_fts_uses_contentless_delete():
     src = src_of('build_tag_db')
     ok("tags_fts) VALUES('delete-all')" in src,
        "重建必须走 contentless 的 'delete-all'（普通 DELETE FROM 对 contentless 表抛异常）")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SAM2 描点门控（背景移除的交互式前置）
+# ═══════════════════════════════════════════════════════════════════════════
+
+@case
+def test_gate_dilates_before_feathering():
+    """门控必须先 dilate：不外扩会把 SAM2 边界外的发丝整圈削掉（比不门控更差）。
+
+    这是本功能最容易「改坏了还看不出来」的一处：删掉 dilate 之后程序不报错、
+    结果更干净，只是人物边缘少了一圈 —— 与「模型变好了」难以区分。
+    实测（100×100 合成图，gate 比 alpha 小 10px）：
+      dilate=20 → 边界外 alpha ≈ 1.0（保留）
+      dilate=0  → 边界外 alpha = 0.0（被削掉）
+    """
+    import numpy as np
+    from tageditor.image.sam2_utils import apply_gate
+
+    alpha = np.zeros((100, 100), dtype=np.float32)
+    alpha[20:80, 20:80] = 1.0
+    gate = np.zeros((100, 100), dtype=bool)
+    gate[30:70, 30:70] = True          # 比 alpha 小 10px
+
+    kept = apply_gate(alpha, gate, mode='include', dilate_px=20, feather_px=10)
+    ok(float(kept[25, 25]) > 0.9,
+       'dilate 后边界外应保留（实测 %.3f）——删掉 dilate 会削掉这圈发丝' % float(kept[25, 25]))
+
+    shaved = apply_gate(alpha, gate, mode='include', dilate_px=0, feather_px=0)
+    eq(float(shaved[25, 25]), 0.0, '无 dilate 时边界外被削掉（这正是要避免的退化）')
+
+
+@case
+def test_gate_bool_mask_is_scaled_to_255():
+    """bool mask 必须先 ×255 再除 255 —— 直接用 astype(uint8) 会得到 0/1。
+
+    `np.bool_.astype(np.uint8)` 给的是 0/1 而非 0/255，后面 `g / 255.0` 会把
+    整个 gate 压成约 0.004：门控后 alpha 全灭，看起来像「模型坏了」，
+    而日志里什么都没有（实测踩到过，所以这条断言盯的就是那个乘法）。
+    """
+    import numpy as np
+    from tageditor.image.sam2_utils import apply_gate
+
+    alpha = np.ones((40, 40), dtype=np.float32)
+    gate = np.ones((40, 40), dtype=bool)      # 全 True
+    out = apply_gate(alpha, gate, mode='include', dilate_px=0, feather_px=0)
+    ok(float(out.mean()) > 0.99,
+       '全 True 的 bool mask 门控后应保留全部（实测均值 %.4f）——'
+       '若接近 0 说明漏了 ×255' % float(out.mean()))
+
+
+@case
+def test_gate_off_is_pixel_identical_to_old_path():
+    """gate_mask=None 时，remove_background 必须与旧路径**逐像素一致**。
+
+    向后兼容不能只是「没报错」：门控是与归一化、合成共用一个函数体的，
+    改错一处（比如把 mask 从 float 改成 uint8 再合成）会让所有**不门控**的
+    普通抠图都悄悄变样，而用户只会觉得「以前抠得好好的怎么变了」。
+
+    用假模型（不加载真权重）验证分支，与 tests/test_mutations.py 的变异配合。
+    """
+    import numpy as np
+    import torch
+    import tageditor.image.birefnet_utils as bu
+
+    class _Fake(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.dummy = torch.nn.Parameter(torch.zeros(1))
+        def forward(self, x):
+            return [torch.ones(1, 1, 1024, 1024) * 0.7]
+
+    img = np.full((32, 24, 3), 128, dtype=np.uint8)
+    m = _Fake()
+    old = bu.remove_background(m, img, bg_color=None)
+    new = bu.remove_background(m, img, bg_color=None, gate_mask=None)
+    ok(np.array_equal(old, new),
+       'gate_mask=None 必须与旧调用逐像素一致（否则所有不门控的抠图都悄悄变样）')
+
+
+@case
+def test_sam2_routes_validate_inputs_and_never_trust_client_mask():
+    """SAM2 路由的输入校验与「只收点坐标」契约。
+
+    - `/sam2_predict` 与 `/remove_background` 的 gate 分支必须校验 points/labels
+      等长（不等长会在 numpy reshape 处抛 ValueError → 500，文案与参数无关）。
+    - `points` 必须非空才能门控（空锚点意味着「没有目标」，不该静默当成全选）。
+    - **不得接受前端传来的 mask**：mask 是数 MB 的图，前后端各算一份就有了
+      「两边不一致」的空间；点坐标只有几十字节，服务端重新预测只要 ~30ms。
+    """
+    src = src_of('image_editor')
+    ok('def sam2_load' in src and 'def sam2_predict' in src, '缺少 SAM2 路由')
+    ok("/sam2_load" in src and "/sam2_predict" in src, '缺少 SAM2 路由注册')
+    ok("'labels 必须与 points 等长'" in src or 'labels 必须与 points 等长' in src,
+       '必须校验 labels 与 points 等长')
+    ok('gate_mode must be' not in src and "gate_mode 只能是" in src,
+       'gate_mode 必须白名单校验（非法值应 400 而不是当成 off）')
+    ok("data.get('mask')" not in src,
+       '不得接受前端传来的 mask（点坐标才是契约：服务端自己预测，避免前后端不一致）')
+
+
+@case
+def test_sam2_embedding_cache_key_includes_mtime():
+    """embedding 缓存键必须含 mtime：保存覆盖后图片变了，缓存必须失效。
+
+    只按路径缓存的话，用户「抠图 → 保存 → 再抠」会拿到**上一版图片**的
+    embedding，mask 与画面错位而没有任何报错。与 _cooc_cache / tag_groups
+    的失效口径一致（都是「路径 + mtime + 大小」三件套）。
+    """
+    src = src_of('image_editor')
+    m = re.search(r'def _sam2_image_key\(.*?\n(?=def |\Z)', src, re.S)
+    ok(m, '找不到 _sam2_image_key')
+    body = m.group(0)
+    ok('st_mtime_ns' in body, '缓存键必须含 mtime（否则保存后仍用旧 embedding）')
+    ok('st_size' in body, '缓存键必须含文件大小')
+
+
+@case
+def test_sam2_mode_is_exclusive_with_crop_and_brush():
+    """描点模式必须与裁剪、Alpha 笔刷双向互斥（三者共用 #editor-canvas）。
+
+    只写一边的互斥等于没写：从另一边进入时照样打架 —— 描点的 mask 叠加层会被
+    drawCropOverlay 的 clearRect 抹掉，或裁剪框叠在 mask 上。
+    """
+    src = js_of('image_editor.html')
+    e = _fn_body(src, 'enterSam2Mode')
+    ok('toggleCropMode()' in e or 'exitCrop' in e, '进描点必须先退出裁剪模式')
+    ok('exitBrushMode()' in e, '进描点必须先退出笔刷模式')
+    c = _fn_body(src, 'toggleCropMode')
+    ok('exitSam2Mode()' in c, '进裁剪必须先退出描点模式')
+    b = _fn_body(src, 'toggleBrushMode')
+    ok('exitSam2Mode()' in b, '进笔刷必须先退出描点模式')
+
+
+@case
+def test_sam2_predict_has_sequence_guard():
+    """预测响应必须有序号守卫：连点/切图时过期响应不得覆盖当前画面。
+
+    与 loadSeq / _sessionSeq / _tagChangeSeq 同一类问题 —— 没有守卫时会把
+    上一张图（或上一组锚点）的 mask 叠到当前图上，静默错位且有网络延迟才复现。
+    """
+    src = js_of('image_editor.html')
+    body = _fn_body(src, 'runSam2Predict')
+    ok('++_sam2Seq' in body, '发请求前必须取号')
+    ok('seq !== _sam2Seq' in body, '响应到达时必须校验序号未变')
+    ok('currentIndex !== idx' in body, '响应到达时必须校验未切图')
 
 
 def main():

@@ -151,6 +151,10 @@ python build_tag_db.py stats
 | `REALESRGAN_TILE_PAD` | 分块推理边距 | `10` |
 | `BIREFNET_BASE_DIR` | 背景移除 base 模型目录 | `models/birefnet-base` |
 | `BIREFNET_WEIGHTS` | ToonOut 微调权重 `.pth` | `models/toonout.pth` |
+| `SAM2_CHECKPOINT` | SAM2 描点门控权重（可点选要抠的人物） | `models/sam2.1_hiera_base_plus.pt` |
+| `SAM2_CONFIG` | SAM2 的 config 名（与上面权重必须成对） | `configs/sam2.1/sam2.1_hiera_b+.yaml` |
+| `SAM2_GATE_DILATE_PX` | 门控外扩半径（原图像素，太小会削掉发丝） | `20` |
+| `SAM2_GATE_FEATHER_PX` | 门控羽化半径 | `10` |
 | `PRELOAD_MODELS` | 启动时预热轻量模型（占内存，默认关） | `false` |
 | `PREHEAT_COOC` | 启动时后台预热共现数据（默认开；实测峰值内存 ~558MB，低内存机器可关） | `true` |
 

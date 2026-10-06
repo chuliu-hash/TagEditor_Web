@@ -146,6 +146,7 @@ for mod, pkg, why in [('basicsr', 'basicsr', '超清放大'),
                       ('kornia', 'kornia', '背景移除'),
                       ('einops', 'einops', '背景移除'),
                       ('timm', 'timm', '背景移除'),
+                      ('sam2', 'sam2', '描点抠图'),
                       ('pyarrow', 'pyarrow', '构建标签库'),
                       ('dateutil', 'python-dateutil', '日期解析')]:
     if has(mod):
@@ -179,6 +180,7 @@ print('模型文件（不用的功能可以不管）')
 MODELS = [('models/RealESRGAN_x4plus_anime_6B.pth', '超清放大'),
           ('models/birefnet-base', '背景移除 base'),
           ('models/toonout.pth', '背景移除权重'),
+          ('models/sam2.1_hiera_base_plus.pt', 'SAM2 描点抠图'),
           ('models/wd-eva02-large-tagger-v3/model.onnx', 'WD14 打标')]
 for path, desc in MODELS:
     if os.path.exists(path):

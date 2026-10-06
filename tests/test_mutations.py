@@ -289,8 +289,11 @@ MUTATIONS = [
     # 进笔刷不退出裁剪：两个模式都在覆盖层 canvas 上画，裁剪框会叠在笔画上、
     # 或 drawCropOverlay 的 clearRect 把未烘焙的笔画抹掉
     ('进笔刷不退出裁剪模式（共用 canvas 打架）', 'templates/image_editor.html',
-     'if (cropMode) toggleCropMode();\n                if (!enterBrushMode()) return;',
-     'if (!enterBrushMode()) return;',
+     "                if (cropMode) toggleCropMode();\n"
+     "                if (_sam2Mode) exitSam2Mode();\n"
+     "                if (!enterBrushMode()) return;",
+     "                if (_sam2Mode) exitSam2Mode();\n"
+     "                if (!enterBrushMode()) return;",
      'test_alpha_brush_mode_is_exclusive_with_crop_mode'),
 
     # 「恢复」没有数据来源：画了也是空的。变异把存快照的整块换成清空赋值——
@@ -326,8 +329,10 @@ MUTATIONS = [
 
     # 切图不清笔刷：旧图的快照与撤销栈会在新图上涂错像素
     ('doNavigate 切图不清笔刷状态', 'templates/image_editor.html',
-     "            // 切图时退出笔刷模式：快照与撤销栈都是上一张图的，留着会在新图上涂错像素\n"
+     "            // 切图时退出笔刷/描点模式：快照、撤销栈、锚点都是上一张图的，\n"
+     "            // 留着会在新图上涂错像素、或把上一张的 mask 叠到新图上（静默错位）\n"
      "            if (brushMode) exitBrushMode();\n"
+     "            if (_sam2Mode) exitSam2Mode();\n"
      "            updateNavUI();",
      '            updateNavUI();',
      'test_brush_restore_has_a_source_snapshot'),
@@ -392,6 +397,48 @@ MUTATIONS = [
      '    <script src="/static/js/tageditor-common.js"></script>',
      '    <!-- script tag removed -->',
      'test_shared_js_is_wired_and_not_copied_back'),
+
+    # —— 以下五条针对 SAM2 描点门控 ——
+
+    # 删掉 dilate：程序不报错、结果更「干净」，只是人物边缘少了一圈 ——
+    # 与「模型变好了」难以区分。这类改动必须被断言挡住。
+    ('门控删掉 dilate（削掉边界外发丝）', 'tageditor/image/sam2_utils.py',
+     "    if dilate_px > 0:\n"
+     "        k = int(dilate_px) * 2 + 1\n"
+     "        g = cv2.dilate(g, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))\n",
+     "",
+     'test_gate_dilates_before_feathering'),
+
+    # bool → uint8 不乘 255：gate 被压成约 0.004，门控后 alpha 全灭，
+    # 看起来像「模型坏了」而日志里什么都没有（实测踩到过）
+    ('bool mask 不乘 255（门控后 alpha 全灭）', 'tageditor/image/sam2_utils.py',
+     "    g = (g.astype(np.uint8) * 255) if g.dtype == bool else g.astype(np.uint8)",
+     "    g = g.astype(np.uint8)",
+     'test_gate_bool_mask_is_scaled_to_255'),
+
+    # embedding 缓存键去掉 mtime：用户「抠图 → 保存 → 再抠」拿到上一版图片的
+    # embedding，mask 与画面错位且无任何报错
+    ('SAM2 embedding 缓存键去掉 mtime', 'tageditor/image/image_editor.py',
+     "        return (os.path.abspath(fpath), st.st_mtime_ns, st.st_size)",
+     "        return os.path.abspath(fpath)",
+     'test_sam2_embedding_cache_key_includes_mtime'),
+
+    # 去掉预测的序号守卫：连点/切图时过期响应覆盖当前画面（静默错位，
+    # 只在有网络延迟时复现 —— 本机快得察觉不到，正是最该守的那种）
+    ('SAM2 预测去掉序号守卫（过期响应覆盖画面）', 'templates/image_editor.html',
+     "                if (seq !== _sam2Seq || currentIndex !== idx) return;",
+     "                if (false) return;",
+     'test_sam2_predict_has_sequence_guard'),
+
+    # 进描点不退出裁剪：两者共用 #editor-canvas，mask 叠加层会被
+    # drawCropOverlay 的 clearRect 抹掉，或裁剪框叠在 mask 上
+    ('进描点模式不退出裁剪（共用 canvas 打架）', 'templates/image_editor.html',
+     "            if (cropMode) toggleCropMode();\n"
+     "            if (brushMode) exitBrushMode();\n"
+     "            _sam2Mode = true;",
+     "            if (brushMode) exitBrushMode();\n"
+     "            _sam2Mode = true;",
+     'test_sam2_mode_is_exclusive_with_crop_and_brush'),
 ]
 
 
