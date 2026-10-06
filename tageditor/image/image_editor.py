@@ -3,7 +3,8 @@ import os
 import numpy as np
 from io import BytesIO
 from flask import Blueprint, request, jsonify, Response, current_app, send_file, stream_with_context
-from tageditor.core.config import safe_filename, is_within_directory, get_realesrgan_config, get_birefnet_config
+from tageditor.core.config import (safe_filename, is_within_directory, get_realesrgan_config,
+                                   get_birefnet_config, get_sam2_config)
 from tageditor.core.sse_utils import sse_event
 import logging
 
@@ -360,30 +361,161 @@ def _load_birefnet_model(cfg):
     return load_birefnet_model(cfg['base_model_dir'], cfg['toonout_weights'])
 
 
+def _resolve_upload_image(target):
+    """把 query 里的 target 解析为 (filename, abs_path, img_bgr)，失败返回 (None, None, None)。
+
+    单张图片路由的公共前置：GIF 拒绝 → safe_filename → 目录校验 → imread_any →
+    统一成 3 通道 BGR。抽出来是因为 SAM2 的两个路由与 /remove_background 都要它，
+    各写一遍迟早有一处漏掉 `is_within_directory`（那是路径校验的防线）。
+    """
+    import cv2
+    target = (target or '').strip()
+    if not target:
+        return None, None, None
+    filename = safe_filename(target)
+    if os.path.splitext(filename)[1].lstrip('.').lower() == 'gif':
+        return None, None, None
+    upload_dir = os.path.abspath(current_app.config['UPLOAD_FOLDER'])
+    fpath = os.path.abspath(os.path.join(upload_dir, filename))
+    if not is_within_directory(fpath, upload_dir) or not os.path.isfile(fpath):
+        return None, None, None
+    from tageditor.core.image_io import imread_any
+    img = imread_any(fpath, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        return None, None, None
+    # 统一为 3 通道 BGR（BiRefNet / SAM2 都只处理 RGB 内容，alpha 在此丢弃）
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    elif img.ndim == 3 and img.shape[2] == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    return filename, fpath, img
+
+
+def _load_sam2(cfg):
+    """加载 SAM2 predictor 并把当前图片送入（embedding 按文件 mtime 缓存）。"""
+    from tageditor.image.sam2_utils import load_sam2_model, set_image
+    predictor = load_sam2_model(cfg['config'], cfg['checkpoint'])
+    return predictor
+
+
+def _sam2_image_key(fpath):
+    """embedding 缓存键：(路径, mtime_ns, 大小)。保存覆盖后 mtime 变 → 自动失效。"""
+    try:
+        st = os.stat(fpath)
+        return (os.path.abspath(fpath), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+@image_editor_bp.route('/sam2_load', methods=['POST'])
+def sam2_load():
+    """进入描点模式：加载 SAM2 + 把当前图片的 embedding 算好（缓存）。
+
+    query: ?target=<filename>
+    返回 {success, width, height}；SAM2 未安装或权重缺失时返回 400 + 明确文案
+    （前端据此把「SAM2 描点」选项置灰——不能只让按钮点了没反应）。
+    """
+    cfg = get_sam2_config()
+    if not os.path.isfile(cfg['checkpoint']):
+        return jsonify({'success': False,
+                        'error': f"SAM2 权重不存在：{cfg['checkpoint']}\n"
+                                 f"下载 https://dl.fbaipublicfiles.com/segment_anything_2/092824/"
+                                 f"sam2.1_hiera_base_plus.pt 放到 models/"}), 400
+
+    filename, fpath, img = _resolve_upload_image(request.args.get('target'))
+    if img is None:
+        return jsonify({'success': False, 'error': '文件不存在或非法路径'}), 400
+
+    try:
+        predictor = _load_sam2(cfg)
+        from tageditor.image.sam2_utils import set_image
+        set_image(predictor, img, cache_key=_sam2_image_key(fpath))
+    except ImportError as e:
+        return jsonify({'success': False,
+                        'error': f'SAM2 未安装（pip install sam2）：{e}'}), 400
+    except Exception as e:
+        log.error('[SAM2] 加载失败: %s', e)
+        return jsonify({'success': False, 'error': f'SAM2 加载失败: {e}'}), 500
+
+    return jsonify({'success': True,
+                    'width': int(img.shape[1]), 'height': int(img.shape[0]),
+                    'multimask': True})
+
+
+@image_editor_bp.route('/sam2_predict', methods=['POST'])
+def sam2_predict():
+    """按锚点预测 mask，返回 PNG 灰度图（255 = 前景）供前端叠加预览。
+
+    body JSON: {target, points: [[x,y],...], labels: [1,0,...], index: 0}
+      index: multimask 候选下标（0 = score 最高的那个，默认）
+    成功返回 image/png 二进制；失败返回 JSON（前端按 Content-Type 分流）。
+
+    **只收点坐标，不收 mask**：mask 是数 MB 的图，传给前端再传回来既慢又给了
+    「前后端各算一份、两边不一致」的空间；而点坐标只有几十字节，解码只要 ~30ms。
+    """
+    from tageditor.image.sam2_utils import predict_mask, mask_to_png_bytes
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'error': '请求体必须是 JSON 对象'}), 400
+    points = data.get('points')
+    labels = data.get('labels')
+    if not isinstance(points, list) or not points:
+        return jsonify({'success': False, 'error': '缺少 points'}), 400
+    if not isinstance(labels, list) or len(labels) != len(points):
+        return jsonify({'success': False, 'error': 'labels 必须与 points 等长'}), 400
+
+    cfg = get_sam2_config()
+    filename, fpath, img = _resolve_upload_image(data.get('target'))
+    if img is None:
+        return jsonify({'success': False, 'error': '文件不存在或非法路径'}), 400
+
+    try:
+        predictor = _load_sam2(cfg)
+        from tageditor.image.sam2_utils import set_image
+        set_image(predictor, img, cache_key=_sam2_image_key(fpath))
+        cands = predict_mask(predictor, points, labels)
+    except ImportError as e:
+        return jsonify({'success': False, 'error': f'SAM2 未安装：{e}'}), 400
+    except Exception as e:
+        log.error('[SAM2] 预测失败: %s', e)
+        return jsonify({'success': False, 'error': f'SAM2 预测失败: {e}'}), 500
+
+    if not cands:
+        return jsonify({'success': False, 'error': '未预测出掩码（试试换个位置点）'}), 400
+
+    idx = data.get('index', 0)
+    try:
+        idx = max(0, min(int(idx), len(cands) - 1))
+    except (TypeError, ValueError):
+        idx = 0
+    mask, score = cands[idx]
+    png = mask_to_png_bytes(mask)
+    return send_file(BytesIO(png), mimetype='image/png',
+                     download_name='sam2_mask.png')
+
+
 @image_editor_bp.route('/remove_background', methods=['POST'])
 def remove_background():
     """BiRefNet（ToonOut）背景移除（单张）。
 
     query: ?target=<filename>&bg_color=<hex|transparent>
+           &gate_mode=off|include|exclude&points=<json>&labels=<json>
+           &gate_index=<int>
+      gate_mode != off 时为 SAM2 门控模式（描点选目标）：
+      服务端用 points/labels **重新预测** mask（不信任前端传来的 mask），
+      再门控到 ToonOut 的 alpha 上。gate_mode=off 时行为与旧路径**逐像素一致**。
+
     bg_color=transparent 或缺省：输出透明背景 RGBA PNG。
     bg_color=<hex>（如 #ffffff）：前景与该底色混合，输出 RGB PNG。
     成功返回 PNG 二进制（image/png），失败返回 JSON。前端按 Content-Type 区分。
     后端不写盘——落盘交给既有 /process_image（保存）流程。
     """
     import cv2
+    import json as _json
 
-    target = (request.args.get('target') or '').strip()
-    if not target:
-        return jsonify({'success': False, 'error': '缺少 target 参数'}), 400
-
-    filename = safe_filename(target)
-    ext = os.path.splitext(filename)[1].lstrip('.').lower()
-    if ext == 'gif':
-        return jsonify({'success': False, 'error': '不支持 GIF 图片'}), 400
-
-    upload_dir = os.path.abspath(current_app.config['UPLOAD_FOLDER'])
-    fpath = os.path.abspath(os.path.join(upload_dir, filename))
-    if not is_within_directory(fpath, upload_dir) or not os.path.isfile(fpath):
+    filename, fpath, img = _resolve_upload_image(request.args.get('target'))
+    if img is None:
         return jsonify({'success': False, 'error': '文件不存在或非法路径'}), 400
 
     # 解析输出模式：transparent 透明，否则 hex 底色
@@ -393,16 +525,39 @@ def remove_background():
     else:
         bg_color = _parse_bg_color(bg_raw)  # (R,G,B) float32
 
-    # 读取原图（imread_any：cv2.imread 读不了中文路径）
-    from tageditor.core.image_io import imread_any
-    img = imread_any(fpath, cv2.IMREAD_UNCHANGED)
-    if img is None:
-        return jsonify({'success': False, 'error': '无法读取图片'}), 400
-    # 统一为 3 通道 BGR（BiRefNet 只处理 RGB 内容，alpha 通道在此丢弃）
-    if img.ndim == 2:
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-    elif img.ndim == 3 and img.shape[2] == 4:
-        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    # SAM2 门控（可选）：gate_mode=off（默认）时 gate_mask 保持 None，
+    # birefnet_utils.remove_background 走与原实现完全相同的分支。
+    gate_mode = (request.args.get('gate_mode') or 'off').strip().lower()
+    if gate_mode not in ('off', 'include', 'exclude'):
+        return jsonify({'success': False, 'error': "gate_mode 只能是 off/include/exclude"}), 400
+
+    gate_mask = None
+    cfg_sam2 = get_sam2_config()
+    if gate_mode != 'off':
+        try:
+            points = _json.loads(request.args.get('points') or '[]')
+            labels = _json.loads(request.args.get('labels') or '[]')
+        except ValueError as e:
+            return jsonify({'success': False, 'error': f'points/labels 不是合法 JSON：{e}'}), 400
+        if not points:
+            return jsonify({'success': False, 'error': '门控模式必须提供 points'}), 400
+        try:
+            from tageditor.image.sam2_utils import predict_mask, set_image
+            predictor = _load_sam2(cfg_sam2)
+            set_image(predictor, img, cache_key=_sam2_image_key(fpath))
+            cands = predict_mask(predictor, points, labels)
+        except ImportError as e:
+            return jsonify({'success': False, 'error': f'SAM2 未安装：{e}'}), 400
+        except Exception as e:
+            log.error('[SAM2] 门控预测失败: %s', e)
+            return jsonify({'success': False, 'error': f'SAM2 门控预测失败: {e}'}), 500
+        if not cands:
+            return jsonify({'success': False, 'error': '未预测出掩码，无法门控'}), 400
+        try:
+            gi = max(0, min(int(request.args.get('gate_index', 0)), len(cands) - 1))
+        except (TypeError, ValueError):
+            gi = 0
+        gate_mask = cands[gi][0]
 
     # 加载模型（带缓存）
     cfg = get_birefnet_config()
@@ -411,11 +566,15 @@ def remove_background():
     except Exception as e:
         return jsonify({'success': False, 'error': f'模型加载失败: {str(e)}'}), 500
 
-    # 背景移除推理
+    # 背景移除推理（gate_mask 为 None 时 = 旧路径）
     try:
         from tageditor.image.birefnet_utils import remove_background as _remove_bg
-        output = _remove_bg(model, img, bg_color=bg_color)
+        output = _remove_bg(model, img, bg_color=bg_color, gate_mask=gate_mask,
+                            gate_mode=gate_mode if gate_mask is not None else 'include',
+                            dilate_px=cfg_sam2['gate_dilate_px'],
+                            feather_px=cfg_sam2['gate_feather_px'])
     except Exception as e:
+        log.error('[背景移除] 推理失败: %s', e)
         return jsonify({'success': False, 'error': f'背景移除失败: {str(e)}'}), 500
 
     # 编码为 PNG 二进制返回（不写盘）

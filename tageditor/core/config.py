@@ -322,6 +322,33 @@ def get_birefnet_config():
     }
 
 
+# ── SAM2 描点分割（背景移除的交互式前置）────────────────────────────────────
+# 门控参数写死在代码里（与 _PROMPT_* 同样的理由：它们是「调好就不动」的实现细节，
+# 放进 .env 只会让人以为调了有意义）。DILATE 是**必需的**，不是美化项 ——
+# SAM2 的边界比 ToonOut 保守，不外扩会把边界外那圈发丝整圈削掉（比不门控更差）。
+_SAM2_GATE_DILATE_PX = 20    # 门控外扩半径（原图像素）
+_SAM2_GATE_FEATHER_PX = 10   # 门控羽化半径（高斯 σ ≈ 该值 / 2）
+
+
+def get_sam2_config():
+    """每次调用时重新读取 SAM2 配置（背景移除的「描点选目标」前置）。
+
+    ckpt 用 sam2.1_hiera_base_plus（300MB，边界比 small 更准）；
+    权重下载：https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_base_plus.pt
+    config 名是 sam2 包内置的 yaml 路径，与 ckpt 必须成对（错配只报一堆 missing keys）。
+    """
+    load_env()
+    ckpt = os.environ.get('SAM2_CHECKPOINT', 'models/sam2.1_hiera_base_plus.pt')
+    if not os.path.isabs(ckpt):
+        ckpt = str(_PROJECT_ROOT / ckpt)
+    return {
+        'checkpoint': ckpt,
+        'config': os.environ.get('SAM2_CONFIG', 'configs/sam2.1/sam2.1_hiera_b+.yaml'),
+        'gate_dilate_px': int(os.environ.get('SAM2_GATE_DILATE_PX', str(_SAM2_GATE_DILATE_PX))),
+        'gate_feather_px': int(os.environ.get('SAM2_GATE_FEATHER_PX', str(_SAM2_GATE_FEATHER_PX))),
+    }
+
+
 def get_danbooru_config():
     """每次调用时重新读取 Danbooru wiki 抓取配置（用于标签翻译时获取英文释义作参考）。
     抓取 https://danbooru.donmai.us/wiki_pages.json?search[title]=<tag> 取 body 字段。

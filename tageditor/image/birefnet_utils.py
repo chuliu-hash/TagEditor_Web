@@ -98,7 +98,8 @@ def load_birefnet_model(base_model_dir, toonout_weights_path):
     return model
 
 
-def remove_background(model, img_bgr, bg_color=None):
+def remove_background(model, img_bgr, bg_color=None, gate_mask=None,
+                      gate_mode='include', dilate_px=20, feather_px=10):
     """对单张图片执行背景移除。
 
     Args:
@@ -106,6 +107,11 @@ def remove_background(model, img_bgr, bg_color=None):
         img_bgr: cv2 BGR numpy 数组（uint8），来自 cv2.imread(IMREAD_UNCHANGED)。
         bg_color: None 表示输出透明背景（RGBA）；否则为 (R,G,B) float32 数组，
                   将前景与该底色按 alpha 混合，输出 RGB。
+        gate_mask: 可选 (H, W) bool —— SAM2 描点得到的目标掩码。
+                   **None（默认）时行为与旧路径逐像素一致**，这条是回归断言守着的：
+                   有/无门控必须只差门控那一步，不能顺带改到归一化或合成。
+        gate_mode: 'include' 保留 mask 内 / 'exclude' 排除 mask 内。
+        dilate_px / feather_px: 见 sam2_utils.apply_gate —— dilate 是必需的。
 
     Returns:
         bg_color=None: 4 通道 BGRA numpy（uint8）
@@ -138,6 +144,13 @@ def remove_background(model, img_bgr, bg_color=None):
     # mask 转回原图尺寸（默认双线性）
     mask_pil = transforms.ToPILImage()(pred).resize(image.size)
     mask = np.array(mask_pil, dtype=np.float32) / 255.0  # (H, W) 0~1
+
+    # SAM2 门控（可选）：只裁「抠谁」，边缘仍由 ToonOut 的软 mask 决定。
+    # 放在这里而不是路由层：合成底色要用门控后的 alpha，在外面做会漏掉纯色底路径。
+    if gate_mask is not None:
+        from tageditor.image.sam2_utils import apply_gate
+        mask = apply_gate(mask, gate_mask, mode=gate_mode,
+                          dilate_px=dilate_px, feather_px=feather_px)
 
     h, w = mask.shape
     if bg_color is None:
